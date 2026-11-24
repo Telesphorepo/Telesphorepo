@@ -125,7 +125,7 @@
     // Drawn by the Server permissions step; the labels name them in the confirm dialog and errors.
     "oidc.permission_claim": { label: "Group field" },
     "oidc.permission_map": { label: "Permissions of each group" },
-    "oidc.session_ttl": { label: "Sign-in lifetime", help: "After this time, a person must sign in with single sign-on again." },
+    "oidc.session_ttl": { label: "Sign-in lifetime", help: "A person who does not use the app for this time must sign in with single sign-on again." },
     "signin.password_login": {
       label: "Password sign-in",
       help: "With people who publish only, a person who manages (who holds a permission that needs a second factor) signs in with single sign-on.",

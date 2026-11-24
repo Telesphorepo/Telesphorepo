@@ -28,6 +28,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/netrules/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -228,8 +229,19 @@ func New(d *db.DB, set settings.Provider, au *audit.Log, log *slog.Logger) *Serv
 func (s *Service) Load(ctx context.Context) error {
 	now := time.Now().Unix()
 	for _, p := range presets {
-		if err := s.wq.EnsurePresetList(ctx, dbq.EnsurePresetListParams{Name: p.name, Title: p.title,
-			Description: p.description, Source: p.source, CreatedAt: now}); err != nil {
+		err := s.d.Tx(ctx, func(tx *sql.Tx) error {
+			q := dbq.New(tx)
+			if err := q.EnsurePresetList(ctx, dbq.EnsurePresetListParams{Name: p.name, Title: p.title,
+				Description: p.description, Source: p.source, CreatedAt: now}); err != nil {
+				return err
+			}
+			r, err := q.GetIPListName(ctx, p.name)
+			if err != nil {
+				return err
+			}
+			return writeListGrams(ctx, q, r.ID, r.Name, r.Title)
+		})
+		if err != nil {
 			return fmt.Errorf("create preset list %s: %w", p.name, err)
 		}
 	}
@@ -325,6 +337,57 @@ func (s *Service) Lists() []List {
 	for _, st := range m {
 		out = append(out, st.view(false))
 	}
+	sortLists(out)
+	return out
+}
+
+// Search returns the lists whose name or title holds text (folded, namesearch.Text), without
+// their ranges, presets first, then by name: the rows of one gram of ip_list_grams (the gram that
+// namesearch.Gram picks), each list then read from memory.
+func (s *Service) Search(ctx context.Context, text string) ([]List, error) {
+	g, ok, err := namesearch.Gram(ctx, text, func(ctx context.Context, g string, limit int64) (int64, error) {
+		return s.rq.CountIPListGram(ctx, dbq.CountIPListGramParams{Gram: g, Limit: limit})
+	})
+	if err != nil || !ok {
+		return []List{}, err
+	}
+	ids, err := s.rq.SearchIPLists(ctx, dbq.SearchIPListsParams{Gram: g, Text: text})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]List, 0, len(ids))
+	for _, id := range ids {
+		if st := s.listByID(id); st != nil {
+			out = append(out, st.view(false))
+		}
+	}
+	sortLists(out)
+	return out, nil
+}
+
+// writeListGrams writes the grams of the name and the title of list id (ip_list_grams) in the
+// transaction of q, in place of the ones it had.
+func writeListGrams(ctx context.Context, q *dbq.Queries, id int64, name, title string) error {
+	if err := q.DeleteIPListGrams(ctx, id); err != nil {
+		return err
+	}
+	text := namesearch.Fold(name) + "\x1f" + namesearch.Fold(title)
+	grams := namesearch.Grams(name)
+	for _, g := range namesearch.Grams(title) {
+		if !slices.Contains(grams, g) {
+			grams = append(grams, g)
+		}
+	}
+	for _, g := range grams {
+		if err := q.InsertIPListGram(ctx, dbq.InsertIPListGramParams{Gram: g, ListID: id, Text: text}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sortLists sorts lists: presets first, then by name.
+func sortLists(out []List) {
 	slices.SortFunc(out, func(a, b List) int {
 		if a.Kind != b.Kind {
 			if a.Kind == KindPreset {
@@ -334,7 +397,6 @@ func (s *Service) Lists() []List {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
-	return out
 }
 
 // Get returns list name with its ranges.
@@ -508,8 +570,16 @@ func (s *Service) Create(ctx context.Context, in ListInput) (List, error) {
 		return List{}, ErrExists
 	}
 	now := time.Now().Unix()
-	id, err := s.wq.CreateCustomList(ctx, dbq.CreateCustomListParams{Name: name, Title: title, Description: desc,
-		Ranges: string(js), CreatedAt: now})
+	var id int64
+	err = s.d.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		var err error
+		if id, err = q.CreateCustomList(ctx, dbq.CreateCustomListParams{Name: name, Title: title, Description: desc,
+			Ranges: string(js), CreatedAt: now}); err != nil {
+			return err
+		}
+		return writeListGrams(ctx, q, id, name, title)
+	})
 	if isUnique(err) {
 		return List{}, ErrExists
 	}
@@ -575,9 +645,15 @@ func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, 
 	}
 	js, _ := json.Marshal(rangeStrings(next.ranges))
 	err = s.d.Tx(ctx, func(tx *sql.Tx) error {
-		if err := dbq.New(tx).UpdateCustomList(ctx, dbq.UpdateCustomListParams{Name: next.name, Title: next.title,
+		q := dbq.New(tx)
+		if err := q.UpdateCustomList(ctx, dbq.UpdateCustomListParams{Name: next.name, Title: next.title,
 			Description: next.desc, Ranges: string(js), ID: cur.id}); err != nil {
 			return err
+		}
+		if next.name != cur.name || next.title != cur.title {
+			if err := writeListGrams(ctx, q, cur.id, next.name, next.title); err != nil {
+				return err
+			}
 		}
 		detail := map[string]any{"ranges": len(next.ranges)}
 		if next.name != name {

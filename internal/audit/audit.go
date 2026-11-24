@@ -2,7 +2,8 @@
 // address. The audit log is the only place that shows client IP addresses.
 //
 // Every action has a registered ID (ActionDef): each module registers the actions it records,
-// and Record refuses an action that no module registered. The actor travels in the context: the
+// and Record refuses an action that no module registered. An action also registers how its events
+// read in Activity: a sentence and a Field for each detail key. The actor travels in the context: the
 // route middleware puts the caller there (WithActor), a job uses System and the command line
 // CLI, so a service records its own events without a request.
 package audit
@@ -17,6 +18,7 @@ import (
 	"math"
 	"net/netip"
 	"regexp"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -52,13 +54,115 @@ type ActionDef struct {
 	ID        string `json:"id"`        // a dotted name, unique across modules, e.g. "ci.pipeline.create"
 	Label     string `json:"label"`     // "CI pipeline created"
 	Subsystem string `json:"subsystem"` // a registered permission subsystem, for grouping in the Activity filter
+	// Sentence is how an event reads in Activity, with the placeholders {actor}, {repo}, {target}
+	// and {<detail key>}: "{actor} uploaded {target} to {repo}". A placeholder names a value that
+	// every event of the action has. A job's event reads without {actor} ("Backup finished").
+	Sentence string `json:"sentence"`
+	// Fields says how each detail key of the action reads: one for every key that the action
+	// records, the keys of older events included. Add appends "repo" and "redirect_to", which Record
+	// adds itself.
+	Fields []Field `json:"fields"`
 }
 
-var actionRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)+$`)
+// FieldKind is how the value of a detail key reads.
+type FieldKind string
+
+const (
+	KindText     FieldKind = "text"     // the value as it is
+	KindCount    FieldKind = "count"    // a number with its unit: One, Many ("12,827 files")
+	KindSize     FieldKind = "size"     // bytes ("14 GiB")
+	KindBool     FieldKind = "bool"     // the phrase of true (Yes) or false (No); an empty phrase says nothing
+	KindList     FieldKind = "list"     // strings; Values, when set, gives the words of each item
+	KindEnum     FieldKind = "enum"     // the words of each value (Values); a value without words shows as is
+	KindPerms    FieldKind = "perms"    // a permission set of Scope in words ("Download, publish", "Administrator")
+	KindTime     FieldKind = "time"     // unix seconds or an RFC 3339 string
+	KindDuration FieldKind = "duration" // seconds
+	KindHidden   FieldKind = "hidden"   // never shown: ids, hashes
+)
+
+var fieldKinds = map[FieldKind]bool{KindText: true, KindCount: true, KindSize: true, KindBool: true, KindList: true,
+	KindEnum: true, KindPerms: true, KindTime: true, KindDuration: true, KindHidden: true}
+
+// Field is how one detail key of an action reads (GET /api/audit/actions). Build one with Text,
+// Count, Size, Bool, List, Enum, Perms, Time, Duration or Hidden.
+type Field struct {
+	Key    string            `json:"key"`
+	Label  string            `json:"label"` // the name of the fact in the event's details: "Files", "Folder"
+	Kind   FieldKind         `json:"kind"`
+	One    string            `json:"one,omitempty"`  // count: the unit of one ("file")
+	Many   string            `json:"many,omitempty"` // count: the unit of more ("files")
+	Yes    string            `json:"yes,omitempty"`  // bool: the phrase of true
+	No     string            `json:"no,omitempty"`   // bool: the phrase of false
+	Values map[string]string `json:"values,omitempty"`
+	Scope  string            `json:"scope,omitempty"` // perms: "repo" or "server"
+	// Quiet keeps the fact off the summary line of an event; its details still show it. For facts
+	// nobody scans for: a folder path, a count that is mostly zero, an internal counter.
+	Quiet bool `json:"quiet,omitempty"`
+
+	words string // the word list that Actions.Fill puts in Values
+}
+
+// The field constructors.
+
+func Text(key, label string) Field   { return Field{Key: key, Label: label, Kind: KindText} }
+func Size(key, label string) Field   { return Field{Key: key, Label: label, Kind: KindSize} }
+func List(key, label string) Field   { return Field{Key: key, Label: label, Kind: KindList} }
+func Time(key, label string) Field   { return Field{Key: key, Label: label, Kind: KindTime} }
+func Hidden(key, label string) Field { return Field{Key: key, Label: label, Kind: KindHidden} }
+
+// Duration is a number of seconds.
+func Duration(key, label string) Field { return Field{Key: key, Label: label, Kind: KindDuration} }
+
+// Count is a number with its unit, singular and plural.
+func Count(key, label, one, many string) Field {
+	return Field{Key: key, Label: label, Kind: KindCount, One: one, Many: many}
+}
+
+// Bool says yes when the value is true and no when it is false; "" says nothing.
+func Bool(key, label, yes, no string) Field {
+	return Field{Key: key, Label: label, Kind: KindBool, Yes: yes, No: no}
+}
+
+// Enum gives the words of each value.
+func Enum(key, label string, values map[string]string) Field {
+	return Field{Key: key, Label: label, Kind: KindEnum, Values: values}
+}
+
+// Perms is a permission set of scope "repo" or "server".
+func Perms(key, label, scope string) Field {
+	return Field{Key: key, Label: label, Kind: KindPerms, Scope: scope}
+}
+
+// Quietly returns f off the summary line (Quiet).
+func (f Field) Quietly() Field { f.Quiet = true; return f }
+
+// Words returns f with the words of its values (a list's items, an enum's values).
+func (f Field) Words(values map[string]string) Field { f.Values = values; return f }
+
+// The word lists that the server fills once every module registered (Actions.Fill).
+const (
+	WordsSettings = "settings" // a setting key: its label
+	WordsFormats  = "formats"  // a format name: its title
+)
+
+// From returns f with the words of the list words (WordsSettings, WordsFormats).
+func (f Field) From(words string) Field { f.words = words; return f }
+
+// The keys that Record adds to the detail of any event.
+var envelope = []Field{
+	Text("repo", "Repository"),
+	Text("redirect_to", "Now named").Quietly(), // the request named the repository by an older name
+}
+
+var (
+	actionRE      = regexp.MustCompile(`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)+$`)
+	placeholderRE = regexp.MustCompile(`\{([^{}]*)\}`)
+)
 
 // Actions is the registry of actions. It is filled while the modules register and then fixed.
 type Actions struct {
 	defs  []ActionDef
+	keys  []map[string]bool // the field keys of each def
 	index map[string]int
 }
 
@@ -66,11 +170,12 @@ type Actions struct {
 func NewActions() *Actions { return &Actions{index: map[string]int{}} }
 
 // Add registers defs. subsystem reports whether a permission subsystem is registered. It refuses
-// a malformed or repeated ID, an empty label and an unknown subsystem.
+// a malformed or repeated ID, an empty label or sentence, an unknown subsystem, a field without a
+// key, a label or a known kind, and a placeholder that names no field.
 func (a *Actions) Add(defs []ActionDef, subsystem func(id string) bool) error {
 	for _, d := range defs {
-		if !actionRE.MatchString(d.ID) || d.Label == "" {
-			return fmt.Errorf("audit: action %q needs a dotted ID and a label", d.ID)
+		if !actionRE.MatchString(d.ID) || d.Label == "" || d.Sentence == "" {
+			return fmt.Errorf("audit: action %q needs a dotted ID, a label and a sentence", d.ID)
 		}
 		if _, taken := a.index[d.ID]; taken {
 			return fmt.Errorf("audit: action %q is registered twice", d.ID)
@@ -78,10 +183,59 @@ func (a *Actions) Add(defs []ActionDef, subsystem func(id string) bool) error {
 		if !subsystem(d.Subsystem) {
 			return fmt.Errorf("audit: action %q: subsystem %q is not registered", d.ID, d.Subsystem)
 		}
+		keys := map[string]bool{}
+		for _, f := range d.Fields {
+			if err := f.check(); err != nil {
+				return fmt.Errorf("audit: action %q: %w", d.ID, err)
+			}
+			if keys[f.Key] {
+				return fmt.Errorf("audit: action %q: field %q is registered twice", d.ID, f.Key)
+			}
+			keys[f.Key] = true
+		}
+		d.Fields = slices.Clone(d.Fields)
+		for _, f := range envelope {
+			if !keys[f.Key] {
+				keys[f.Key] = true
+				d.Fields = append(d.Fields, f)
+			}
+		}
+		for _, m := range placeholderRE.FindAllStringSubmatch(d.Sentence, -1) {
+			if p := m[1]; p != "actor" && p != "target" && !keys[p] {
+				return fmt.Errorf("audit: action %q: the sentence names {%s}, which is no field", d.ID, p)
+			}
+		}
 		a.index[d.ID] = len(a.defs)
 		a.defs = append(a.defs, d)
+		a.keys = append(a.keys, keys)
 	}
 	return nil
+}
+
+func (f Field) check() error {
+	switch {
+	case f.Key == "" || f.Label == "" || !fieldKinds[f.Kind]:
+		return fmt.Errorf("field %q needs a key, a label and a known kind (kind %q)", f.Key, f.Kind)
+	case f.Kind == KindCount && (f.One == "" || f.Many == ""):
+		return fmt.Errorf("count field %q needs its units", f.Key)
+	case f.Kind == KindPerms && f.Scope != "repo" && f.Scope != "server":
+		return fmt.Errorf("perms field %q needs the scope repo or server", f.Key)
+	case f.Kind == KindEnum && len(f.Values) == 0 && f.words == "":
+		return fmt.Errorf("enum field %q needs its words", f.Key)
+	}
+	return nil
+}
+
+// Fill puts values in every field whose words come from the list words (Field.From). The server
+// calls it once every module registered, before it serves.
+func (a *Actions) Fill(words string, values map[string]string) {
+	for i := range a.defs {
+		for j := range a.defs[i].Fields {
+			if f := &a.defs[i].Fields[j]; f.words == words {
+				f.Values = values
+			}
+		}
+	}
 }
 
 // List returns every action in registration order.
@@ -91,6 +245,19 @@ func (a *Actions) List() []ActionDef { return a.defs }
 func (a *Actions) Known(id string) bool {
 	_, ok := a.index[id]
 	return ok
+}
+
+// unregistered returns the keys of detail that action registers no field for.
+func (a *Actions) unregistered(action string, detail map[string]any) []string {
+	keys := a.keys[a.index[action]]
+	var out []string
+	for k := range detail {
+		if !keys[k] {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ActorKind is the kind of actor of an event.
@@ -206,12 +373,16 @@ func clip(s string, n int) string {
 }
 
 // row builds the row of e with the actor of ctx. An action that no module registered is an
-// error.
+// error; a detail key that the action registers no field for is logged, and the event is written
+// with it.
 func (l *Log) row(ctx context.Context, e Event) (dbq.InsertAuditEventParams, error) {
 	if !l.actions.Known(e.Action) {
 		err := fmt.Errorf("audit: action %q is not registered", e.Action)
 		l.log.ErrorContext(ctx, "write audit event", "action", e.Action, "err", err.Error())
 		return dbq.InsertAuditEventParams{}, err
+	}
+	if keys := l.actions.unregistered(e.Action, e.Detail); len(keys) > 0 {
+		l.log.ErrorContext(ctx, "audit: the action registers no field for these detail keys", "action", e.Action, "keys", keys)
 	}
 	a := ActorOf(ctx)
 	detail := map[string]any{}

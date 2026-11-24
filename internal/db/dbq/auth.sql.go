@@ -176,6 +176,21 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context, now int64) error {
 	return err
 }
 
+const deleteOtherUserSessions = `-- name: DeleteOtherUserSessions :exec
+DELETE FROM sessions WHERE user_id = ?1 AND id_hash <> ?2
+`
+
+type DeleteOtherUserSessionsParams struct {
+	UserID int64
+	Keep   []byte
+}
+
+// The sessions of a user but one (a password change keeps the session that made it); served by sessions_user.
+func (q *Queries) DeleteOtherUserSessions(ctx context.Context, arg DeleteOtherUserSessionsParams) error {
+	_, err := q.db.ExecContext(ctx, deleteOtherUserSessions, arg.UserID, arg.Keep)
+	return err
+}
+
 const deleteRepoUserPerms = `-- name: DeleteRepoUserPerms :execrows
 DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?
 `
@@ -257,6 +272,25 @@ func (q *Queries) DeleteUserToken(ctx context.Context, arg DeleteUserTokenParams
 	return i, err
 }
 
+const extendSession = `-- name: ExtendSession :execrows
+UPDATE sessions SET expires_at = ?1
+WHERE id_hash = ?2 AND expires_at < ?1
+`
+
+type ExtendSessionParams struct {
+	ExpiresAt int64
+	IDHash    []byte
+}
+
+// Moves the end of an open session later, never earlier; one primary-key write.
+func (q *Queries) ExtendSession(ctx context.Context, arg ExtendSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, extendSession, arg.ExpiresAt, arg.IDHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getOIDCUser = `-- name: GetOIDCUser :one
 SELECT id, disabled FROM users
 WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL
@@ -332,13 +366,14 @@ func (q *Queries) GetPrincipalAndHash(ctx context.Context, id int64) (GetPrincip
 }
 
 const getSessionPrincipal = `-- name: GetSessionPrincipal :one
-SELECT s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
+SELECT s.created_at, s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.id_hash = ?
 `
 
 type GetSessionPrincipalRow struct {
+	CreatedAt int64
 	ExpiresAt int64
 	UserID    int64
 	Username  string
@@ -351,6 +386,7 @@ func (q *Queries) GetSessionPrincipal(ctx context.Context, idHash []byte) (GetSe
 	row := q.db.QueryRowContext(ctx, getSessionPrincipal, idHash)
 	var i GetSessionPrincipalRow
 	err := row.Scan(
+		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.UserID,
 		&i.Username,
@@ -858,8 +894,8 @@ type ListUsersRow struct {
 	Perms     string
 }
 
-// A keyset page of the accounts whose username is in [lower, upper): the cursor and a name prefix
-// in one range of the username index.
+// A keyset page of the accounts whose username is in [lower, upper): the names after the cursor,
+// one range of the username index. A search of the names reads ListUserGrams (names.sql).
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
 	rows, err := q.db.QueryContext(ctx, listUsers, arg.Lower, arg.Upper, arg.Limit)
 	if err != nil {

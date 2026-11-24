@@ -132,13 +132,15 @@ func TestServerPermissions(t *testing.T) {
 func TestPipelinesPermission(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
-	mine, other := RandName("mine"), RandName("other")
+	mine, other, also := RandName("mine"), RandName("other"), RandName("also")
 	s.CreateRepo(t, mine, "raw", false, nil)
 	s.CreateRepo(t, other, "raw", false, nil)
+	s.CreateRepo(t, also, "raw", false, nil)
 	ci, pub := RandName("ci"), RandName("pub")
 	s.CreateUser(t, ci, "ci-password-1")
 	s.CreateUser(t, pub, "pub-password-1")
 	s.SetPerms(t, mine, ci, "repo.download", "repo.publish", "ci.pipelines")
+	s.SetPerms(t, also, ci, "repo.download", "repo.publish", "ci.pipelines") // a scope of two repositories
 	s.SetPerms(t, other, ci, "repo.download", "repo.publish")
 	s.SetPerms(t, mine, pub, "repo.download", "repo.publish")
 	sess := s.SignIn(t, ci, "ci-password-1")
@@ -194,15 +196,16 @@ func TestPipelinesPermission(t *testing.T) {
 	if len(list.Items) != 3 {
 		t.Fatalf("GET /api/publish/trusts as the admin: %d pipelines, want 3", len(list.Items))
 	}
-	// ?q= keeps the names that start with it, in the caller's scope only.
+	// ?q= keeps the names that hold it, in any case, in the caller's scope only.
 	for _, c := range []struct {
 		who  Auth
 		q    string
 		want []int64
 	}{
 		{sess, inScope.Name, []int64{inScope.ID}},
+		{sess, strings.ToUpper(inScope.Name[3:]), []int64{inScope.ID}},
 		{sess, outside.Name, nil},
-		{s.Admin(), outside.Name, []int64{outside.ID}},
+		{s.Admin(), outside.Name[3:], []int64{outside.ID}},
 	} {
 		s.MustAPI(t, http.MethodGet, "/api/publish/trusts?q="+c.q, nil, c.who, &list)
 		var got []int64
@@ -253,8 +256,9 @@ func TestPipelinesPermission(t *testing.T) {
 	}
 }
 
-// TestPeoplePicker: GET /api/people lists enabled usernames by prefix, in keyset pages, to a person
-// with people or with access on a repository; GET /api/users takes the same prefix.
+// TestPeoplePicker: GET /api/people lists the enabled usernames that hold a text, those that start
+// with it first, in keyset pages, to a person with people or with access on a repository; GET
+// /api/users takes the same text.
 func TestPeoplePicker(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -262,7 +266,8 @@ func TestPeoplePicker(t *testing.T) {
 	s.CreateRepo(t, repo, "raw", false, nil)
 	base := "pick" + randHex(3)
 	anna, anton, bert, gone := base+"-anna", base+"-anton", base+"-bert", base+"-anita"
-	for _, u := range []string{anna, anton, bert, gone} {
+	inner := "a-" + base // holds base after its start, and sorts before the names that start with it
+	for _, u := range []string{anna, anton, bert, gone, inner} {
 		s.CreateUser(t, u, u+"-password-1")
 	}
 	s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{gone}, "disabled": true}, s.Admin(), nil)
@@ -297,7 +302,8 @@ func TestPeoplePicker(t *testing.T) {
 		}
 	}
 
-	// Keyset pages: one name per page, case does not matter in q.
+	// Keyset pages: one name per page, case does not matter in q, the names that start with it
+	// first.
 	var all []string
 	after := ""
 	for range 10 {
@@ -316,11 +322,11 @@ func TestPeoplePicker(t *testing.T) {
 		}
 		after = *p.Next
 	}
-	if !slices.Equal(all, []string{anna, anton, bert}) {
-		t.Fatalf("pages of /api/people?q=%s: %v, want [%s %s %s]", base, all, anna, anton, bert)
+	if !slices.Equal(all, []string{anna, anton, bert, inner}) {
+		t.Fatalf("pages of /api/people?q=%s: %v, want [%s %s %s %s]", base, all, anna, anton, bert, inner)
 	}
 
-	// The People list takes the same prefix, a disabled account included, in keyset pages.
+	// The People list takes the same text, a disabled account included, in keyset pages.
 	var users []string
 	after = ""
 	for range 10 {
@@ -338,6 +344,11 @@ func TestPeoplePicker(t *testing.T) {
 	}
 	if !slices.Equal(users, []string{gone, anna, anton}) {
 		t.Fatalf("pages of /api/users?q=%s-an: %v, want [%s %s %s]", base, users, gone, anna, anton)
+	}
+	var mid page
+	s.MustAPI(t, http.MethodGet, "/api/users?q=NITA", nil, s.Admin(), &mid)
+	if got := names(mid); !slices.Equal(got, []string{gone}) {
+		t.Fatalf("GET /api/users?q=NITA: %v, want [%s]", got, gone)
 	}
 
 	st, b := s.API(t, http.MethodGet, "/api/people?q="+base, nil, s.SignIn(t, plain, "plain-password-1"))

@@ -40,11 +40,21 @@ type oidcResult struct {
 // Keycloak's login form, follow the redirect back to the callback.
 func (kc *Keycloak) SignIn(t testing.TB, s *Server, user, pass string) *oidcResult {
 	t.Helper()
+	return kc.SignInTo(t, s, user, pass, "")
+}
+
+// SignInTo is SignIn from the sign-in page with ?next=: the UI path to open after it ("" for none).
+func (kc *Keycloak) SignInTo(t testing.TB, s *Server, user, pass, next string) *oidcResult {
+	t.Helper()
 	base, _ := cookiejar.New(nil)
 	jar := secureStrippingJar{base}
 	c := kc.Client(jar)
 
-	resp, err := c.Get(s.URL + oidcLoginPath)
+	start := s.URL + oidcLoginPath
+	if next != "" {
+		start += "?" + url.Values{"next": {next}}.Encode()
+	}
+	resp, err := c.Get(start)
 	if err != nil {
 		t.Fatalf("GET %s: %v", oidcLoginPath, err)
 	}
@@ -260,9 +270,11 @@ func TestOIDC(t *testing.T) {
 	})
 
 	t.Run("a person outside the map signs in without permissions", func(t *testing.T) {
-		bob := kc.SignIn(t, s, "bob", kcBobPassword)
-		if bob.Resp.StatusCode != http.StatusFound || bob.Resp.Header.Get("Location") != "/" || !hasCookie(bob.Jar, s.URL, "tr_session") {
-			t.Fatalf("bob callback: status %d Location %q, want 302 / with a session: %s", bob.Resp.StatusCode, bob.Resp.Header.Get("Location"), bob.Body)
+		// The sign-in page passes on the page to open after it.
+		next := "/repo/a-repo/files/com/?build=2"
+		bob := kc.SignInTo(t, s, "bob", kcBobPassword, next)
+		if bob.Resp.StatusCode != http.StatusFound || bob.Resp.Header.Get("Location") != "/#"+next || !hasCookie(bob.Jar, s.URL, "tr_session") {
+			t.Fatalf("bob callback: status %d Location %q, want 302 /#%s with a session: %s", bob.Resp.StatusCode, bob.Resp.Header.Get("Location"), next, bob.Body)
 		}
 		if me := ssoMeOf(t, s, bob.Jar); me.Username != "bob" || len(me.Permissions) != 0 || !me.PermissionsManaged {
 			t.Fatalf("GET /api/me = %+v, want bob without server permissions, managed", me)

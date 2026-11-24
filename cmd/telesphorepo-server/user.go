@@ -101,7 +101,7 @@ func userPasswd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := as.UpdateUser(ctx, name, &pw); err != nil {
+		if _, err := as.UpdateUser(ctx, name, &pw, nil); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
 		// Keep the dev banner truthful: "telesphorepo-server dev" prints the admin password from this file.

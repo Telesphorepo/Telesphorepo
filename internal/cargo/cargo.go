@@ -62,8 +62,10 @@ func Module() module.Module {
 		Register: func(x *module.Extender) {
 			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionYank, Label: "Crate version yanked", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionUnyank, Label: "Crate version unyanked", Subsystem: "repo"},
+				audit.ActionDef{ID: ActionYank, Label: "Crate version yanked", Subsystem: "repo",
+					Sentence: "{actor} yanked {target} in {repo}"},
+				audit.ActionDef{ID: ActionUnyank, Label: "Crate version unyanked", Subsystem: "repo",
+					Sentence: "{actor} restored the yanked version {target} in {repo}"},
 			)
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q = host, dbq.New(host.DB.R)

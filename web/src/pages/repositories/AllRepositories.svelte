@@ -1,8 +1,8 @@
 <!--
   Repositories: every repository for a holder of All repositories; for anyone else the repositories
   where they hold a permission that manages it (GET /api/repos?perm=, 100 a page with Load more). A row opens its settings, or its files when the person can
-  open no settings tab. The search field keeps the repositories whose name starts with what is
-  typed (GET /api/repos?q=, 250 ms after the last key). Pick rows (Edit settings) to make them
+  open no settings tab. The search field keeps the repositories whose name holds what is typed
+  (GET /api/repos?q=, 250 ms after the last key). Pick rows (Edit settings) to make them
   public or private at once, or (All repositories) to delete them after a confirm; more than one
   asks you to type the count.
 -->
@@ -118,7 +118,7 @@
   <Toolbar>
     <InputGroup.Root class="sm:w-72">
       <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search repositories by the start of the name" />
+      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search repositories by name" />
     </InputGroup.Root>
   </Toolbar>
 {/if}
@@ -132,7 +132,7 @@
     {/snippet}
     {#snippet empty()}
       {#if prefix}
-        <CompactEmpty icon={SearchXIcon} text="No repository's name starts with “{prefix}”." />
+        <CompactEmpty icon={SearchXIcon} text="No repository's name holds “{prefix}”." />
       {:else if canCreate}
         <CompactEmpty icon={DatabaseIcon} text="None yet. Create one, then publish to it from your build or upload files.">
           <Button variant="outline" href={newRepo}><PlusIcon />New repository</Button>

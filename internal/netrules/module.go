@@ -14,6 +14,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -46,11 +47,28 @@ func Module() module.Module {
 				Help: "The IP lists that the allowed networks of repositories use, and the reverse proxies whose client addresses the server trusts."},
 				perm.Def{ID: PermManage, Label: "Manage networks and proxy", Help: "Create, edit and delete IP lists, and set the trusted reverse proxies.", SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionRulesUpdate, Label: "Repository allowed networks changed", Subsystem: "network"},
-				audit.ActionDef{ID: ActionListCreate, Label: "IP list created", Subsystem: "network"},
-				audit.ActionDef{ID: ActionListUpdate, Label: "IP list changed", Subsystem: "network"},
-				audit.ActionDef{ID: ActionListDelete, Label: "IP list deleted", Subsystem: "network"},
-				audit.ActionDef{ID: ActionTrustedUpdate, Label: "Trusted proxies changed", Subsystem: "network"},
+				audit.ActionDef{ID: ActionRulesUpdate, Label: "Repository allowed networks changed", Subsystem: "network",
+					Sentence: "{actor} changed the allowed networks of {repo}",
+					Fields: []audit.Field{
+						audit.List("allowed", "Allowed networks"), // network lists and address ranges; none: every network
+						audit.Count("networks", "Number of allowed networks", "allowed network", "allowed networks").Quietly(),
+						audit.Count("read", "Networks that download", "network", "networks").Quietly(), // older events
+						audit.Count("publish", "Networks that publish", "network", "networks").Quietly(),
+					}},
+				audit.ActionDef{ID: ActionListCreate, Label: "IP list created", Subsystem: "network",
+					Sentence: "{actor} created the network list {target}",
+					Fields:   []audit.Field{audit.Count("ranges", "Address ranges", "address range", "address ranges")}},
+				audit.ActionDef{ID: ActionListUpdate, Label: "IP list changed", Subsystem: "network",
+					Sentence: "{actor} changed the network list {target}",
+					Fields: []audit.Field{
+						audit.Count("ranges", "Address ranges", "address range", "address ranges"),
+						audit.Text("renamed_from", "Old name").Quietly(),
+					}},
+				audit.ActionDef{ID: ActionListDelete, Label: "IP list deleted", Subsystem: "network",
+					Sentence: "{actor} deleted the network list {target}"},
+				audit.ActionDef{ID: ActionTrustedUpdate, Label: "Trusted proxies changed", Subsystem: "network",
+					Sentence: "{actor} changed the trusted proxies",
+					Fields:   []audit.Field{audit.List("lists", "Network lists")}},
 			)
 			x.Settings(&settings.Group{ID: "network", Label: "Networks and proxy", Perm: PermManage, Page: "/settings/proxy",
 				Defs: []*settings.Def{TrustedProxies.Def(), ProbeHosts.Def()}, Validate: m.validate})
@@ -225,12 +243,22 @@ func (m *mod) listDetail(w http.ResponseWriter, r *http.Request, status int, nam
 	httpx.WriteJSON(w, status, listJSON{l, u})
 }
 
-// listLists returns every IP list without its ranges, presets first:
+// listLists returns every IP list without its ranges, presets first, then by name; ?q= keeps the
+// lists whose name or title holds it, in any case (Service.Search):
 // [{name, kind, title, description, count, source, fetched_at, error, created_at, used_by}].
 // It needs network.manage, or repo.settings on a repository (the Access tab picks the lists of the
 // repository's allowed networks from it).
 func (m *mod) listLists(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	lists := m.rules.Lists()
+	var lists []List
+	if q := namesearch.Text(r.URL.Query().Get("q")); q != "" {
+		var err error
+		if lists, err = m.rules.Search(r.Context(), q); err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+	} else {
+		lists = m.rules.Lists()
+	}
 	out := make([]listJSON, 0, len(lists))
 	for _, l := range lists {
 		u, err := m.rules.Usage(r.Context(), l.Name)

@@ -96,6 +96,22 @@ func target(cfg storage.Config) Target {
 	return Target{Storage: cfg.Backend, FSRoot: cfg.FSRoot}
 }
 
+// location is where cfg keeps the blobs, in words for the audit log: the folder, or the bucket
+// and prefix with the endpoint ("releases/blobs at https://s3.example.com").
+func location(cfg storage.Config) string {
+	if cfg.Backend != "s3" {
+		return cfg.FSRoot
+	}
+	l := cfg.S3Bucket
+	if p := strings.Trim(cfg.S3Prefix, "/"); p != "" {
+		l += "/" + p
+	}
+	if cfg.S3Endpoint != "" {
+		l += " at " + cfg.S3Endpoint
+	}
+	return l
+}
+
 // targetSettings returns the location settings of cfg by setting key, without the secret.
 func targetSettings(cfg storage.Config) map[string]any {
 	return map[string]any{
@@ -243,7 +259,7 @@ func (s *Service) Start(ctx context.Context, dstCfg storage.Config, startedBy in
 	s.started(ctx, id)
 	s.log.Info("storage move started", "move", id, "storage", dstCfg.Backend, "blobs", total)
 	_ = s.audit.Record(ctx, audit.Event{Action: ActionStart, Target: strconv.FormatInt(id, 10),
-		Detail: map[string]any{"target": target(dstCfg), "blobs": total}})
+		Detail: map[string]any{"storage": dstCfg.Backend, "location": location(dstCfg), "blobs": total}})
 	return s.Get(ctx, id)
 }
 

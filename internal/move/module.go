@@ -23,9 +23,9 @@ const PermManage perm.ID = "storage.manage"
 
 // The audit actions of the storage module.
 const (
-	ActionStart  = "storage.move.start"
-	ActionCancel = "storage.move.cancel"
-	ActionDone   = "storage.move.done"
+	ActionStart   = "storage.move.start"
+	ActionCancel  = "storage.move.cancel"
+	ActionDone    = "storage.move.done"
 	ActionFailed  = "storage.move.failed"
 	ActionRetry   = "storage.move.retry"
 	ActionDismiss = "storage.move.dismiss"
@@ -45,12 +45,29 @@ func Module() module.Module {
 				Help: "Where the server keeps the files of every repository."},
 				perm.Def{ID: PermManage, Label: "Manage storage", Help: "Change the blob store (filesystem or S3) and follow or cancel a storage move.", SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionStart, Label: "Storage move started", Subsystem: "storage"},
-				audit.ActionDef{ID: ActionCancel, Label: "Storage move cancelled", Subsystem: "storage"},
-				audit.ActionDef{ID: ActionDone, Label: "Storage move done", Subsystem: "storage"},
-				audit.ActionDef{ID: ActionFailed, Label: "Storage move failed", Subsystem: "storage"},
-				audit.ActionDef{ID: ActionRetry, Label: "Storage move tried again", Subsystem: "storage"},
-				audit.ActionDef{ID: ActionDismiss, Label: "Storage move put away", Subsystem: "storage"},
+				audit.ActionDef{ID: ActionStart, Label: "Storage move started", Subsystem: "storage",
+					Sentence: "{actor} started moving the files to new storage",
+					Fields: []audit.Field{
+						audit.Enum("storage", "Storage", map[string]string{"fs": "A folder", "s3": "S3"}),
+						audit.Text("location", "Location"),
+						audit.Count("blobs", "Files", "file", "files"),
+						audit.Text("target", "Destination").Quietly(), // older events: the location as an object
+					}},
+				audit.ActionDef{ID: ActionCancel, Label: "Storage move cancelled", Subsystem: "storage",
+					Sentence: "{actor} cancelled the storage move"},
+				audit.ActionDef{ID: ActionDone, Label: "Storage move done", Subsystem: "storage",
+					Sentence: "Storage move finished"},
+				audit.ActionDef{ID: ActionFailed, Label: "Storage move failed", Subsystem: "storage",
+					Sentence: "Storage move failed",
+					Fields:   []audit.Field{audit.Text("error", "Error")}},
+				audit.ActionDef{ID: ActionRetry, Label: "Storage move tried again", Subsystem: "storage",
+					Sentence: "{actor} tried the storage move again",
+					Fields: []audit.Field{
+						audit.List("changed", "Settings changed").From(audit.WordsSettings),
+						audit.Hidden("move", "New move"),
+					}},
+				audit.ActionDef{ID: ActionDismiss, Label: "Storage move put away", Subsystem: "storage",
+					Sentence: "{actor} put the storage move away"},
 			)
 			x.Settings(&settings.Group{ID: "storage", Label: "Storage", Perm: PermManage, Page: "/settings/storage",
 				Defs: storage.Defs(), Validate: m.validate, Test: m.test, Apply: m.apply})

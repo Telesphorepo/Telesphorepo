@@ -99,6 +99,9 @@ type Principal struct {
 	// Scopes is set when the credential came as a core bearer token (IssueBearer): the repos
 	// and operations the token allows. nil for every other credential.
 	Scopes []Scope
+	// ui is the session row of a UI session (CredSession, CredSetupSession), for RenewSession
+	// and for a password change that keeps the session that made it.
+	ui *uiSession
 }
 
 // Is reports whether p carries a credential of one of the kinds in c. A nil p carries none.
@@ -182,6 +185,7 @@ type Service struct {
 	deviceProofs DeviceProofVerifier             // checks device proofs on format reads
 	links        LinkVerifier                    // checks signed download links on format reads
 	sso          func() bool                     // reports whether single sign-on is on (SetSSO)
+	ssoTTL       func() time.Duration            // the idle lifetime of an SSO session (SetSSOSessionTTL)
 	managed      func() bool                     // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 
 	// dev makes the second factor optional (telesphorepo-server dev only): a person without a factor
@@ -195,6 +199,10 @@ func (s *Service) SetAudit(a *audit.Log) { s.audit = a }
 
 // SetSSO sets the function that reports whether single sign-on is on. The sso module sets it.
 func (s *Service) SetSSO(on func() bool) { s.sso = on }
+
+// SetSSOSessionTTL sets the function that returns the idle lifetime of the UI session of an SSO
+// account (oidc.session_ttl); RenewSession reads it on each renewal. The sso module sets it.
+func (s *Service) SetSSOSessionTTL(fn func() time.Duration) { s.ssoTTL = fn }
 
 // SSOEnabled reports whether single sign-on is on.
 func (s *Service) SSOEnabled() bool { return s.sso != nil && s.sso() }

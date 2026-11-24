@@ -11,6 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -20,7 +21,8 @@ import (
 // (GET /api/overview). A request reads only its answer: a keyset page merges at most three lists,
 // each one range of an index (repos.Service list.go): every repo for a holder of all
 // repositories, else the public repos and the repos of the caller's grants and of the allowed
-// networks that hold the client address (a lookup per repo).
+// networks that hold the client address (a lookup per repo). A text (?q=) reads the grams of the
+// names (internal/namesearch) in the same shape.
 
 // maxPublished is the most repos of a list by last publish (?sort=published).
 const maxPublished = 50
@@ -58,7 +60,8 @@ func (a *API) visibleTo(ctx context.Context, p *auth.Principal, want perm.Set) (
 }
 
 // listRepos answers GET /api/repos: a keyset page by name of the repos where the caller holds a
-// permission or that are public. ?after=&limit= page it; ?q= is a name prefix, ?format= and
+// permission or that are public. ?after=&limit= page it; ?q= keeps the names that hold it in any
+// case, those that start with it first (namesearch.Compare); ?format= and
 // ?kind= keep one format or kind, ?perm=a,b keeps the repos where the caller holds one of the
 // repository permissions. ?sort=published gives the limit repos published last (at most
 // maxPublished, with ?perm= only, no next page). ?name=a&name=b gives those repos (at most a page).
@@ -110,7 +113,7 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			return
 		}
 	case q.Get("sort") == "" || q.Get("sort") == "name":
-		lq := repos.ListQuery{After: q.Get("after"), Prefix: strings.ToLower(strings.TrimSpace(q.Get("q"))),
+		lq := repos.ListQuery{After: q.Get("after"), Text: namesearch.Text(q.Get("q")),
 			Format: q.Get("format"), Kind: kind, Limit: limit + 1}
 		if page, err = a.pageByName(ctx, v, lq); err != nil {
 			route.Fail(w, r, err)
@@ -135,26 +138,9 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	httpx.WriteJSON(w, http.StatusOK, route.Page[repoJSON]{Items: out, Next: route.Cursor(next)})
 }
 
-// pageByName returns the first lq.Limit repos of lq that v sees, by name: the lists merged, each
-// read up to lq.Limit, so the merge holds every name before the lq.Limit-th of the union.
+// pageByName returns the first lq.Limit repos of lq that v sees (repos.Service.PageSeen).
 func (a *API) pageByName(ctx context.Context, v visible, lq repos.ListQuery) ([]*repos.Repo, error) {
-	if v.all {
-		return a.repos.PageAll(ctx, lq)
-	}
-	var lists [][]*repos.Repo
-	if v.anonymous {
-		l, err := a.repos.PageAnonymous(ctx, lq)
-		if err != nil {
-			return nil, err
-		}
-		lists = append(lists, l)
-	}
-	l, err := a.repos.PageIn(ctx, v.ids, lq)
-	if err != nil {
-		return nil, err
-	}
-	lists = append(lists, l)
-	return merge(lists, lq.Limit, func(x, y *repos.Repo) int { return strings.Compare(x.Name, y.Name) }), nil
+	return a.repos.PageSeen(ctx, repos.Seen{All: v.all, Public: v.anonymous, IDs: v.ids}, lq)
 }
 
 // published returns the limit repos that v sees, published last first.
@@ -175,28 +161,9 @@ func (a *API) published(ctx context.Context, v visible, limit int) ([]*repos.Rep
 		return nil, err
 	}
 	lists = append(lists, l)
-	return merge(lists, limit, func(x, y *repos.Repo) int {
+	return repos.Merge(lists, limit, func(x, y *repos.Repo) int {
 		return cmp.Or(y.LastPublishedAt.Compare(x.LastPublishedAt), cmp.Compare(y.ID, x.ID))
 	}), nil
-}
-
-// merge merges lists, each sorted by order, into one, a repo once, at most limit.
-func merge(lists [][]*repos.Repo, limit int, order func(x, y *repos.Repo) int) []*repos.Repo {
-	var out []*repos.Repo
-	seen := map[int64]bool{}
-	for _, l := range lists {
-		for _, r := range l {
-			if !seen[r.ID] {
-				seen[r.ID] = true
-				out = append(out, r)
-			}
-		}
-	}
-	slices.SortFunc(out, order)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out
 }
 
 // repoItems is the JSON of the repos of one page that p sees (a repo without a permission is left

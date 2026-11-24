@@ -683,9 +683,23 @@ func TestCustomIPLists(t *testing.T) {
 	}
 
 	// A rename keeps the allowed networks and the trusted proxies: they name the list by its id.
-	s.MustAPI(t, http.MethodPut, "/api/ip-lists/runners", map[string]any{"name": "ci-runners"}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPut, "/api/ip-lists/runners", map[string]any{"name": "ci-runners", "title": "Build Machines"}, s.Admin(), nil)
 	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists/runners", nil, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("GET the old name after a rename: status %d, want 404", st)
+	}
+	// ?q= keeps the lists whose name or title holds it, in any case.
+	for q, want := range map[string]string{"I-RUN": "ci-runners", "machine": "ci-runners", "ffic": "office"} {
+		var found []ipListJSON
+		s.MustAPI(t, http.MethodGet, "/api/ip-lists?q="+q, nil, s.Admin(), &found)
+		var custom []string
+		for _, l := range found {
+			if l.Kind == "custom" {
+				custom = append(custom, l.Name)
+			}
+		}
+		if !slices.Equal(custom, []string{want}) {
+			t.Fatalf("GET /api/ip-lists?q=%s: %+v, want the custom list %s only", q, found, want)
+		}
 	}
 	var rules ipRules
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/ip-rules", nil, s.Admin(), &rules)

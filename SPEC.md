@@ -259,12 +259,15 @@ Kernel tables (`internal/db/migrations`):
   they never publish; `last_used_at` is written at most once per minute), the second-factor tables,
   and `auth_challenges` (short-lived single-use state; a new challenge deletes up to 100 expired
   ones). Sealed values use AAD `<table>:<id>`.
+- Name search: `repo_name_grams`, `user_name_grams` (and `publish_trust_grams`, `ip_list_grams`
+  of their modules) hold the 1- to 3-character grams of each name (see **Name search**).
 - Permissions: `user_permissions` (server permissions) and `repo_permissions` (per repo). No
   CHECK on the ID: writes check it against the permission registry; reads skip an ID no module
   registers. See **Permissions**.
 - Repositories: `repos` holds the counters `file_count`, `total_size`, `last_published_at`;
   each list of `GET /api/repos` reads one of its indexes, with partial indexes for
-  `anonymous_read = 1` (see **Repository lists**). Module repo fields (`repos.Field`, e.g.
+  `anonymous_read = 1` (see **Repository lists**); a list with `q` reads the same shapes of
+  `repo_name_grams` (see **Name search**). Module repo fields (`repos.Field`, e.g.
   `signing_key`) are rows in a table of their module keyed by the repo. `repo_totals` is one row
   of summed counters, kept by triggers on `repos` in the same transaction, so `GET /api/overview`
   reads one row. `repo_redirects` holds old names (a name is a repo or a redirect, never both; see
@@ -626,7 +629,9 @@ Shapes and status details are in the handlers.
   many failures get 429. The first full session of a holder of `settings.general` on a server
   without `base_url` saves it (see **Settings model**). SSO users cannot sign in with a password
   (401); with `signin.password_login=publishers` a person who needs the second factor gets 403
-  and must use SSO. Logout ends the local session only. `/api/auth/config` says which sign-ins
+  and must use SSO. Logout ends the local session only. `/api/auth/oidc/login?next=` takes a UI
+  path (one leading `/`, printable ASCII), and the callback then redirects to `/#<next>` instead
+  of `/`. `/api/auth/config` says which sign-ins
   exist; `second_factor_optional` is true only under `telesphorepo-server dev`.
 - **Single sign-on** (`/api/auth/oidc/login`, `/callback`). The state, nonce and PKCE verifier
   live in memory for 10 minutes, single use, keyed by SHA-256(state), with the `tr_oidc` cookie
@@ -659,9 +664,10 @@ Shapes and status details are in the handlers.
   permission from, or disables, the only enabled administrator (a person who holds every server
   permission; a server without one refuses nothing here). Nobody disables their own account
   (400). Single sign-on owns the permissions of an account it manages (409). A disabled person's
-  sessions end and their password and read tokens stop working. The user list and
-  `/api/people` are keyset by username, `?q=` one range of the username index; `/api/people`
-  answers at most 20 enabled usernames per page.
+  sessions end and their password and read tokens stop working. A new password ends the person's
+  UI sessions except the one that set it. The user list and
+  `/api/people` are keyset by username; `?q=` keeps the usernames that hold it (see **Name
+  search**); `/api/people` answers at most 20 enabled usernames per page.
 - **Registry and identity** (none): `GET /api/permissions` (the permission registry, see
   **Permissions**), `GET /api/formats` (the UI descriptors, see **Format UI descriptors**),
   `GET /api/identity` and `GET /identity/logo` (see **Server identity**). The logo answers with
@@ -696,7 +702,8 @@ Shapes and status details are in the handlers.
   a sentence for each answer and the notes that modules add (`access.Engine.AddDownloadNote`).
   `GET /api/users/{username}/access` (`people.manage`) and `/api/me/access` are keyset pages by
   repo name, read as one page of each side (the public repos' index and the person's grants),
-  never the repos in between. On a proxy or a group nobody holds `repo.publish` or
+  never the repos in between; `?q=` keeps the repos whose name holds it, read as **Repository
+  lists** reads them (the public repos' grams and one lookup per grant). On a proxy or a group nobody holds `repo.publish` or
   `ci.pipelines`. `PUT /api/grants` (`repo.access` on each repo) sets the permission set of every
   user and repo pair, several groups of pairs in one transaction, at most 1000 pairs; it refuses
   a server permission, a permission without one it needs, and a change to a permission the
@@ -847,7 +854,7 @@ archives with their SHA-256 and the commands to install one by hand.
 |---|---|---|
 | Password | argon2id (`internal/auth/password.go`), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that need no permission |
 | Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username) or Bearer: format reads, and the `/api/` GET routes that need no permission |
-| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser; never on a repo domain, where the policy does not read the cookie (see **Hosts and repo domains**). The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
+| Session `tr_session` | SHA-256(id). It ends `session_ttl` (an SSO account: `oidc.session_ttl`) after its last request and `session_max_age` after the sign-in, however active. On a request of the web UI (`X-Telesphorepo-UI`) the router renews a full session (`auth.Service.RenewSession`; not a setup-only one) and sends the cookie again with the new Max-Age once its end is a tenth of the ttl (1 s to 1 h) closer: one primary-key write per step, not per request. A format read never renews it, so no file answer carries the cookie | `/api/`, and format reads (GET and HEAD) for downloads in the browser; never on a repo domain, where the policy does not read the cookie (see **Hosts and repo domains**). The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret), constant-time compare | Basic password (any username) or Bearer on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 | Device (`auth.CredDevice`) | The enrolled device key; a proof `trx.<device id>.<nonce>.<signature>` over a token exchange nonce, as the Basic password or Bearer value of a format read, or inside a core bearer token of a format's token exchange | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
 | Signed download link (`auth.CredLink`) | Nothing stored: `?texp=&tsig=<user id>.<repo id>.<mac>` | Format reads (GET and HEAD) without an `Authorization` header, of exactly the signed path of the signed repo, until it expires, with the current grants of its maker. See **Signed download links** |
@@ -1017,8 +1024,9 @@ The routes are in `internal/publish/api.go`. Their policies:
   whose repos all hold `ci.pipelines` for them: the list leaves the others out, such a policy
   answers 404, a `repos` list outside the scope answers 403, and a caller with `ci.pipelines` on
   no repo gets 403. The list is one keyset query of the policies with a repo in the caller's scope
-  and none outside it, never a walk of all policies; the count of a `repositories.all` holder
-  stops at 10,000, anyone else's is counted from their repos' pipelines.
+  and none outside it, never a walk of all policies (the set of repos is one JSON array, read with
+  `json_each`); `?q=` searches the names (see **Name search**). The count of a
+  `repositories.all` holder stops at 10,000, anyone else's is counted from their repos' pipelines.
 
 The trusted-proxy lists (`/api/network/trusted-proxies`, `network.manage`) live in
 `internal/netrules`.
@@ -2534,7 +2542,22 @@ the capabilities of the repo's `format.Spec` that are set.
 - **Repository lists** (`internal/api/repolist.go`, `internal/repos/list.go`). A request reads only
   its answer: a holder of `repositories.all` reads one index range; anyone else gets the public repos
   (partial indexes on `anonymous_read`) merged with one rowid lookup per grant, each list read to
-  `limit + 1`.
+  `limit + 1`. With `q` each list reads the same way through the grams of the names: every repo
+  and the public ones from `repo_name_grams` (an index per filter: format, kind, public), a grant
+  by its lookup with `instr` on the name.
+- **Name search** (`internal/namesearch`). A `q` of the repo, user, CI pipeline and IP list lists
+  keeps the names that hold it in any case (ASCII letters folded, as SQLite's `lower()`), at any
+  length. Each owner keeps a gram table: one row per distinct 1- to 3-character substring of each
+  folded name, keyed `(gram, name)`, written by the owning service in the transaction of each
+  write of the name (no trigger can split a name), backfilled by the migration that creates it.
+  A `q` of up to 3 characters is one gram: its rows are the answer. A longer `q` reads the rows of
+  its rarest trigram (a probe counts each trigram up to 1,000 rows, then up to the fewest so far)
+  and keeps the names that hold `q` with `instr` on the gram row alone; a trigram with no row
+  answers nothing at once. The names that start with `q` come first, then the others, each in
+  name order: a page reads the ranges `[q, q⁺)`, `[, q)` and `[q⁺, ∞)` of the folded name in turn
+  (`namesearch.Steps`), so `next` stays the last name and its folded form says which range the
+  next page starts in; a merge of lists sorts by `namesearch.Compare`. A page costs its rows plus,
+  for a longer `q`, the rows of its rarest trigram that do not hold it.
 - **Group counters** (`internal/api/groupcounts.go`). A group's file count, size and last publish
   count each file it serves to the caller once: by path, or by unit (`format.Spec.GroupUnit`, the
   package) from the unit's owner. A merged file counts once with the first member's size, because
@@ -2615,7 +2638,9 @@ shapes the URLs built from the request when `base_url` is empty (registry realm,
 - **Proxy candidates.** Untrusted peers that send forwarding headers are remembered in memory only,
   for the UI to offer trusting them.
 
-**IP lists.** Named sets of CIDRs (`ip_lists`), referred to by id.
+**IP lists.** Named sets of CIDRs (`ip_lists`), referred to by id. `GET /api/ip-lists` answers
+every list, presets first; `?q=` keeps the lists whose name or title holds it, from the rows of
+one gram of `ip_list_grams` (see **Name search**), each list then read from memory.
 
 - **Presets.** `cloudflare` and `github-actions`, read-only and refreshed daily; a failed refresh
   keeps the last good list. `TR_E2E_PRESET_BASE_URL` points the fetches at a test server.
@@ -2671,7 +2696,7 @@ paths and indexers.
 ## Audit log
 
 `audit_events` records who did what; `GET /api/audit` needs `activity.read`. Each module registers
-its actions (`Extender.AuditActions`; core in `internal/audit/audit.go`), and `audit.Log.Record`
+its actions (`Extender.AuditActions`; core in `internal/api/registry.go`), and `audit.Log.Record`
 refuses an unregistered one. The middleware sets the actor (`audit.WithActor`); services record
 inside the change's transaction (`RecordTx`); jobs record as `audit.System`, CLI user commands as
 `cli`. Events never hold secrets: `settings.update` records keys only, `file.link.create` never the
@@ -2679,6 +2704,14 @@ signature.
 
 - Client IP addresses appear only here. `proxy-candidates` lists untrusted proxies, not clients;
   the access log still records the IP.
+- **Words.** Activity words an event from its action (`GET /api/audit/actions`, `audit.ActionDef`):
+  its sentence (`{actor} published {target} to {repo}`; a job's reads without `{actor}`) and an
+  `audit.Field` for every detail key the action records, older events' keys included: a kind, and
+  `Quiet` for the facts that stay off the summary line. Registration refuses a field without a key,
+  a label or a known kind and a placeholder that names no field. `Record` logs a detail key without
+  a field at error level and writes the event anyway, so a missing word never fails the change.
+  Setting keys and format names take their words from their registries (`Actions.Fill`). Events
+  record readable values: a name rather than an id, a count rather than an object.
 - **Filters.** `actor` matches `actor_user_id`, so it finds people only. `since` / `until` become id
   bounds (`audit_events_at`), keeping keyset order on `id`; each combination of actor, repo and
   action has its own index.
@@ -2731,23 +2764,30 @@ the UI meets the server and the rules that need a reason.
 - **No browser password prompt.** The API client sends `X-Telesphorepo-UI: 1` on every request
   (fetch and upload). The server never sends `WWW-Authenticate` for such a request or for a path
   under `/api`. Plain download links of format routes carry no such header and keep the challenge.
-- **Auth in the UI.** A 401 outside the sign-in routes signs the user out. A 403
-  `second_factor_required` sets the setup-only state; the UI shows its message, never the code. A
-  setup-only session goes from every page but the sign-in to Sign-in and security, which offers
-  the way on once a method is added. `/#/login` is the only place to sign in; signing out returns
-  to Home.
+- **Auth in the UI.** A 401 with the refusal code `anonymous` (the router found no session: it
+  ended) signs the person out and opens `/#/login?next=<the page and its query>`, which says "You
+  were signed out. Sign in to go on." and opens that page after the sign-in, also through single
+  sign-on. Any other 401 (a wrong password or second-factor code, a used SSO confirmation) comes
+  with an open session and is an error of the form. At start the UI reads `GET /api/me` again
+  while the server cannot be reached or answers 5xx (about 15 s: a restart is not a sign-out). A
+  403 `second_factor_required` sets the setup-only state; the UI shows its message, never the
+  code. A setup-only session goes from every page but the sign-in to Sign-in and security, which
+  offers the way on once a method is added. `/#/login` is the only place to sign in; signing out
+  returns to Home.
 - **Address notice.** The app's one notice: a person who holds `settings.general` (not a
   setup-only session) opened the app at an origin that is not `base_url`. **Use <origin>** saves
   `base_url`; **Keep** hides it for that origin in this browser (`localStorage`). It never shows
   under the Vite dev server, at a loopback origin, or when `TR_BASE_URL` sets `base_url`. It reads
   `GET /api/settings` at sign-in and after the person leaves Settings › General.
-- **Cost follows the page.** Every list asks the server for a page by keyset (a name prefix, a
-  filter, the next page as its end comes into view) and never filters, sorts or counts a whole set
+- **Cost follows the page.** Every list asks the server for a page by keyset (a text the name
+  holds, a filter, the next page as its end comes into view) and never filters, sorts or counts a whole set
   in the browser. Counts come from the server's counters or are bounded ("10,000+"); a count of
   search hits is of the loaded pages ("350+ files"). Search groups hits in the browser only within
   the loaded pages (a card per repo, a row per artifact folder, checksum and signature files folded
-  into their file). The grant dialog, the `RepoPicker` and the People list search by name prefix, a
-  page at a time, so they cost the same on any server.
+  into their file). A network list's ranges come whole with the list (`GET /api/ip-lists/{name}`),
+  so Find an address on its page filters the ranges the page holds. The grant dialog, the
+  `RepoPicker` and the People list search by a text the name holds (**Name search**), a page at
+  a time, so they cost the same on any server.
 - **Live data.** A page that follows a server process (a backup, a storage move, a Nexus sync, a
   filling region, a repository delete in a toast) refreshes through one `Live`
   (`web/src/lib/live.svelte.ts`): paused while the tab is hidden or offline, never two requests at
@@ -2760,7 +2800,7 @@ the UI meets the server and the rules that need a reason.
   published last (`GET /api/repos?sort=published&limit=6`), and **Your repositories** (`perm=`
   every repository permission beyond `repo.download`).
 - **Browse** (`/#/browse`, anyone; a visitor sees the anonymous-read repos): `GET /api/repos` by
-  name prefix and format, 100 a page. A group shows the files it serves to the reader (see
+  a text the name holds and format, 100 a page. A group shows the files it serves to the reader (see
   **Group counters**), "Counting…" until counted.
 - **Publish** (`/#/publish`, signed in): the hosted repos of
   `GET /api/repos?perm=repo.publish&kind=hosted` (a group is left out: its publishes go to a hosted
@@ -2814,8 +2854,8 @@ the UI meets the server and the rules that need a reason.
     `network.probe_hosts` set, the `cidr` of each probe host's whoami (a cross-origin `GET` without
     credentials), so both address families of the network go in.
   - **Grant dialog.** Give access (Access tab, person page) is one dialog: it searches people or
-    repositories by name prefix, a page at a time, groups the added ones by identical permission
-    sets and saves them in one `PUT /api/grants` with `groups`. On the Access tab it also adds IP
+    repositories by a text the name holds, a page at a time, groups the added ones by identical
+    permission sets and saves them in one `PUT /api/grants` with `groups`. On the Access tab it also adds IP
     lists, addresses (each masked through `POST /api/ip-ranges/parse`) and CI pipelines.
   - **Permission picker.** One picker, read from `GET /api/permissions`. Checking a permission
     checks what it needs and clearing one clears what needs it; a permission the caller does not
@@ -3120,6 +3160,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | UI of a format | The descriptor (`format.Spec`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
 | File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`, `pipeline.go` (resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` |
 | Repository lists, Settings overview figures | `internal/api/repolist.go`, `internal/repos/list.go` (one index per list), the maintained counters `repo_totals` |
+| Name search (`q` of repos, people, CI pipelines, IP lists) | `internal/namesearch`; each owner's gram table and its writes (`internal/repos/grams.go`, `internal/auth/names.go`, `internal/publish/trusts.go`, `internal/netrules/lists.go`) |
 | Client IP, IP lists, allowed networks | `internal/netrules` (module `network`) |
 | Docker / OCI registry | `internal/docker`; UI in `web/src/modules/docker/` |
 | Telesphorepo CLI and its Docker credential helper | `cmd/telesphorepo` (MIT, its own `LICENSE`; imports no server package; a new format adds a row to `detect.go`) |

@@ -260,7 +260,7 @@ func (s *Service) RevokeSelf(ctx context.Context, deviceID int64, nonce, signatu
 		if _, err = q.CloseDevicePublishSessions(ctx, dbq.CloseDevicePublishSessionsParams{ClosedAt: now, DeviceID: nullID(d.ID)}); err != nil {
 			return err
 		}
-		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: strconv.FormatInt(d.ID, 10),
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: d.Name,
 			Detail: map[string]any{"device_id": d.ID, "by": "device"}})
 	})
 	if err == nil {

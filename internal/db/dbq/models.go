@@ -165,6 +165,14 @@ type RepoGroupMember struct {
 	Position int64
 }
 
+type RepoNameGram struct {
+	Gram      string
+	Name      string
+	Format    string
+	Kind      string
+	Anonymous int64
+}
+
 type RepoOp struct {
 	ID        int64
 	RepoID    int64
@@ -258,6 +266,12 @@ type User struct {
 	OidcIssuer        sql.NullString
 	OidcSubject       sql.NullString
 	Email             sql.NullString
+}
+
+type UserNameGram struct {
+	Gram   string
+	Name   string
+	UserID int64
 }
 
 type UserPasskey struct {

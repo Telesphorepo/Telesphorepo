@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,7 +232,7 @@ func (s *Service) StartSync(ctx context.Context, sourceID, userID int64) (*Sync,
 	if err != nil {
 		return nil, err
 	}
-	s.record(ctx, ActionSyncStart, strconv.FormatInt(sourceID, 10), map[string]any{"source_id": sourceID, "sync_id": id})
+	s.record(ctx, ActionSyncStart, s.sourceName(ctx, sourceID), map[string]any{"source_id": sourceID, "sync_id": id, "trigger": TriggerManual})
 	return s.Sync(ctx, id)
 }
 
@@ -247,7 +246,7 @@ func (s *Service) CutOver(ctx context.Context, sourceID, userID int64) (*Sync, e
 	if err != nil {
 		return nil, err
 	}
-	s.record(ctx, ActionCutover, strconv.FormatInt(sourceID, 10), map[string]any{"source_id": sourceID, "sync_id": id})
+	s.record(ctx, ActionCutover, s.sourceName(ctx, sourceID), map[string]any{"source_id": sourceID, "sync_id": id})
 	return s.Sync(ctx, id)
 }
 
@@ -626,7 +625,7 @@ func (s *Service) Cancel(ctx context.Context, id, userID int64) (*Sync, error) {
 	if err := s.finish(context.WithoutCancel(ctx), id, row.SourceID, SyncCancelled, "", cancelLine(by)); err != nil {
 		return nil, err
 	}
-	s.record(ctx, ActionSyncCancel, strconv.FormatInt(row.SourceID, 10), map[string]any{"source_id": row.SourceID, "sync_id": id})
+	s.record(ctx, ActionSyncCancel, s.sourceName(ctx, row.SourceID), map[string]any{"source_id": row.SourceID, "sync_id": id})
 	return s.Sync(ctx, id)
 }
 

@@ -2,11 +2,12 @@
   Repository settings, Access: two cards, Download and Publish, each one list with one Add.
 
   - Download: the Public switch (Edit settings) in the header. While public, nothing more. Else
-    Who can download: the addresses and ranges (a label edited in place), the network lists, the people
-    with download (one with Publish shows "Publishes" and is removed in the Publish card), and the
-    holders of All repositories as one row. Add opens the grant dialog with Custom address and Add
-    my address (Edit settings), the network lists (Edit settings) and people (Manage access). Turning
-    Public on while there are networks asks first, then removes them.
+    Who can download: the addresses and ranges as a RangeGrid (each with its label under it, edited
+    in place), then a list of the network lists, the people with download (one with Publish shows
+    "Publishes" and is removed in the Publish card), and the holders of All repositories as one
+    row. Add opens the grant dialog with Custom address and Add my address (Edit settings), the
+    network lists (Edit settings) and people (Manage access). Turning Public on while there are
+    networks asks first, then removes them.
   - Publish: Who can publish: the people with Publish, the CI pipelines (CI pipelines), then the
     holders of All repositories as one row that opens to their names. Add opens the grant dialog
     with people and CI pipelines. When nobody can publish (a group or a proxy, or an operation such
@@ -19,7 +20,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, errorMessage, type AccessPerson, type AccessPipeline, type IPList, type IPRule, type Page, type Repo, type Trust } from "$lib/api";
+  import { api, errorMessage, type AccessPerson, type AccessPipeline, type IPRule, type Page, type Repo, type Trust } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { auth } from "$lib/auth.svelte";
   import { repoPermissions, repoPhrase } from "$lib/permissions";
@@ -31,6 +32,7 @@
   import { Label } from "$lib/components/ui/label";
   import Section from "$lib/components/Section.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
+  import RangeGrid from "$lib/components/RangeGrid.svelte";
   import UserAvatar from "$lib/components/UserAvatar.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
@@ -110,17 +112,21 @@
   const adminsRow = (): Row => ({ key: "admins", title: adminCount(admins.length), kind: "All repositories", admins: true });
 
   const listTitle = (name: string) => access.data?.download.networks.lists.find((l) => l.name === name)?.title ?? name;
+  // The addresses and ranges: a grid of their own over the rows of the lists and the people.
+  const addresses = sourceOf<IPRule>(() => nets.filter((r) => r.kind === "cidr"));
   const downloadRows = sourceOf<Row>(() => [
-    ...nets.map(
-      (r): Row => ({
-        key: `${r.kind}:${r.value}`,
-        title: r.kind === "list" ? listTitle(r.value) : r.value,
-        kind: r.kind === "list" ? "network list" : "",
-        rule: r,
-        link: r.kind === "list" && auth.can("network.manage") ? href(`/settings/networks/list/${encodeURIComponent(r.value)}`) : undefined,
-        remove: canSettings ? () => removeRule(r) : undefined,
-      }),
-    ),
+    ...nets
+      .filter((r) => r.kind === "list")
+      .map(
+        (r): Row => ({
+          key: `list:${r.value}`,
+          title: listTitle(r.value),
+          kind: "network list",
+          rule: r,
+          link: auth.can("network.manage") ? href(`/settings/networks/list/${encodeURIComponent(r.value)}`) : undefined,
+          remove: canSettings ? () => removeRule(r) : undefined,
+        }),
+      ),
     ...downloaders.map((p) => personRow(p, canPublish(p) ? "Publishes" : "Person", !canPublish(p))),
     ...(admins.length ? [adminsRow()] : []),
   ]);
@@ -252,21 +258,14 @@
     const page = await api.people.search(q, { after, limit: 20 });
     return { next: page.next, items: page.items.map((p) => ({ id: p.username, label: p.username })) };
   }
-  const starts = (q: string, ...names: string[]) => !q || names.some((n) => n.toLowerCase().startsWith(q));
-
   let downloadOpen = $state(false);
-  let ipLists: Promise<IPList[]> | null = null;
-  const allLists = () =>
-    (ipLists ??= api.ipLists.list().catch((e) => {
-      ipLists = null;
-      throw e;
-    }));
   async function findForDownload(q: string, after?: string): Promise<Page<GrantChoice>> {
     const head: GrantChoice[] = [];
     if (!after && canSettings) {
       head.push({ id: "address", label: "Custom address", kind: "address" });
-      for (const l of await allLists())
-        if (starts(q, l.title, l.name)) head.push({ id: "list:" + l.name, label: l.title, detail: "network list", kind: "plain" });
+      // The network lists whose name or title holds q, found by the server.
+      for (const l of await api.ipLists.list(q))
+        head.push({ id: "list:" + l.name, label: l.title, detail: "network list", kind: "plain" });
     }
     const people = await findPeople(q, after);
     return { next: people.next, items: [...head, ...people.items] };
@@ -305,14 +304,9 @@
   async function findForPublish(q: string, after?: string): Promise<Page<GrantChoice>> {
     const head: GrantChoice[] = [];
     if (!after && canPipelines && !blocked) {
-      const items = trusts.data?.items ?? (await api.publish.trusts.list({ limit: 200 })).items;
-      head.push(
-        ...items
-          .map(pipelineOf)
-          .filter((p) => starts(q, p.rule))
-          .sort((a, b) => a.rule.localeCompare(b.rule))
-          .map((p): GrantChoice => ({ id: "ci:" + p.id, label: p.rule, detail: pipelineFacts(p), kind: "plain" })),
-      );
+      // The first CI pipelines whose name holds q, in the server's order (names that start with q first).
+      const { items } = await api.publish.trusts.list({ limit: 20 }, q || undefined);
+      head.push(...items.map(pipelineOf).map((p): GrantChoice => ({ id: "ci:" + p.id, label: p.rule, detail: pipelineFacts(p), kind: "plain" })));
     }
     const people = await findPeople(q, after);
     return { next: people.next, items: [...head, ...people.items] };
@@ -343,47 +337,26 @@
   const publishFind = $derived(canAccess && canPipelines && !blocked ? "Find a person or a CI pipeline" : canAccess ? "Find a person" : "Find a CI pipeline");
 </script>
 
-<!-- One list of a card: each row an icon of its kind (an avatar for a person), its name, an address's
-     label on the line under it, its kind muted at the end, and × where the viewer may remove it. -->
+<!-- One list of a card: each row an icon of its kind (an avatar for a person), its name, its kind
+     muted at the end, and × where the viewer may remove it. -->
 {#snippet who(rows: TableSource<Row>, caption: string)}
   <ItemList source={rows} {caption} key={(r) => r.key} href={(r) => r.link}>
     {#snippet leading(r)}
-      {#if r.rule?.kind === "cidr"}<NetworkIcon class="size-5" />
-      {:else if r.rule}<ListIcon class="size-5" />
+      {#if r.rule}<ListIcon class="size-5" />
       {:else if r.key.startsWith("ci:")}<WorkflowIcon class="size-5" />
       {:else if r.admins}<ShieldCheckIcon class="size-5" />
       {:else}<UserAvatar name={r.title} size="sm" />{/if}
     {/snippet}
     {#snippet title(r)}
-      {#if r.rule?.kind === "cidr"}
-        <span class="font-mono">{r.title}</span>
-      {:else if r.person && canAccess}
+      {#if r.person && canAccess}
         <button type="button" class="rounded-sm outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50" aria-label="Permissions of {r.title}" onclick={() => r.person && edit(r.person)}>{r.title}</button>
       {:else}
         {r.title}
       {/if}
     {/snippet}
     {#snippet badges(r)}{#if r.off}<StatusBadge>Off</StatusBadge>{/if}{/snippet}
-    {#snippet meta(r)}
-      {#if r.rule?.kind === "cidr" && canSettings}
-        {@const rule = r.rule}
-        <Input
-          class="-ml-2 h-7 w-full border-transparent bg-transparent px-2 text-meta shadow-none hover:border-input focus-visible:border-input"
-          placeholder="Add a label"
-          aria-label="Label of {rule.value}"
-          autocomplete="off"
-          maxlength={200}
-          value={rule.note}
-          onchange={(e) => relabel(rule, e.currentTarget)}
-        />
-      {:else if r.rule?.kind === "cidr" && r.rule.note}
-        <span class="block whitespace-normal break-words">{r.rule.note}</span>
-      {/if}
-    {/snippet}
     {#snippet trailing(r)}
-      {#if r.rule?.kind !== "cidr"}
-        <span class="text-meta text-muted-foreground">{r.kind}</span>
-      {/if}
+      <span class="text-meta text-muted-foreground">{r.kind}</span>
       {#if r.admins && rows === publishRows}
         <Button variant="ghost" size="sm" aria-expanded={adminsOpen} onclick={() => (adminsOpen = !adminsOpen)}>
           {adminsOpen ? "Hide" : "Show"}<ChevronDownIcon class="transition-transform {adminsOpen ? 'rotate-180' : ''}" />
@@ -428,7 +401,35 @@
         {#snippet actions()}
           {#if canAccess || canSettings}<Button variant="outline" size="sm" onclick={() => (downloadOpen = true)}><PlusIcon />Add</Button>{/if}
         {/snippet}
-        {@render who(downloadRows, `Who can download from ${repo.name}`)}
+        {#if addresses.items.length}
+          <!-- The rows under the grid reach into the card's padding; this keeps their fill off the cells. -->
+          <div class={downloadRows.items.length ? "pb-2" : undefined}>
+            <RangeGrid
+              source={addresses}
+              caption="Addresses that can download from {repo.name}"
+              text={(r) => r.value}
+              onremove={canSettings ? removeRule : undefined}
+              wide={canSettings || addresses.items.some((r) => r.note)}
+            >
+              {#snippet note(rule)}
+                {#if canSettings}
+                  <Input
+                    class="-mx-2 h-7 w-[calc(100%+1rem)] border-transparent bg-transparent px-2 text-meta shadow-none hover:border-input focus-visible:border-input"
+                    placeholder="Add a label"
+                    aria-label="Label of {rule.value}"
+                    autocomplete="off"
+                    maxlength={200}
+                    value={rule.note}
+                    onchange={(e) => relabel(rule, e.currentTarget)}
+                  />
+                {:else if rule.note}
+                  <span class="line-clamp-2 break-words" title={rule.note}>{rule.note}</span>
+                {/if}
+              {/snippet}
+            </RangeGrid>
+          </div>
+        {/if}
+        {#if downloadRows.items.length || !addresses.items.length}{@render who(downloadRows, `Who can download from ${repo.name}`)}{/if}
         {#if a.download.notes.length}<p class="text-meta text-muted-foreground">{a.download.notes.join(" ")}</p>{/if}
       </AccessPart>
     {/if}

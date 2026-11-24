@@ -1,6 +1,6 @@
 <!--
   A choice of one person, or everyone, for a filter: a field with the chosen person's avatar that
-  asks the server for the people whose name starts with what you type, and a menu of them, each
+  asks the server for the people whose name holds what you type, and a menu of them, each
   with a small `UserAvatar`. `value` is "" for everyone. A name from the address that the search
   does not return still shows as the choice.
 
@@ -38,7 +38,7 @@
   let found = $state<string[]>([]);
   let failed = $state(false);
 
-  // The people of the typed prefix, asked again on each change while the menu is open; an answer
+  // The people whose name holds the typed text, asked again on each change while the menu is open; an answer
   // that a newer one overtook is dropped.
   let asked = 0;
   $effect(() => {
@@ -110,7 +110,7 @@
       {#if failed}
         <p class="px-3 py-2 text-sm text-muted-foreground">The people did not load. Type again to try again.</p>
       {:else if search.trim()}
-        <p class="px-3 py-2 text-sm text-muted-foreground">No person's name starts with “{search.trim()}”.</p>
+        <p class="px-3 py-2 text-sm text-muted-foreground">No person's name holds “{search.trim()}”.</p>
       {/if}
     {/each}
   </Select.Content>

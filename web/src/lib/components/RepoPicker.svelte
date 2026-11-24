@@ -1,6 +1,6 @@
 <!--
   A choice of one repository, or all of them for a filter: a field with the chosen repository's
-  format icon that asks the server for the repositories whose name starts with what you type
+  format icon that asks the server for the repositories whose name holds what you type
   (GET /api/repos?q=, 20 a time), and a menu of them with their icons. `value` is "" for all
   repositories. `filter` narrows the server's list (`perm`, `kind`); `keep` drops a repository
   from the menu (Search leaves out groups). With `all={false}` the choice is required: there is no
@@ -32,7 +32,7 @@
   }: {
     value: string;
     onchange: (name: string) => void;
-    /** What the server keeps (the typed prefix is added). */
+    /** What the server keeps (the typed text is added as q). */
     filter?: RepoFilter;
     /** Which of the server's repositories the menu shows; undefined: all of them. */
     keep?: (r: Repo) => boolean;
@@ -54,7 +54,7 @@
   // The formats of the repositories the menu showed, for the icon of the chosen one.
   let formatsOf = $state<Record<string, string>>({});
 
-  // The repositories of the typed prefix, asked again on each change while the menu is open; an
+  // The repositories whose name holds the typed text, asked again on each change while the menu is open; an
   // answer that a newer one overtook is dropped.
   let asked = 0;
   $effect(() => {
@@ -125,7 +125,7 @@
       {#if failed}
         <p class="px-3 py-2 text-sm text-muted-foreground">The repositories did not load. Type again to try again.</p>
       {:else if search.trim()}
-        <p class="px-3 py-2 text-sm text-muted-foreground">No repository's name starts with “{search.trim()}”.</p>
+        <p class="px-3 py-2 text-sm text-muted-foreground">No repository's name holds “{search.trim()}”.</p>
       {/if}
     {/each}
   </Select.Content>

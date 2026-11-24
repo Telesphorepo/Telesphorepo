@@ -64,7 +64,16 @@ func Module() module.Module {
 			x.Permissions(perm.Subsystem{ID: "edge", Scope: perm.ScopeServer, Label: "Edge delivery",
 				Help: "Downloads from Cloudflare's edge: the regions, the Worker configuration and its status."},
 				perm.Def{ID: PermManage, Label: "Manage edge delivery", Help: "Turn edge delivery on or off, choose its regions, deploy the Worker, and read its status and the Worker configuration.", SecondFactor: true})
-			x.AuditActions(audit.ActionDef{ID: ActionDeploy, Label: "Edge Worker deployed", Subsystem: "edge"})
+			x.AuditActions(audit.ActionDef{ID: ActionDeploy, Label: "Edge Worker deployed", Subsystem: "edge",
+				Sentence: "Worker deploy {ok}",
+				Fields: []audit.Field{
+					audit.Bool("ok", "Deployed", "finished", "failed"),
+					audit.Enum("trigger", "Started", map[string]string{"manual": "started by hand", "auto": "started on its own"}),
+					audit.Text("error", "Error"),
+					audit.Enum("step", "Failed step", stepText).Quietly(),
+					audit.List("changed", "Changes").Quietly(),
+					audit.Text("version", "Server version").Quietly(),
+				}})
 			x.Settings(&settings.Group{ID: "edge", Label: "Edge delivery", Perm: PermManage, Page: "/settings/edge",
 				Defs: defs(), Validate: m.validate, Test: m.test, Apply: m.apply})
 			x.Init(m.init)

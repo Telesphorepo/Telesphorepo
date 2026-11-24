@@ -137,10 +137,14 @@
         </ul>
       {/if}
       {#if shown.ranges.length}
-        <ul class="max-h-48 overflow-y-auto rounded-lg bg-panel px-4 py-3 text-sm tabular-nums" aria-label="Ranges found">
-          {#each shown.ranges.slice(0, shownRanges) as r (r)}<li>{r}</li>{/each}
+        <!-- As many columns as fit, so a long paste shows more than a few lines. -->
+        <ul
+          class="grid max-h-48 grid-cols-[repeat(auto-fill,minmax(min(100%,11rem),1fr))] gap-x-6 overflow-y-auto rounded-lg bg-panel px-4 py-3 text-sm tabular-nums"
+          aria-label="Ranges found"
+        >
+          {#each shown.ranges.slice(0, shownRanges) as r (r)}<li class="truncate" title={r.length > 18 ? r : undefined}>{r}</li>{/each}
           {#if shown.ranges.length > shownRanges}
-            <li class="text-muted-foreground">And {plural(shown.ranges.length - shownRanges, "more range", "more ranges")}.</li>
+            <li class="col-span-full text-muted-foreground">And {plural(shown.ranges.length - shownRanges, "more range", "more ranges")}.</li>
           {/if}
         </ul>
       {/if}

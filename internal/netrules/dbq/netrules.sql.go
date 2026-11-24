@@ -10,6 +10,23 @@ import (
 	"database/sql"
 )
 
+const countIPListGram = `-- name: CountIPListGram :one
+SELECT count(*) FROM (SELECT 1 FROM ip_list_grams WHERE gram = ?1 LIMIT ?2)
+`
+
+type CountIPListGramParams struct {
+	Gram  string
+	Limit int64
+}
+
+// The probe of a gram: its rows, up to limit.
+func (q *Queries) CountIPListGram(ctx context.Context, arg CountIPListGramParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countIPListGram, arg.Gram, arg.Limit)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createCustomList = `-- name: CreateCustomList :one
 INSERT INTO ip_lists (name, kind, title, description, ranges, created_at) VALUES (?, 'custom', ?, ?, ?, ?)
 RETURNING id
@@ -42,6 +59,16 @@ DELETE FROM ip_lists WHERE id = ? AND kind = 'custom'
 
 func (q *Queries) DeleteCustomList(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, deleteCustomList, id)
+	return err
+}
+
+const deleteIPListGrams = `-- name: DeleteIPListGrams :exec
+DELETE FROM ip_list_grams WHERE list_id = ?
+`
+
+// The grams of a list, through ip_list_grams_list (a change of its name or title writes them again).
+func (q *Queries) DeleteIPListGrams(ctx context.Context, listID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteIPListGrams, listID)
 	return err
 }
 
@@ -90,6 +117,24 @@ func (q *Queries) EnsurePresetList(ctx context.Context, arg EnsurePresetListPara
 	return err
 }
 
+const getIPListName = `-- name: GetIPListName :one
+SELECT id, name, title FROM ip_lists WHERE name = ?
+`
+
+type GetIPListNameRow struct {
+	ID    int64
+	Name  string
+	Title string
+}
+
+// A list by name: the row that a preset's start wrote, for its grams.
+func (q *Queries) GetIPListName(ctx context.Context, name string) (GetIPListNameRow, error) {
+	row := q.db.QueryRowContext(ctx, getIPListName, name)
+	var i GetIPListNameRow
+	err := row.Scan(&i.ID, &i.Name, &i.Title)
+	return i, err
+}
+
 const hasRepoNetworks = `-- name: HasRepoNetworks :one
 SELECT EXISTS (SELECT 1 FROM repo_networks WHERE repo_id = ?)
 `
@@ -100,6 +145,21 @@ func (q *Queries) HasRepoNetworks(ctx context.Context, repoID int64) (bool, erro
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const insertIPListGram = `-- name: InsertIPListGram :exec
+INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text) VALUES (?, ?, ?)
+`
+
+type InsertIPListGramParams struct {
+	Gram   string
+	ListID int64
+	Text   string
+}
+
+func (q *Queries) InsertIPListGram(ctx context.Context, arg InsertIPListGramParams) error {
+	_, err := q.db.ExecContext(ctx, insertIPListGram, arg.Gram, arg.ListID, arg.Text)
+	return err
 }
 
 const insertRepoNetwork = `-- name: InsertRepoNetwork :exec
@@ -314,6 +374,40 @@ type SavePresetRangesParams struct {
 func (q *Queries) SavePresetRanges(ctx context.Context, arg SavePresetRangesParams) error {
 	_, err := q.db.ExecContext(ctx, savePresetRanges, arg.Ranges, arg.FetchedAt, arg.Name)
 	return err
+}
+
+const searchIPLists = `-- name: SearchIPLists :many
+SELECT list_id FROM ip_list_grams WHERE gram = ?1 AND instr(text, ?2) > 0
+`
+
+type SearchIPListsParams struct {
+	Gram string
+	Text string
+}
+
+// The search of the lists' names and titles (internal/namesearch, migration
+// 0003_list_name_search.sql): the lists in the rows of one gram whose name or title holds the text.
+func (q *Queries) SearchIPLists(ctx context.Context, arg SearchIPListsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, searchIPLists, arg.Gram, arg.Text)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var list_id int64
+		if err := rows.Scan(&list_id); err != nil {
+			return nil, err
+		}
+		items = append(items, list_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setPresetError = `-- name: SetPresetError :exec

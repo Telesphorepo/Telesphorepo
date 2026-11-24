@@ -180,7 +180,8 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //     A core bearer token is checked by the kind of its credential. On a repo route that accepts
 //     publish sessions, a bearer of another kind goes on to the repo step, which lets it pass
 //     only with the open publish session of its scope for the repo. A request to a repo domain
-//     (OnRepoDomain) has no UI session: the cookie is not read.
+//     (OnRepoDomain) has no UI session: the cookie is not read. A UI session that identifies the
+//     request is renewed (auth.Service.RenewSession).
 //  2. A request without a credential passes only when the policy is Anonymous or names a repo.
 //  3. The fresh second factor (FreshFactor).
 //  4. The server permission, or the repository permission SomeRepo on at least one repo; then
@@ -232,6 +233,8 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 				return
 			}
 			c.P = pr
+			// A UI session stays open while it is in use (also when this request is refused).
+			m.auth.RenewSession(w, r, pr)
 		}
 		r = r.WithContext(audit.WithActor(r.Context(), auth.Actor(c.P, httpx.ClientIP(r))))
 		// kindAtRepo defers the credential kind check to the repo step: a write answers there that

@@ -4,8 +4,10 @@
   (?area=&action=&repo=&actor=&when=&from=&to=): first the area (the subsystem that registers the
   action), then one action of it, a repository picker, a person picker (GET /api/audit/people) and
   a date range (Today, Last 7 days, Last 30 days, or Custom: from one day to another, both
-  included, in the reader's time zone); the active filters show as chips. The events are grouped by day, each a list
-  of who did what, the facts in words, and when; this is the only page that shows IP addresses.
+  included, in the reader's time zone); the active filters show as chips. The events are grouped
+  by day, each a row of the time of day, who acted and what happened as a sentence
+  (activity/EventRow, in the words of activity/wording.ts: the sentence and the fields of its
+  action), which opens its details in place; this is the only page that shows IP addresses.
   Publish tokens (?view=publishing) lists every publish token that a device, a CI job or a person
   got (the publish log), newest first: an icon of where it came from (a CI pipeline, a device, the
   person), who in words, the repository and, for a CI job, its run in short ("acme/app · branch
@@ -21,7 +23,7 @@
   import { formatDateTime } from "$lib/format";
   import { subsystems } from "$lib/permissions";
   import { navPlace, pages } from "../../modules";
-  import { detailFacts } from "./activity/details";
+  import EventRow from "./activity/EventRow.svelte";
   import { subjectParts } from "./ci/presets";
   import WorkflowIcon from "@lucide/svelte/icons/workflow";
   import LaptopIcon from "@lucide/svelte/icons/laptop";
@@ -37,7 +39,6 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import UserAvatar from "$lib/components/UserAvatar.svelte";
-  import Logo from "$lib/components/Logo.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
   import RepoPicker from "$lib/components/RepoPicker.svelte";
   import PersonPicker from "$lib/components/PersonPicker.svelte";
@@ -73,10 +74,10 @@
     }
     return out;
   });
-  const actionText = (a: string) => actions.data?.find((x) => x.id === a)?.label ?? a;
+  const byId = $derived(new Map((actions.data ?? []).map((a) => [a.id, a])));
+  const actionOf = (a: string) => byId.get(a);
+  const actionText = (a: string) => actionOf(a)?.label ?? a;
   const areaOfAction = (a: string) => areas.find((x) => x.actions.some((y) => y.id === a));
-  // Refusals show in red.
-  const refusals = new Set(["signin.failed", "sso.signin.failed"]);
 
   const view = $derived(query.get("view") === "publishing" ? "publishing" : "events");
   const action = $derived(query.get("action") ?? "");
@@ -145,6 +146,13 @@
     } else setFilter({ when: w });
   }
   const clear = () => navigate(router.path, { replace: true });
+  // A quick filter of an open event; a kind of event also picks its area.
+  function quickFilter(f: { actor?: string; repo?: string; action?: string }) {
+    setFilter(f.action ? { ...f, area: areaOfAction(f.action)?.id ?? "" } : f);
+  }
+
+  // The one event whose details are open.
+  let openId = $state<number | null>(null);
 
   // The events by the day they happened on, in the reader's time zone.
   const dayKey = (iso: string) => {
@@ -162,12 +170,12 @@
     return (d.getFullYear() === today.getFullYear() ? weekday : withYear).format(d);
   }
   const days = $derived.by(() => {
-    const out: { key: string; label: string; source: { items: AuditEvent[]; loading: boolean; error: string } }[] = [];
+    const out: { key: string; label: string; items: AuditEvent[] }[] = [];
     for (const e of events.items) {
       const k = dayKey(e.at);
       let day = out[out.length - 1];
-      if (!day || day.key !== k) out.push((day = { key: k, label: dayLabel(e.at), source: { items: [], loading: false, error: "" } }));
-      day.source.items.push(e);
+      if (!day || day.key !== k) out.push((day = { key: k, label: dayLabel(e.at), items: [] }));
+      day.items.push(e);
     }
     return out;
   });
@@ -276,7 +284,8 @@
         {/each}
       </div>
     </div>
-  {:else if events.loading && events.items.length === 0}
+  {:else if (events.loading && events.items.length === 0) || (actions.loading && !actions.data)}
+    <!-- The events wait for the actions too: their sentences and fields word them. -->
     <Loading rows={4} />
   {:else if events.error && events.items.length === 0}
     <SourceError source={events} />
@@ -288,32 +297,25 @@
     {/if}
   {:else}
     {#each days as day (day.key)}
-      <section class="mt-8 first:mt-0" aria-label={day.label}>
-        <h3 class="mb-3 text-xs font-medium text-muted-foreground">{day.label}</h3>
-        <ItemList source={day.source} caption="Events of {day.label}" key={(e) => e.id}>
-          {#snippet leading(e)}
-            <!-- A person has an avatar; the server itself (core, cli, a module) and a CI job show the mark. -->
-            {#if e.actor_user_id != null}<UserAvatar name={e.actor} size="md" />{:else}<span class="flex size-8 shrink-0 items-center"><Logo size={20} /></span>{/if}
-          {/snippet}
-          {#snippet title(e)}
-            {actionText(e.action)}
-          {/snippet}
-          {#snippet badges(e)}
-            {#if refusals.has(e.action)}<StatusBadge tone="danger">Refused</StatusBadge>{/if}
-          {/snippet}
-          {#snippet meta(e)}
-            {@const facts = detailFacts(e)}
-            <span class="text-foreground">{e.actor}</span>{#if e.repo}<span aria-hidden="true">{" · "}</span><span class="inline-flex items-baseline gap-1"
-                >{#if formatOf(e.repo)}<FormatIcon format={formatOf(e.repo)} class="size-3.5 self-center" />{/if}{e.repo}</span
-              >{/if}{#if facts.length}<span aria-hidden="true">{" · "}</span>{facts.join(" · ")}{/if}
-          {/snippet}
-          {#snippet trailing(e)}
-            <div class="flex flex-col items-end text-right">
-              <span class="text-meta tabular-nums"><RelativeTime at={e.at} /></span>
-              {#if e.ip}<span class="text-xs text-muted-foreground tabular-nums max-sm:hidden" title="Address">{e.ip}</span>{/if}
-            </div>
-          {/snippet}
-        </ItemList>
+      <section class="mt-6 first:mt-0" aria-label={day.label}>
+        <h3 class="mb-1 text-xs font-medium text-muted-foreground">{day.label}</h3>
+        <!-- The rows reach 12px into the card's padding, as an ItemList's do; the line next to a filled row hides. -->
+        <ul
+          aria-label="Events of {day.label}"
+          class="-mx-3 [&>li:hover]:before:opacity-0 [&>li:hover+li]:before:opacity-0 [&>li[data-open]]:before:opacity-0 [&>li[data-open]+li]:before:opacity-0"
+        >
+          {#each day.items as e (e.id)}
+            <EventRow
+              event={e}
+              action={actionOf(e.action)}
+              open={openId === e.id}
+              ontoggle={() => (openId = openId === e.id ? null : e.id)}
+              {formatOf}
+              filters={{ actor, repo, action }}
+              onfilter={quickFilter}
+            />
+          {/each}
+        </ul>
       </section>
     {/each}
     <SourceMore source={events} />

@@ -102,13 +102,21 @@ func Module() module.Module {
 				Help: "How people sign in: single sign-on with an identity provider, and password sign-in."},
 				perm.Def{ID: PermManage, Label: "Manage sign-in options", Help: "Connect the identity provider, map its groups to permissions, and choose who may sign in with a password.", SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionSignIn, Label: "Signed in with single sign-on", Subsystem: "signin"},
-				audit.ActionDef{ID: ActionSignInFailed, Label: "Single sign-on refused", Subsystem: "signin"},
+				audit.ActionDef{ID: ActionSignIn, Label: "Signed in with single sign-on", Subsystem: "signin",
+					Sentence: "{actor} signed in with single sign-on"},
+				audit.ActionDef{ID: ActionSignInFailed, Label: "Single sign-on refused", Subsystem: "signin",
+					Sentence: "Single sign-on as {target} was refused",
+					Fields: []audit.Field{audit.Enum("reason", "Reason", map[string]string{
+						"username belongs to another account": "the username belongs to another account",
+						"invalid username":                    "the username is not valid here",
+						"account disabled":                    "the account is disabled",
+					})}},
 			)
 			x.Settings(h.group())
 			x.Init(func(_ context.Context, host *module.Host) error {
 				h.auth, h.publish, h.settings, h.audit, h.log = host.Auth, module.Use[*publish.Service](host), host.Settings, host.Audit, host.Log
 				host.Auth.SetSSO(func() bool { return h.cfg().OIDCEnabled() })
+				host.Auth.SetSSOSessionTTL(func() time.Duration { return h.cfg().OIDCSessionTTL })
 				host.Auth.SetManaged(func() bool { return h.cfg().Managed() })
 				return nil
 			})
@@ -175,7 +183,22 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 		httpx.Error(w, r, http.StatusServiceUnavailable, "identity provider unavailable")
 		return
 	}
-	h.start(w, r, c, p, pending{})
+	h.start(w, r, c, p, pending{next: uiNext(r.URL.Query().Get("next"))})
+}
+
+// uiNext returns v when it is a UI path to open after a sign-in ("/repo/x?tab=files", the next
+// of the sign-in page): one leading "/", printable ASCII without a backslash, at most 2 KiB.
+// Anything else gives "": the callback then opens Home.
+func uiNext(v string) string {
+	if len(v) > 2048 || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") || strings.Contains(v, `\`) {
+		return ""
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] <= ' ' || v[i] > '~' {
+			return ""
+		}
+	}
+	return v
 }
 
 // device starts a new sign-in at the provider that approves the device of ?code= for the SSO
@@ -419,7 +442,13 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 	h.log.InfoContext(ctx, "SSO login", "username", u.Username)
 	ctx = audit.WithActor(ctx, audit.Actor{Kind: audit.ActorUser, UserID: u.ID, Name: u.Username, IP: httpx.ClientIP(r)})
 	_ = h.audit.Record(ctx, audit.Event{Action: ActionSignIn, Target: u.Username})
-	http.Redirect(w, r, "/", http.StatusFound)
+	// The Location is set as it is: http.Redirect would clean the path inside the fragment.
+	to := "/"
+	if pend.next != "" {
+		to = "/#" + pend.next
+	}
+	w.Header().Set("Location", to)
+	w.WriteHeader(http.StatusFound)
 }
 
 // recordFailed writes sso.signin.failed; username is the name the provider gave.
@@ -643,6 +672,7 @@ type pending struct {
 	userID                   int64
 	userCode                 string
 	setupRepo                string
+	next                     string // the UI path to open after a sign-in (uiNext)
 }
 
 // stateStore holds pending sign-ins keyed by SHA-256(state): single use, 10 min TTL, bounded.

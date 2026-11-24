@@ -6,6 +6,26 @@
 SELECT id, name, kind, title, description, ranges, source, fetched_at, error, created_at
 FROM ip_lists WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
 
+-- A list by name: the row that a preset's start wrote, for its grams.
+-- name: GetIPListName :one
+SELECT id, name, title FROM ip_lists WHERE name = ?;
+
+-- The search of the lists' names and titles (internal/namesearch, migration
+-- 0003_list_name_search.sql): the lists in the rows of one gram whose name or title holds the text.
+-- name: SearchIPLists :many
+SELECT list_id FROM ip_list_grams WHERE gram = sqlc.arg(gram) AND instr(text, sqlc.arg(text)) > 0;
+
+-- The probe of a gram: its rows, up to limit.
+-- name: CountIPListGram :one
+SELECT count(*) FROM (SELECT 1 FROM ip_list_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));
+
+-- name: InsertIPListGram :exec
+INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text) VALUES (?, ?, ?);
+
+-- The grams of a list, through ip_list_grams_list (a change of its name or title writes them again).
+-- name: DeleteIPListGrams :exec
+DELETE FROM ip_list_grams WHERE list_id = ?;
+
 -- A preset gets its row on the first start; later starts update its title, description and
 -- source.
 -- name: EnsurePresetList :exec

@@ -11,7 +11,8 @@
   the heading "Your repositories". Then where the space goes: the eight largest repositories as
   bars, each with its format's icon. Then, for a holder
   of Activity the downloads of the last 30 days (GET /api/stats: the total, the bytes served, a
-  column per day, the five most downloaded repositories) and the last five events. The sidebar lists the pages: this page does not repeat it.
+  column per day, the five most downloaded repositories) and the last five events, each the sentence
+  of Activity (activity/EventSentence) with its first facts and when. The sidebar lists the pages: this page does not repeat it.
   A person who opens no Settings page goes on to Your account, in place of this address.
 -->
 <script lang="ts">
@@ -20,7 +21,7 @@
   import { auth } from "$lib/auth.svelte";
   import { brand } from "$lib/brand.svelte";
   import { api, type Count, type Repo } from "$lib/api";
-  import { Resource, listOf } from "$lib/load.svelte";
+  import { RepoFormats, Resource, listOf } from "$lib/load.svelte";
   import { formatCount, formatDateTime, formatSize } from "$lib/format";
   import { count, noun, versionName } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
@@ -37,6 +38,9 @@
   import SizeBars from "./overview/SizeBars.svelte";
   import DownloadBars from "./overview/DownloadBars.svelte";
   import EdgeNotice from "./overview/EdgeNotice.svelte";
+  import EventSentence from "../server/activity/EventSentence.svelte";
+  import EventActorIcon from "../server/activity/EventActorIcon.svelte";
+  import { actorOf, refused, wordEvent } from "../server/activity/wording";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import NewAccountDialog from "../server/people/NewAccountDialog.svelte";
   import DatabaseIcon from "@lucide/svelte/icons/database";
@@ -88,10 +92,17 @@
   const countText = (c: Count) => formatCount(c.count) + (c.more ? "+" : "");
   // --- recent activity ---
   const activity = opens("/settings/activity");
-  const events = activity ? new Resource(async () => (await api.audit({ limit: 5 })).items) : null;
-  const actions = activity ? new Resource(() => api.auditActions()) : null;
-  const actionText = (a: string) => actions?.data?.find((x) => x.id === a)?.label ?? a;
-  const refusals = new Set(["signin.failed", "sso.signin.failed"]);
+  // The last five events in the words of Activity, read with the actions that word them.
+  const events = activity
+    ? new Resource(async () => {
+        const [page, actions] = await Promise.all([api.audit({ limit: 5 }), api.auditActions()]);
+        const byId = new Map(actions.map((a) => [a.id, a]));
+        return page.items.map((e) => ({ id: e.id, at: e.at, action: e.action, repo: e.repo, actor: actorOf(e), ...wordEvent(e, byId.get(e.action)) }));
+      })
+    : null;
+  // The format icons of the repositories the events name, read for those names only.
+  const repoFormats = new RepoFormats();
+  $effect(() => repoFormats.want((events?.data ?? []).map((e) => e.repo)));
 
   // --- downloads of the last 30 days, for a holder of Activity ---
   const statDays = 30;
@@ -226,9 +237,11 @@
         {#if events.data?.length}<Button variant="outline" size="sm" href={href("/settings/activity")} aria-label="See all activity">See all</Button>{/if}
       {/snippet}
       <ItemList source={listOf(events)} caption="Recent activity" key={(e) => e.id} href={() => href("/settings/activity")}>
-        {#snippet title(e)}{actionText(e.action)}{#if e.target && e.target !== e.actor}<span class="text-muted-foreground">{" · "}{e.target}</span>{/if}{/snippet}
-        {#snippet badges(e)}{#if refusals.has(e.action)}<StatusBadge tone="danger">Refused</StatusBadge>{/if}{/snippet}
-        {#snippet meta(e)}{e.actor || "Someone"}{#if e.repo}{" · "}{e.repo}{/if}{" · "}<span title={formatDateTime(e.at)}><RelativeTime at={e.at} /></span>{/snippet}
+        <!-- The sentence of Activity, without its details: those open on Activity. -->
+        {#snippet leading(e)}<EventActorIcon actor={e.actor} size="md" />{/snippet}
+        {#snippet title(e)}<span class="font-normal"><EventSentence parts={e.sentence} formatOf={(r) => repoFormats.format(r)} /></span>{/snippet}
+        {#snippet badges(e)}{#if refused(e.action)}<StatusBadge tone="danger">Refused</StatusBadge>{/if}{/snippet}
+        {#snippet meta(e)}{#each e.facts.slice(0, 2) as f, i (i)}{f}{" · "}{/each}<RelativeTime at={e.at} />{/snippet}
         {#snippet empty()}
           <CompactEmpty icon={HistoryIcon} text="Nothing has happened yet." />
         {/snippet}

@@ -1,8 +1,9 @@
 import type { TableSource } from "$lib/load.svelte";
 
 /**
- * A list source (ItemList) over a list that the page already holds: the first `step` rows, and "Load
- * more" for the next. A downloaded network list holds thousands of ranges.
+ * A list source (RangeGrid) over a list that the page already holds: the first `step` items, and
+ * "Load more" for the next; `reset()` shows the first `step` again (a new search). A downloaded
+ * network list holds thousands of ranges. 240 fills whole rows of 2, 3, 4, 5, 6 or 8 columns.
  */
 export class Paged<T> implements TableSource<T> {
   #get: () => readonly T[];
@@ -11,7 +12,7 @@ export class Paged<T> implements TableSource<T> {
   loading = false;
   error = "";
 
-  constructor(get: () => readonly T[], step = 200) {
+  constructor(get: () => readonly T[], step = 240) {
     this.#get = get;
     this.#step = step;
     this.shown = step;
@@ -25,5 +26,8 @@ export class Paged<T> implements TableSource<T> {
   }
   more = () => {
     this.shown += this.#step;
+  };
+  reset = () => {
+    this.shown = this.#step;
   };
 }

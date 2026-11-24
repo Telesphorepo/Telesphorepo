@@ -6,10 +6,14 @@
   A row says when the group is public and the member is private (people without access to the
   member do not get its files through the group), and warns when a proxy comes before a hosted
   member (the remote can shadow your own files).
+
+  Add repositories finds the repositories of the format by name (GET /api/repos?format=&kind=&q=,
+  the hosted ones, then the proxies, 100 a page, 250 ms after the last key).
 -->
 <script lang="ts">
+  import { SvelteMap } from "svelte/reactivity";
   import { api, type Repo, type RepoKind } from "$lib/api";
-  import { Keyset, chain, type TableSource } from "$lib/load.svelte";
+  import { Keyset, Searched, chain, type TableSource } from "$lib/load.svelte";
   import { href, repoPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -30,17 +34,28 @@
   let { repo, members = $bindable() }: { repo: Repo; members: string[] } = $props();
 
   const maxMembers = 50;
-  // The repositories that can be members: the hosted ones of the format, then its proxies, each
-  // by name (GET /api/repos?format=&kind=), read when Add repositories first opens.
-  let candidates = $state.raw<TableSource<Repo> | null>(null);
-  const byKind = (kind: RepoKind) => new Keyset((p) => api.repos.list({ format: repo.format, kind }, p), 100);
-
   type Info = { kind: RepoKind; public: boolean; description: string };
+  // Every repository a search of Add repositories showed, so a member added from an earlier search
+  // keeps its kind.
+  const seen = new SvelteMap<string, Info>();
+  // The repositories that can be members, found by name: the hosted ones of the format, then its
+  // proxies (GET /api/repos?format=&kind=&q=), read when Add repositories first opens.
+  let candidates = $state.raw<Searched<Repo> | null>(null);
+  const byKind = (kind: RepoKind, q: string) =>
+    new Keyset(async (p) => {
+      const page = await api.repos.list({ format: repo.format, kind, q: q.toLowerCase() }, p);
+      for (const r of page.items) seen.set(r.name, { kind: r.kind, public: r.anonymous_read, description: r.description });
+      return page;
+    }, 100);
+  function openAdd() {
+    candidates ??= new Searched<Repo>((q) => chain(byKind("hosted", q), byKind("proxy", q)));
+    addOpen = true;
+  }
+
   // What the page knows of each repository that can be a member: the group's own answer first,
-  // then the pages of candidates (for members added since the last save).
+  // then the searches of Add repositories (for members added since the last save).
   const info = $derived.by(() => {
-    const m = new Map<string, Info>();
-    for (const r of candidates?.items ?? []) m.set(r.name, { kind: r.kind, public: r.anonymous_read, description: r.description });
+    const m = new Map<string, Info>(seen);
     for (const x of repo.members ?? []) {
       m.set(x.name, { kind: x.kind, public: x.public, description: m.get(x.name)?.description ?? "" });
     }
@@ -73,9 +88,6 @@
   // --- add ---
 
   let addOpen = $state(false);
-  $effect(() => {
-    if (addOpen && !candidates) candidates = chain(byKind("hosted"), byKind("proxy"));
-  });
   const rank = (name: string) => (info.get(name)?.kind === "proxy" ? 1 : 0);
   const choices = $derived(
     (candidates?.items ?? [])
@@ -99,7 +111,7 @@
 </script>
 
 {#snippet addButton()}
-  <Button variant="outline" disabled={members.length >= maxMembers} onclick={() => (addOpen = true)}><PlusIcon />Add repositories</Button>
+  <Button variant="outline" disabled={members.length >= maxMembers} onclick={openAdd}><PlusIcon />Add repositories</Button>
 {/snippet}
 
 <Section title="Members" description="The group reads its members in this order. The first member that has a file serves it." actions={members.length ? addButton : undefined}>
@@ -160,7 +172,9 @@
   loading={candidates?.loading ?? true}
   error={candidates?.error ?? ""}
   more={candidates ?? undefined}
+  search={candidates ?? undefined}
   none="Every repository of this format is in the group already."
+  notFound={(q) => `No other repository's name holds “${q}”.`}
   newLabel="New repository"
   newHref={auth.can("repositories.all") ? href("/settings/repositories/new") : undefined}
   onAdd={add}

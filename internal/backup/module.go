@@ -79,8 +79,23 @@ func Module() module.Module {
 				Help: "Copies of the database, the master key and the stored files in a folder."},
 				perm.Def{ID: PermManage, Label: "Manage backups", Help: "Choose the backup folder and schedule, back up now and see the backups.", SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionDone, Label: "Backup written", Subsystem: "backup"},
-				audit.ActionDef{ID: ActionFailed, Label: "Backup failed", Subsystem: "backup"},
+				audit.ActionDef{ID: ActionDone, Label: "Backup written", Subsystem: "backup",
+					Sentence: "Backup finished",
+					Fields: []audit.Field{
+						audit.Size("size", "Size"),
+						audit.Count("blobs", "Files", "file", "files"),
+						audit.Enum("storage", "Storage", map[string]string{"fs": "on disk", "s3": "on S3"}),
+						audit.Bool("master_key_included", "Master key included", "", "without the master key"),
+						audit.Count("removed_backups", "Older backups removed", "older backup removed", "older backups removed"),
+						audit.List("removed", "Older backups removed").Quietly(),
+						audit.Count("copied", "New files copied", "new file copied", "new files copied").Quietly(),
+						audit.Count("removed_blobs", "Unused files removed", "unused file removed", "unused files removed").Quietly(),
+						audit.Duration("seconds", "Took").Quietly(),
+						audit.Text("dir", "Folder").Quietly(),
+					}},
+				audit.ActionDef{ID: ActionFailed, Label: "Backup failed", Subsystem: "backup",
+					Sentence: "Backup failed",
+					Fields:   []audit.Field{audit.Text("error", "Error")}},
 			)
 			x.Settings(&settings.Group{ID: "backup", Label: "Backups", Perm: PermManage, Page: "/settings/backups",
 				Defs: []*settings.Def{Dir.Def(), Interval.Def(), Keep.Def()}, Test: test})
@@ -274,10 +289,15 @@ func (m *mod) run(ctx context.Context, dir string) {
 	h.Log.Info("backup written", "backup", res.Name, "dir", dir, "storage", man.Storage, "blobs", man.Counts.Blobs,
 		"copied", res.Copied, "size", man.Size(), "removed", len(pruned.Backups), "removed_blobs", pruned.Blobs,
 		"duration_ms", time.Since(start).Milliseconds())
-	h.Audit.Record(actx, audit.Event{Action: ActionDone, Target: res.Name, Detail: map[string]any{
+	detail := map[string]any{
 		"dir": dir, "storage": man.Storage, "blobs": man.Counts.Blobs, "copied": res.Copied, "size": man.Size(),
 		"master_key_included": man.MasterKeyIncluded, "removed": pruned.Backups, "removed_blobs": pruned.Blobs,
-	}})
+		"seconds": int64(time.Since(start).Seconds()),
+	}
+	if n := len(pruned.Backups); n > 0 {
+		detail["removed_backups"] = n
+	}
+	h.Audit.Record(actx, audit.Event{Action: ActionDone, Target: res.Name, Detail: detail})
 }
 
 // Listed is one backup as GET /api/backup shows it.

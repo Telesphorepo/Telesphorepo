@@ -321,7 +321,7 @@ export type Repo = {
   proxy?: RepoProxy;
 };
 
-/** What GET /api/repos keeps: a name prefix, a format, a kind, the repositories where the caller holds one of perm. */
+/** What GET /api/repos keeps: a text the name holds, a format, a kind, the repositories where the caller holds one of perm. */
 export type RepoFilter = { q?: string; format?: string; kind?: RepoKind; perm?: PermId[] };
 
 /** A bounded count: `more` when it stopped at 10,000. */
@@ -1309,7 +1309,40 @@ export type DownloadStats = {
   bytes: number;
 };
 /** GET /api/audit/actions: an action of the audit log with its label and permission subsystem. */
-export type AuditAction = { id: string; label: string; subsystem: string };
+/**
+ * How one detail key of an audit action reads (the fields of GET /api/audit/actions). The server
+ * registers a field for every key an action records.
+ */
+export type AuditField = {
+  key: string;
+  /** The name of the fact in the event's details: "Files", "Folder", "Storage". */
+  label: string;
+  /**
+   * text: the value as is; count: a number with its unit ("12,827 files"); size: bytes ("14 GiB");
+   * bool: the phrase of true or false; list: strings ("a, b and 3 more"); enum: the words of each
+   * value; perms: a permission set in words ("Download, publish", "Administrator"); time: unix
+   * seconds or an RFC 3339 string; duration: seconds ("6 minutes"); hidden: never shown.
+   */
+  kind: "text" | "count" | "size" | "bool" | "list" | "enum" | "perms" | "time" | "duration" | "hidden";
+  /** count: the unit, singular and plural ("file", "files"). */
+  one?: string;
+  many?: string;
+  /** bool: the phrase for true and for false; empty or absent shows nothing for that value. */
+  yes?: string;
+  no?: string;
+  /** enum and list: the words of each value (of each item of a list); a value without words shows as is. */
+  values?: Record<string, string>;
+  /** perms: a repository set ("repo") or a server set ("server"). */
+  scope?: "repo" | "server";
+  /** Shown only in the event's details, never in its summary line. */
+  quiet?: boolean;
+};
+/**
+ * One registered action. sentence is how an event reads, with the placeholders {actor}, {repo},
+ * {target} and {<detail key>} ("{actor} published {files} to {repo}"); the facts of the fields
+ * that the sentence does not name and that are not quiet follow it on the summary line.
+ */
+export type AuditAction = { id: string; label: string; subsystem: string; sentence: string; fields: AuditField[] };
 
 /** One released entry of the change log: what changed in a scope, and which side (needs) must be new. */
 export type ChangeEntry = { id?: string; version: string; scope: string; needs: string; summary: string };

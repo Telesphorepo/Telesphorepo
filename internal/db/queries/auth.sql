@@ -23,8 +23,8 @@ SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
 FROM users WHERE id = ?;
 
--- A keyset page of the accounts whose username is in [lower, upper): the cursor and a name prefix
--- in one range of the username index.
+-- A keyset page of the accounts whose username is in [lower, upper): the names after the cursor,
+-- one range of the username index. A search of the names reads ListUserGrams (names.sql).
 -- name: ListUsers :many
 SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
@@ -150,9 +150,17 @@ DELETE FROM sessions WHERE id_hash = ?;
 -- name: DeleteUserSessions :exec
 DELETE FROM sessions WHERE user_id = ?;
 
+-- The sessions of a user but one (a password change keeps the session that made it); served by sessions_user.
+-- name: DeleteOtherUserSessions :exec
+DELETE FROM sessions WHERE user_id = sqlc.arg(user_id) AND id_hash <> sqlc.arg(keep);
+
+-- Moves the end of an open session later, never earlier; one primary-key write.
+-- name: ExtendSession :execrows
+UPDATE sessions SET expires_at = sqlc.arg(expires_at)
+WHERE id_hash = sqlc.arg(id_hash) AND expires_at < sqlc.arg(expires_at);
 
 -- name: GetSessionPrincipal :one
-SELECT s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
+SELECT s.created_at, s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.id_hash = ?;

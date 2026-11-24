@@ -2,8 +2,8 @@
   Browse: the repositories the visitor can download from, by name, as one table to scan down: the
   format icon, the name with a lock after a private one, the format, the kind of a proxy or a
   group, and the description on one line. The server pages the list (GET /api/repos, 100 a page)
-  and the next page loads on its own as the end of the table comes into view. The filter box (the
-  start of the name, 250 ms after the last key) and the format select ("All formats" first, then
+  and the next page loads on its own as the end of the table comes into view. The filter box (a name
+  that holds it, 250 ms after the last key) and the format select ("All formats" first, then
   each format of the server with its icon) ask the server again. The Format column shows with two
   or more formats on the server, the Kind column once a proxy or a group is listed. A click
   anywhere on a row opens the repository. People with All repositories create a repository from
@@ -99,7 +99,7 @@
   <Toolbar>
     <InputGroup.Root class="sm:w-72">
       <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Filter by name" aria-label="Filter repositories by the start of the name" />
+      <InputGroup.Input bind:value={filter} type="search" placeholder="Filter by name" aria-label="Filter repositories by name" />
     </InputGroup.Root>
     {#if present.length > 1}
       <Select.Root type="single" value={format || allFormats} onValueChange={(v) => (format = v === allFormats ? "" : v)}>

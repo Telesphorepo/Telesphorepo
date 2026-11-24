@@ -139,6 +139,89 @@ export class RepoFormats {
   }
 }
 
+/** True once a source has answered its first page (rows, none, or an error). */
+const answered = <T>(s: TableSource<T>) => !s.loading || s.items.length > 0 || !!s.error;
+
+/**
+ * A list searched by name: a source per query (a Keyset, or a chain), asked 250 ms after the last
+ * key of `text`. The last answer stays on screen until the next query has its first page, so typing
+ * never empties the list. `query` is the text the rows answer (for "No repository's name holds
+ * “x”"); flush() asks at once (Enter). A table source itself: pass it to ItemList or SourceMore.
+ *
+ *   const found = new Searched((q) => new Keyset((p) => api.repos.list({ q }, p), 100));
+ *   <input bind:value={found.text} />  <ItemList source={found} … />
+ */
+export class Searched<T> implements TableSource<T> {
+  #make: (q: string) => TableSource<T>;
+  #text = $state("");
+  #cur = $state.raw<{ q: string; src: TableSource<T> }>(null!);
+  #prev = $state.raw<{ q: string; src: TableSource<T> } | null>(null);
+  #timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(make: (q: string) => TableSource<T>) {
+    this.#make = make;
+    this.#cur = { q: "", src: make("") };
+  }
+
+  /** What is typed; the search follows it 250 ms after the last change. */
+  get text() {
+    return this.#text;
+  }
+  set text(v: string) {
+    this.#text = v;
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(() => this.#search(), 250);
+  }
+
+  /** Asks for the typed text now, without the wait. */
+  flush = () => {
+    clearTimeout(this.#timer);
+    this.#search();
+  };
+
+  /** Empties the field and shows the whole list again at once. */
+  clear = () => {
+    this.#text = "";
+    this.flush();
+  };
+
+  #search() {
+    const q = this.#text.trim();
+    if (q === this.#cur.q) return;
+    if (answered(this.#cur.src)) this.#prev = this.#cur;
+    this.#cur = { q, src: this.#make(q) };
+  }
+
+  get #shown() {
+    return answered(this.#cur.src) || !this.#prev ? this.#cur : this.#prev;
+  }
+  /** The query that the rows on screen answer ("" for the whole list). */
+  get query() {
+    return this.#shown.q;
+  }
+  /** True while the typed text is not asked for yet or its first page is on its way. */
+  get pending() {
+    return this.#text.trim() !== this.#cur.q || !answered(this.#cur.src);
+  }
+  get items() {
+    return this.#shown.src.items;
+  }
+  get loading() {
+    return this.#shown.src.loading || !answered(this.#cur.src);
+  }
+  get error() {
+    return this.#shown.src.error;
+  }
+  get hasMore() {
+    return !!this.#shown.src.hasMore;
+  }
+  get loadingMore() {
+    return !!this.#shown.src.loadingMore;
+  }
+  more = () => this.#shown.src.more?.();
+  reload = () => this.#cur.src.reload?.();
+}
+
 /**
  * A keyset-paged list. The first page loads at once; more() appends the next page. Pass it to
  * <DataTable>, which shows "Load more".

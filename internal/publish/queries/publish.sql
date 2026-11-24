@@ -86,22 +86,58 @@ WHERE id = ?;
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
 FROM publish_trusts WHERE id = ?;
 
--- A keyset page by name of the policies whose name is in [lower, upper): the cursor and a name
--- prefix in one range of the name index.
+-- A keyset page by name of the policies whose name is in [lower, upper): the names after the
+-- cursor, one range of the name index. A search of the names reads SearchTrusts.
 -- name: ListTrusts :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
 FROM publish_trusts WHERE name >= sqlc.arg(lower) AND name < sqlc.arg(upper) ORDER BY name LIMIT sqlc.arg(limit);
 
--- A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos,
--- at least one: the policies that list a repo of the set, through publish_trust_repos_repo, kept
--- when every repo they list is in the set.
+-- A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos
+-- (a JSON array of ids; sqlc numbers the parameters after a slice wrongly), at least one: the
+-- policies that list a repo of the set, through publish_trust_repos_repo, kept when every repo
+-- they list is in the set.
 -- name: ListTrustsInRepos :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
 FROM publish_trusts WHERE name >= sqlc.arg(lower) AND name < sqlc.arg(upper) AND id IN (
-  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (sqlc.slice(repo_ids))
+  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (SELECT value FROM json_each(sqlc.arg(repo_ids)))
   GROUP BY tr.trust_id
   HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)
 ) ORDER BY name LIMIT sqlc.arg(limit);
+-- The search of the policy names (internal/namesearch, migration 0003_trust_name_search.sql):
+-- the rows of one gram after the key (key, after) up to the folded name to, in (folded, name)
+-- order, that hold the text (instr on the gram row). from is key (sqlc numbers a repeated
+-- parameter, which breaks the slice): the range on folded is the seek, and the name test skips
+-- only the names that fold to key, up to after (one name in other cases).
+-- name: SearchTrusts :many
+SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks, t.created_by, t.created_at, t.disabled
+FROM publish_trust_grams g JOIN publish_trusts t ON t.id = g.trust_id
+WHERE g.gram = sqlc.arg(gram) AND g.folded >= sqlc.arg(from) AND g.folded < sqlc.arg(to)
+  AND (g.folded > sqlc.arg(key) OR g.name > sqlc.arg(after)) AND instr(g.folded, sqlc.arg(text)) > 0
+ORDER BY g.folded, g.name LIMIT sqlc.arg(limit);
+
+-- The same search among the policies whose repos all lie in a set of repos, as ListTrustsInRepos.
+-- name: SearchTrustsInRepos :many
+SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks, t.created_by, t.created_at, t.disabled
+FROM publish_trust_grams g JOIN publish_trusts t ON t.id = g.trust_id
+WHERE g.gram = sqlc.arg(gram) AND g.folded >= sqlc.arg(from) AND g.folded < sqlc.arg(to)
+  AND (g.folded > sqlc.arg(key) OR g.name > sqlc.arg(after)) AND instr(g.folded, sqlc.arg(text)) > 0
+  AND t.id IN (
+  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (SELECT value FROM json_each(sqlc.arg(repo_ids)))
+  GROUP BY tr.trust_id
+  HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)
+) ORDER BY g.folded, g.name LIMIT sqlc.arg(limit);
+
+-- The probe of a gram: its rows, up to limit.
+-- name: CountTrustGram :one
+SELECT count(*) FROM (SELECT 1 FROM publish_trust_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));
+
+-- name: InsertTrustGram :exec
+INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id) VALUES (?, ?, ?, ?);
+
+-- The grams of a policy, through publish_trust_grams_trust (a rename writes them again).
+-- name: DeleteTrustGrams :exec
+DELETE FROM publish_trust_grams WHERE trust_id = ?;
+
 -- Deletes the policy and its repo list (ON DELETE CASCADE); its sessions keep trust_id NULL.
 -- name: DeleteTrust :execrows
 DELETE FROM publish_trusts WHERE id = ?;

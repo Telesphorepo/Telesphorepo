@@ -1,14 +1,14 @@
 <!--
   The one place to sign in: single sign-on (when configured), or username and password, then the
-  second step when the account has a second factor. query: next (a UI path to open after),
-  error (a single sign-on error code).
+  second step when the account has a second factor. query: next (a UI path to open after, also
+  after single sign-on), error (a single sign-on error code).
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
   import { navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { setupPaths } from "../modules";
-  import { api, errorMessage, type AuthConfig, type Proof, type SecondFactorMethod } from "$lib/api";
+  import { api, errorMessage, qs, type AuthConfig, type Proof, type SecondFactorMethod } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Spinner } from "$lib/components/ui/spinner";
@@ -36,11 +36,13 @@
     return n.startsWith("/") && !n.startsWith("//") ? n : "/";
   });
   const why = $derived(
-    next.startsWith("/device")
-      ? "Sign in to approve the device."
-      : next.startsWith("/settings")
-        ? "Sign in to open your settings."
-        : undefined,
+    auth.ended
+      ? "You were signed out. Sign in to go on."
+      : next.startsWith("/device")
+        ? "Sign in to approve the device."
+        : next.startsWith("/settings")
+          ? "Sign in to open your settings."
+          : undefined,
   );
 
   let config = $state<AuthConfig | null>(null);
@@ -127,7 +129,7 @@
       {#if why}<p class="mt-2 text-sm text-muted-foreground">{why}</p>{/if}
     </div>
     {#if config?.oidc}
-      <Button size="lg" variant="outline" href={api.auth.oidcLoginURL}>Continue with single sign-on</Button>
+      <Button size="lg" variant="outline" href={api.auth.oidcLoginURL + qs({ next: next === "/" ? undefined : next })}>Continue with single sign-on</Button>
       <div class="flex items-center gap-3 text-xs text-muted-foreground">
         <Separator class="flex-1" />
         or

@@ -192,6 +192,9 @@ func (s *Service) Rename(ctx context.Context, name, to string) (*Repo, error) {
 		n := *cur
 		n.Name = to
 		next = &n
+		if err := writeGrams(ctx, q, cur.Name, next); err != nil {
+			return err
+		}
 		if s.onChange != nil {
 			if err := s.onChange(ctx, tx, cur, next); err != nil {
 				return err
@@ -262,6 +265,9 @@ func (s *Service) Retire(ctx context.Context, fromID, intoID int64, tomb string,
 		n := *cur
 		n.Name = tomb
 		next = &n
+		if err := writeGrams(ctx, q, cur.Name, next); err != nil {
+			return err
+		}
 		if s.onChange != nil {
 			if err := s.onChange(ctx, tx, cur, next); err != nil {
 				return err

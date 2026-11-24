@@ -67,15 +67,15 @@ export const api = {
   },
 
   users: {
-    /** People: every account, or the ones whose username starts with q. */
+    /** People: every account, or the ones whose username holds q. */
     list: (p?: T.PageParams, q?: string) => request<T.Page<T.User>>("GET", "/api/users", { query: { q, ...page(p) } }),
     /** People: one account; 404 when no account has the name. */
     get: (username: string) => request<T.User>("GET", `/api/users/${enc(username)}`),
     /** People: the usernames of the enabled administrators (every server permission). */
     administrators: async () => (await request<{ usernames: string[] }>("GET", "/api/administrators")).usernames,
-    /** People: the repositories one person can use, by repository name. */
-    access: (username: string, p?: T.PageParams) =>
-      request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
+    /** People: the repositories one person can use, by repository name; with q, the ones whose name holds q. */
+    access: (username: string, p?: T.PageParams, q?: string) =>
+      request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: { q: q || undefined, ...page(p) } }),
     /** people.manage: a new local account with server permissions that the caller holds. */
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
     /** Changes a password: your own, or with People that of a person whose permissions you all hold. */
@@ -92,7 +92,7 @@ export const api = {
       request<T.Changed>("PATCH", "/api/users", { body: { usernames, disabled } }),
   },
 
-  /** People whose username starts with q, for a person picker (at most 20 a page). Needs People, or Manage access on a repository. */
+  /** People whose username holds q, for a person picker (at most 20 a page). Needs People, or Manage access on a repository. */
   people: {
     search: (q: string, p?: T.PageParams) => request<T.Page<T.PersonName>>("GET", "/api/people", { query: { q, ...page(p) } }),
   },
@@ -135,8 +135,9 @@ export const api = {
   repos: {
     /**
      * A keyset page by name of the repositories the caller can see (a visitor: the public ones),
-     * narrowed on the server: `q` a name prefix, `format`, `kind`, `perm` (the caller holds one of
-     * them). Items have no `config`; GET of one repository has it.
+     * narrowed on the server: `q` a text the name holds (the names that start with it first),
+     * `format`, `kind`, `perm` (the caller holds one of them). Items have no `config`; GET of one
+     * repository has it.
      */
     list: (f: T.RepoFilter = {}, p?: T.PageParams) =>
       request<T.Page<T.Repo>>("GET", "/api/repos", { query: { q: f.q, format: f.format, kind: f.kind, perm: f.perm?.join(","), ...page(p) } }),
@@ -318,8 +319,8 @@ export const api = {
 
   /** Network: named address ranges that repo rules and trusted proxies refer to. */
   ipLists: {
-    /** Every list without its ranges: presets first, then by name. */
-    list: () => request<T.IPList[]>("GET", "/api/ip-lists"),
+    /** Every list without its ranges, or the ones whose name or title holds q: presets first, then by name. */
+    list: (q?: string) => request<T.IPList[]>("GET", "/api/ip-lists", { query: { q: q || undefined } }),
     /** One list with its ranges. */
     get: (name: string) => request<T.IPList>("GET", `/api/ip-lists/${enc(name)}`),
     create: (l: T.NewIPList) => request<T.IPList>("POST", "/api/ip-lists", { body: l }),
@@ -514,7 +515,7 @@ export const api = {
     /** Activity: every session, newest first. */
     log: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: page(p) }),
     trusts: {
-      /** The CI pipelines the caller manages, or the ones whose name starts with q. */
+      /** The CI pipelines the caller manages, or the ones whose name holds q. */
       list: (p?: T.PageParams, q?: string) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: { q, ...page(p) } }),
       /** How many CI pipelines the caller manages (a count of every one stops at 10,000: more). */
       count: () => request<T.Count>("GET", "/api/publish/trusts/count"),
@@ -541,7 +542,7 @@ export const api = {
       },
     }),
 
-  /** activity.read: the people of the Activity filter whose username starts with q (at most 20 a page). */
+  /** activity.read: the people of the Activity filter whose username holds q (at most 20 a page). */
   auditPeople: (q: string, p?: T.PageParams) =>
     request<T.Page<T.PersonName>>("GET", "/api/audit/people", { query: { q, ...page(p) } }),
 

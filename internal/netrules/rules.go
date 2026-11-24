@@ -51,6 +51,7 @@ type rule struct {
 	cidr   string
 	listID int64
 	note   string
+	list   string // the name of list listID, set by normalize for the audit event
 }
 
 // repoRules is the in-memory copy of a repo's allowed networks with the CIDRs compiled.
@@ -184,7 +185,7 @@ func (s *Service) normalize(in []Rule) ([]rule, error) {
 		}
 		seen[key] = true
 		if listID != 0 {
-			out = append(out, rule{listID: listID, note: note})
+			out = append(out, rule{listID: listID, note: note, list: v})
 		} else {
 			out = append(out, rule{cidr: v, note: note})
 		}
@@ -244,8 +245,12 @@ func (s *Service) setRules(ctx context.Context, repo *repos.Repo, in Rules) (Rul
 				return err
 			}
 		}
+		allowed := make([]string, len(list))
+		for i, r := range list {
+			allowed[i] = cmp.Or(r.list, r.cidr)
+		}
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionRulesUpdate, RepoID: repo.ID, Repo: repo.Name,
-			Target: repo.Name, Detail: map[string]any{"networks": len(list)}})
+			Target: repo.Name, Detail: map[string]any{"networks": len(list), "allowed": allowed}})
 	})
 	if err != nil {
 		return Rules{}, err

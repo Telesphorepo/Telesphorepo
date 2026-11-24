@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -17,6 +16,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -148,10 +148,10 @@ func list(h *module.Host, w http.ResponseWriter, r *http.Request) {
 }
 
 // people returns the people of the Activity filter: a keyset page of at most 20 enabled usernames
-// that start with ?q=, after ?after=.
+// that hold ?q=, after ?after= (auth.Service.People).
 func people(h *module.Host, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	names, next, err := h.Auth.People(r.Context(), strings.ToLower(strings.TrimSpace(q.Get("q"))), q.Get("after"), min(httpx.Limit(r), 20))
+	names, next, err := h.Auth.People(r.Context(), namesearch.Text(q.Get("q")), q.Get("after"), min(httpx.Limit(r), 20))
 	if err != nil {
 		route.Fail(w, r, err)
 		return

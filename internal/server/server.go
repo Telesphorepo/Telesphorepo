@@ -134,6 +134,18 @@ func Build() (*Built, error) {
 			buildErr = err
 			return
 		}
+		titles := map[string]string{}
+		for _, s := range reg.All() {
+			titles[s.Name] = s.Title
+		}
+		actions.Fill(audit.WordsFormats, titles)
+		labels := map[string]string{}
+		for _, g := range groups {
+			for _, d := range g.Defs {
+				labels[d.Key] = d.Label
+			}
+		}
+		actions.Fill(audit.WordsSettings, labels)
 		built = &Built{Manifests: mfs, Formats: reg, Perms: perms, Actions: actions, Groups: groups, CI: providers}
 	})
 	return built, buildErr

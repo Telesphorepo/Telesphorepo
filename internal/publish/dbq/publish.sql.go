@@ -127,6 +127,23 @@ func (q *Queries) CopyTrustRepos(ctx context.Context, arg CopyTrustReposParams) 
 	return result.RowsAffected()
 }
 
+const countTrustGram = `-- name: CountTrustGram :one
+SELECT count(*) FROM (SELECT 1 FROM publish_trust_grams WHERE gram = ?1 LIMIT ?2)
+`
+
+type CountTrustGramParams struct {
+	Gram  string
+	Limit int64
+}
+
+// The probe of a gram: its rows, up to limit.
+func (q *Queries) CountTrustGram(ctx context.Context, arg CountTrustGramParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTrustGram, arg.Gram, arg.Limit)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countTrustsUpTo = `-- name: CountTrustsUpTo :one
 SELECT count(*) FROM (SELECT 1 FROM publish_trusts LIMIT ?1)
 `
@@ -395,6 +412,16 @@ func (q *Queries) DeleteTrust(ctx context.Context, id int64) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deleteTrustGrams = `-- name: DeleteTrustGrams :exec
+DELETE FROM publish_trust_grams WHERE trust_id = ?
+`
+
+// The grams of a policy, through publish_trust_grams_trust (a rename writes them again).
+func (q *Queries) DeleteTrustGrams(ctx context.Context, trustID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteTrustGrams, trustID)
+	return err
 }
 
 const deleteTrustRepos = `-- name: DeleteTrustRepos :exec
@@ -753,6 +780,27 @@ func (q *Queries) InsertSeenOIDCToken(ctx context.Context, arg InsertSeenOIDCTok
 	return result.RowsAffected()
 }
 
+const insertTrustGram = `-- name: InsertTrustGram :exec
+INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id) VALUES (?, ?, ?, ?)
+`
+
+type InsertTrustGramParams struct {
+	Gram    string
+	Folded  string
+	Name    string
+	TrustID int64
+}
+
+func (q *Queries) InsertTrustGram(ctx context.Context, arg InsertTrustGramParams) error {
+	_, err := q.db.ExecContext(ctx, insertTrustGram,
+		arg.Gram,
+		arg.Folded,
+		arg.Name,
+		arg.TrustID,
+	)
+	return err
+}
+
 const insertTrustRepo = `-- name: InsertTrustRepo :exec
 INSERT INTO publish_trust_repos (trust_id, repo_id) VALUES (?, ?)
 `
@@ -1086,8 +1134,8 @@ type ListTrustsParams struct {
 	Limit int64
 }
 
-// A keyset page by name of the policies whose name is in [lower, upper): the cursor and a name
-// prefix in one range of the name index.
+// A keyset page by name of the policies whose name is in [lower, upper): the names after the
+// cursor, one range of the name index. A search of the names reads SearchTrusts.
 func (q *Queries) ListTrusts(ctx context.Context, arg ListTrustsParams) ([]PublishTrust, error) {
 	rows, err := q.db.QueryContext(ctx, listTrusts, arg.Lower, arg.Upper, arg.Limit)
 	if err != nil {
@@ -1124,7 +1172,7 @@ func (q *Queries) ListTrusts(ctx context.Context, arg ListTrustsParams) ([]Publi
 const listTrustsInRepos = `-- name: ListTrustsInRepos :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
 FROM publish_trusts WHERE name >= ?1 AND name < ?2 AND id IN (
-  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (/*SLICE:repo_ids*/?)
+  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (SELECT value FROM json_each(?3))
   GROUP BY tr.trust_id
   HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)
 ) ORDER BY name LIMIT ?4
@@ -1133,28 +1181,21 @@ FROM publish_trusts WHERE name >= ?1 AND name < ?2 AND id IN (
 type ListTrustsInReposParams struct {
 	Lower   string
 	Upper   string
-	RepoIds []int64
+	RepoIds interface{}
 	Limit   int64
 }
 
-// A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos,
-// at least one: the policies that list a repo of the set, through publish_trust_repos_repo, kept
-// when every repo they list is in the set.
+// A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos
+// (a JSON array of ids; sqlc numbers the parameters after a slice wrongly), at least one: the
+// policies that list a repo of the set, through publish_trust_repos_repo, kept when every repo
+// they list is in the set.
 func (q *Queries) ListTrustsInRepos(ctx context.Context, arg ListTrustsInReposParams) ([]PublishTrust, error) {
-	query := listTrustsInRepos
-	var queryParams []interface{}
-	queryParams = append(queryParams, arg.Lower)
-	queryParams = append(queryParams, arg.Upper)
-	if len(arg.RepoIds) > 0 {
-		for _, v := range arg.RepoIds {
-			queryParams = append(queryParams, v)
-		}
-		query = strings.Replace(query, "/*SLICE:repo_ids*/?", strings.Repeat(",?", len(arg.RepoIds))[1:], 1)
-	} else {
-		query = strings.Replace(query, "/*SLICE:repo_ids*/?", "NULL", 1)
-	}
-	queryParams = append(queryParams, arg.Limit)
-	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	rows, err := q.db.QueryContext(ctx, listTrustsInRepos,
+		arg.Lower,
+		arg.Upper,
+		arg.RepoIds,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1414,6 +1455,136 @@ func (q *Queries) RevokeUserDevice(ctx context.Context, arg RevokeUserDevicePara
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const searchTrusts = `-- name: SearchTrusts :many
+SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks, t.created_by, t.created_at, t.disabled
+FROM publish_trust_grams g JOIN publish_trusts t ON t.id = g.trust_id
+WHERE g.gram = ?1 AND g.folded >= ?2 AND g.folded < ?3
+  AND (g.folded > ?4 OR g.name > ?5) AND instr(g.folded, ?6) > 0
+ORDER BY g.folded, g.name LIMIT ?7
+`
+
+type SearchTrustsParams struct {
+	Gram  string
+	From  string
+	To    string
+	Key   string
+	After string
+	Text  string
+	Limit int64
+}
+
+// The search of the policy names (internal/namesearch, migration 0003_trust_name_search.sql):
+// the rows of one gram after the key (key, after) up to the folded name to, in (folded, name)
+// order, that hold the text (instr on the gram row). from is key (sqlc numbers a repeated
+// parameter, which breaks the slice): the range on folded is the seek, and the name test skips
+// only the names that fold to key, up to after (one name in other cases).
+func (q *Queries) SearchTrusts(ctx context.Context, arg SearchTrustsParams) ([]PublishTrust, error) {
+	rows, err := q.db.QueryContext(ctx, searchTrusts,
+		arg.Gram,
+		arg.From,
+		arg.To,
+		arg.Key,
+		arg.After,
+		arg.Text,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PublishTrust
+	for rows.Next() {
+		var i PublishTrust
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Issuer,
+			&i.Audience,
+			&i.Claims,
+			&i.Jwks,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.Disabled,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchTrustsInRepos = `-- name: SearchTrustsInRepos :many
+SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks, t.created_by, t.created_at, t.disabled
+FROM publish_trust_grams g JOIN publish_trusts t ON t.id = g.trust_id
+WHERE g.gram = ?1 AND g.folded >= ?2 AND g.folded < ?3
+  AND (g.folded > ?4 OR g.name > ?5) AND instr(g.folded, ?6) > 0
+  AND t.id IN (
+  SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (SELECT value FROM json_each(?7))
+  GROUP BY tr.trust_id
+  HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)
+) ORDER BY g.folded, g.name LIMIT ?8
+`
+
+type SearchTrustsInReposParams struct {
+	Gram    string
+	From    string
+	To      string
+	Key     string
+	After   string
+	Text    string
+	RepoIds interface{}
+	Limit   int64
+}
+
+// The same search among the policies whose repos all lie in a set of repos, as ListTrustsInRepos.
+func (q *Queries) SearchTrustsInRepos(ctx context.Context, arg SearchTrustsInReposParams) ([]PublishTrust, error) {
+	rows, err := q.db.QueryContext(ctx, searchTrustsInRepos,
+		arg.Gram,
+		arg.From,
+		arg.To,
+		arg.Key,
+		arg.After,
+		arg.Text,
+		arg.RepoIds,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PublishTrust
+	for rows.Next() {
+		var i PublishTrust
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Issuer,
+			&i.Audience,
+			&i.Claims,
+			&i.Jwks,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.Disabled,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const seenOIDCToken = `-- name: SeenOIDCToken :one

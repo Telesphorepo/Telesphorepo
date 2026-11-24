@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -338,7 +337,13 @@ func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64)
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		var n int64
-		var err error
+		d, err := q.GetDevice(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errorf(ErrNotFound, "device not found")
+		}
+		if err != nil {
+			return err
+		}
 		if p.Perms.Has(perm.PeopleManage) {
 			n, err = q.RevokeDevice(ctx, dbq.RevokeDeviceParams{RevokedAt: now, ID: id})
 		} else {
@@ -353,7 +358,7 @@ func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64)
 		if _, err = q.CloseDevicePublishSessions(ctx, dbq.CloseDevicePublishSessionsParams{ClosedAt: now, DeviceID: nullID(id)}); err != nil {
 			return err
 		}
-		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"device_id": id}})
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: d.Name, Detail: map[string]any{"device_id": id}})
 	})
 	if err == nil {
 		s.deviceChanged(ctx, id)

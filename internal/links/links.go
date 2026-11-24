@@ -81,7 +81,9 @@ func Module() module.Module {
 					}
 					return nil
 				}})
-			x.AuditActions(audit.ActionDef{ID: ActionCreate, Label: "Download link created", Subsystem: "repo"})
+			x.AuditActions(audit.ActionDef{ID: ActionCreate, Label: "Download link created", Subsystem: "repo",
+				Sentence: "{actor} created a download link to {target} in {repo}",
+				Fields:   []audit.Field{audit.Time("expires_at", "Expires").Quietly()}})
 			x.Init(func(_ context.Context, h *module.Host) error {
 				m.h = h
 				h.Auth.SetLinkVerifier(m.verify)

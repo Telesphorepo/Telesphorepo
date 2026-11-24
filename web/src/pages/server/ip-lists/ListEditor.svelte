@@ -2,8 +2,10 @@
   The page of one network list. A list of your own has a name, a title, a description and its
   addresses, which the user pastes in any format (RangePaste); a new list ends with Create, an
   existing one saves from the SaveBar. A downloaded list shows its source, its ranges and its last
-  refresh, and refreshes on request. Both show the repositories that use the list, linked to their
-  Access tab. The parent keys it by name (null: a new list).
+  refresh, and refreshes on request. The ranges are a RangeGrid, 240 at a time, under Find an
+  address: the list comes whole from GET /api/ip-lists/{name}, so the search filters what the page
+  holds (rangeFinder in lib/network.ts). Both show the repositories that use the list, linked to
+  their Access tab. The parent keys it by name (null: a new list).
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -13,18 +15,22 @@
   import { Draft } from "$lib/unsaved.svelte";
   import { href, navigate } from "$lib/router.svelte";
   import { formatCount } from "$lib/format";
+  import { count } from "$lib/words";
+  import { rangeFinder } from "$lib/network";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
+  import Toolbar from "$lib/components/Toolbar.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
-  import CopyButton from "$lib/components/CopyButton.svelte";
+  import RangeGrid from "$lib/components/RangeGrid.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -38,7 +44,8 @@
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import WaypointsIcon from "@lucide/svelte/icons/waypoints";
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
-  import XIcon from "@lucide/svelte/icons/x";
+  import SearchIcon from "@lucide/svelte/icons/search";
+  import SearchXIcon from "@lucide/svelte/icons/search-x";
 
   let { name: listName }: { name: string | null } = $props();
 
@@ -63,7 +70,29 @@
     });
   });
 
-  const ranges = new Paged<string>(() => draft?.value.ranges ?? list.data?.ranges ?? []);
+  // Find an address: the whole list is in the page, so it filters what is loaded.
+  const allRanges = $derived<readonly string[]>(draft?.value.ranges ?? list.data?.ranges ?? []);
+  let query = $state("");
+  const finder = $derived(rangeFinder(allRanges));
+  const found = $derived(finder(query));
+  const ranges = new Paged<string>(() => found?.ranges ?? allRanges);
+  // A new search starts at the first page again.
+  $effect(() => {
+    query;
+    untrack(() => ranges.reset());
+  });
+  const quoted = () => (found?.kind === "text" ? `“${query.trim()}”` : query.trim());
+  /** "5,120 ranges", or what the search found: "1 range of 5,120 holds 140.82.112.5". */
+  const foundLine = $derived.by(() => {
+    if (!found) return count(allRanges.length, "range", "ranges");
+    const n = found.ranges.length;
+    if (!n) return "";
+    const verb = { address: ["holds", "hold"], range: ["overlaps", "overlap"], text: ["matches", "match"] }[found.kind][n === 1 ? 0 : 1];
+    return `${count(n, "range", "ranges")} of ${formatCount(allRanges.length)} ${verb} ${quoted()}`;
+  });
+  const noMatch = $derived(
+    found?.kind === "address" ? `No range of this list holds ${quoted()}.` : found?.kind === "range" ? `No range of this list overlaps ${quoted()}.` : `No range of this list matches ${quoted()}.`,
+  );
   const addRanges = (r: string[]) => {
     if (draft) draft.value.ranges = [...draft.value.ranges, ...r.filter((x) => !draft!.value.ranges.includes(x))];
   };
@@ -170,19 +199,35 @@
   </Section>
 {/snippet}
 
+<!-- The ranges as a dense grid under Find an address, which shows once there is a range to find. -->
 {#snippet rangeList(editable: boolean)}
-  <ItemList source={ranges} caption="Address ranges" key={(r) => r}>
-    {#snippet title(r)}<span class="tabular-nums">{r}</span>{/snippet}
-    {#snippet trailing(r)}
-      <CopyButton value={r} label="Copy {r}" />
-      {#if editable}
-        <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {r}" onclick={() => removeRange(r)}><XIcon /></Button>
-      {/if}
-    {/snippet}
-    {#snippet empty()}
-      <CompactEmpty icon={NetworkIcon} text={editable ? "An empty list allows no address." : "The first refresh fills the list."} />
-    {/snippet}
-  </ItemList>
+  <div>
+    {#if allRanges.length || query}
+      <Toolbar>
+        <InputGroup.Root class="sm:w-72">
+          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+          <!-- Enter here must not submit the form of a new list. -->
+          <InputGroup.Input
+            bind:value={query}
+            type="search"
+            placeholder="Find an address"
+            aria-label="Find an address or a range in this list"
+            onkeydown={(e: KeyboardEvent) => e.key === "Enter" && e.preventDefault()}
+          />
+        </InputGroup.Root>
+        {#snippet end()}<p class="text-meta text-muted-foreground tabular-nums" aria-live="polite">{foundLine}</p>{/snippet}
+      </Toolbar>
+    {/if}
+    <RangeGrid source={ranges} caption="Address ranges" text={(r) => r} onremove={editable ? removeRange : undefined}>
+      {#snippet empty()}
+        {#if found}
+          <CompactEmpty icon={SearchXIcon} text={noMatch} />
+        {:else}
+          <CompactEmpty icon={NetworkIcon} text={editable ? "An empty list allows no address." : "The first refresh fills the list."} />
+        {/if}
+      {/snippet}
+    </RangeGrid>
+  </div>
 {/snippet}
 
 {#if list.loading && list.data === undefined}

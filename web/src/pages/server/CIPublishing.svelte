@@ -4,9 +4,8 @@
   hold CI pipelines for them. One table by name: the name (Off after a turned-off one; the row
   opens the pipeline), the CI system with the GitHub repository or Jenkins host (when the name does
   not say it), the conditions as TicketBadges, and up to three of the repositories it publishes to.
-  The search field keeps the pipelines whose name starts with what is typed (case-sensitive): the
-  server answers it (GET /api/publish/trusts?q=), 250 ms after the last key. New CI pipeline opens
-  an empty one.
+  The search field keeps the pipelines whose name holds what is typed: the server answers it
+  (GET /api/publish/trusts?q=), 250 ms after the last key. New CI pipeline opens an empty one.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -76,7 +75,7 @@
   <Toolbar>
     <InputGroup.Root class="sm:w-72">
       <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search CI pipelines by the start of the name" />
+      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search CI pipelines by name" />
     </InputGroup.Root>
   </Toolbar>
 {/if}
@@ -101,7 +100,7 @@
     {/snippet}
     {#snippet empty()}
       {#if prefix}
-        <CompactEmpty icon={SearchXIcon} text="No pipeline's name starts with “{prefix}”." />
+        <CompactEmpty icon={SearchXIcon} text="No pipeline's name holds “{prefix}”." />
       {:else}
         <CompactEmpty icon={WorkflowIcon} text="None yet. Each file that a pipeline publishes links to the build that made it.">
           <Button variant="outline" href={newPipeline}><PlusIcon />New CI pipeline</Button>

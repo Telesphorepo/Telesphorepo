@@ -426,6 +426,9 @@ func (s *Service) Create(ctx context.Context, in Create) (*Repo, error) {
 		}
 		repo = &Repo{ID: id, Name: in.Name, Format: in.Format, Kind: in.Kind, AnonymousRead: in.AnonymousRead,
 			Config: cfg, CreatedAt: time.Unix(now, 0), Description: description, Fields: planned.Fields}
+		if err := writeGrams(ctx, q, "", repo); err != nil {
+			return err
+		}
 		if err := saveFields(ctx, tx, repo, fields); err != nil {
 			return err
 		}
@@ -592,6 +595,11 @@ func (s *Service) save(ctx context.Context, tx *sql.Tx, c *changes) error {
 		AnonymousRead: n.AnonymousRead, ID: n.ID}); err != nil {
 		return err
 	}
+	if n.AnonymousRead != c.old.AnonymousRead {
+		if err := publicGrams(ctx, q, n); err != nil {
+			return err
+		}
+	}
 	if c.proxy != nil {
 		creds, err := s.sealCredentials(n.ID, c.proxy)
 		if err != nil {
@@ -731,7 +739,15 @@ func (s *Service) DeleteRow(ctx context.Context, id int64, files int) error {
 		return err
 	}
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
-		n, err := dbq.New(tx).DeleteRepo(ctx, id)
+		q := dbq.New(tx)
+		cur, err := byID(ctx, q, id) // the name the grams hold
+		if err != nil {
+			return err
+		}
+		if err := dropGrams(ctx, q, cur.Name); err != nil {
+			return err
+		}
+		n, err := q.DeleteRepo(ctx, id)
 		if err != nil {
 			return err
 		}

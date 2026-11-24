@@ -13,9 +13,10 @@
   The server checks the remote before it creates the proxy. When the remote does not answer, the
   page shows the error and "Create anyway" sends the same request with force.
 
-  A group: its members, picked from the hosted repositories and proxies of the format. The page
-  orders them with the hosted repositories first, so a remote cannot shadow your own files. The
-  group's settings change the order later.
+  A group: its members, picked from the hosted repositories and proxies of the format, with a
+  search field that finds them by name (q, 250 ms after the last key) and the chosen ones as chips
+  over it, whatever the search shows. The page orders them with the hosted repositories first, so
+  a remote cannot shadow your own files. The group's settings change the order later.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -23,7 +24,7 @@
   import { auth } from "$lib/auth.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, ApiError, errorMessage, type NewRepo, type Repo, type RepoConfig, type RepoKind } from "$lib/api";
-  import { Keyset, Resource, chain, type TableSource } from "$lib/load.svelte";
+  import { Keyset, Resource, Searched, chain } from "$lib/load.svelte";
   import SourceMore from "$lib/components/SourceMore.svelte";
   import { normalizeRemote, remoteError } from "$lib/remotes";
   import { repoField } from "../../modules";
@@ -32,6 +33,7 @@
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import { Input } from "$lib/components/ui/input";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
@@ -42,6 +44,7 @@
   import OptionRow from "$lib/components/OptionRow.svelte";
   import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
+  import ChosenChips from "$lib/components/ChosenChips.svelte";
   import VisibilityChoice from "$lib/components/VisibilityChoice.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -49,6 +52,8 @@
   import PackageIcon from "@lucide/svelte/icons/package";
   import CloudDownloadIcon from "@lucide/svelte/icons/cloud-download";
   import LayersIcon from "@lucide/svelte/icons/layers";
+  import SearchIcon from "@lucide/svelte/icons/search";
+  import SearchXIcon from "@lucide/svelte/icons/search-x";
 
   let {}: PageProps = $props();
 
@@ -61,10 +66,11 @@
 
   const formats = new Resource(() => api.formats.list());
   // The repositories a group of the format can read: the hosted ones, then the proxies, each by
-  // name (GET /api/repos?format=&kind=); read when the person chooses a group, again for a new format.
-  let repos = $state.raw<TableSource<Repo> | null>(null);
+  // name, with the search's q (GET /api/repos?format=&kind=&q=); read when the person chooses a
+  // group, again for a new format.
+  let repos = $state.raw<Searched<Repo> | null>(null);
   let reposOf = "";
-  const byKind = (f: string, kind: RepoKind) => new Keyset((p) => api.repos.list({ format: f, kind }, p), 100);
+  const byKind = (f: string, kind: RepoKind, q: string) => new Keyset((p) => api.repos.list({ format: f, kind, q: q.toLowerCase() }, p), 100);
 
   const kindChoices: { kind: RepoKind; label: string; description: string; icon: typeof PackageIcon }[] = [
     { kind: "hosted", label: "A repository", description: "You publish your own packages here.", icon: PackageIcon },
@@ -115,8 +121,8 @@
   });
   $effect(() => {
     if (kind === "group" && formatName && reposOf !== formatName) {
-      reposOf = formatName;
-      repos = chain(byKind(formatName, "hosted"), byKind(formatName, "proxy"));
+      const f = (reposOf = formatName);
+      repos = new Searched((q) => chain(byKind(f, "hosted", q), byKind(f, "proxy", q)));
     }
   });
 
@@ -164,6 +170,22 @@
   function toggleMember(r: Repo, on: boolean) {
     if (on) chosenKinds = { ...chosenKinds, [r.name]: r.kind };
     chosen = on ? [...chosen, r.name] : chosen.filter((x) => x !== r.name);
+  }
+
+  // Enter in the search chooses the first repository for the typed text, once its page is here,
+  // and never submits the form.
+  let pickFirst = $state(false);
+  $effect(() => {
+    if (!pickFirst || !repos || repos.pending) return;
+    pickFirst = false;
+    const first = candidates.find((r) => !chosen.includes(r.name));
+    if (repos.query && first) toggleMember(first, true);
+  });
+  function onFindKey(e: KeyboardEvent) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    repos?.flush();
+    pickFirst = true;
   }
 
   async function create(e: SubmitEvent) {
@@ -339,10 +361,35 @@
         </FormSection>
       {:else if kind === "group"}
         <FormSection title="Members" description="The group reads these repositories in this order. You can change the order in the group's settings.">
+          {#if members.length || repos?.query || candidates.length}
+            <div class="mb-(--toolbar-gap) flex flex-col gap-4">
+              <ChosenChips label="Chosen members" items={members.map((m) => ({ key: m, label: m }))} none="None chosen yet." onremove={(c) => (chosen = chosen.filter((x) => x !== c.key))}>
+                {#snippet icon(c)}<span class="text-label tabular-nums" title="Read order">{members.indexOf(c.key) + 1}</span>{/snippet}
+              </ChosenChips>
+              {#if repos}
+                <InputGroup.Root>
+                  <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+                  <InputGroup.Input
+                    id="{id}-find"
+                    bind:value={repos.text}
+                    type="search"
+                    autocomplete="off"
+                    spellcheck={false}
+                    placeholder="Find a repository by name"
+                    aria-label="Find a repository by name"
+                    oninput={() => (pickFirst = false)}
+                    onkeydown={onFindKey}
+                  />
+                </InputGroup.Root>
+              {/if}
+            </div>
+          {/if}
           {#if !repos || (repos.loading && candidates.length === 0)}
             <Loading rows={3} />
           {:else if repos.error && candidates.length === 0}
             <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
+          {:else if !candidates.length && repos.query}
+            <CompactEmpty icon={SearchXIcon} text="No repository's name holds “{repos.query}”." />
           {:else if candidates.length}
             <div class="flex flex-col gap-1" role="group" aria-label="Members">
               {#each candidates as r (r.name)}

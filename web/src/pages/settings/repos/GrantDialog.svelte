@@ -2,8 +2,8 @@
   The grant dialog: repository permissions for people or repositories, in one of two modes.
 
   - `search`: Give access. A wide dialog of two columns of one fixed height, each scrolling on its
-    own (stacked on a phone). Left, Available: a field that finds things by the start of the name
-    (`search`, a page at a time from the server, with Show more; an empty field shows the first
+    own (stacked on a phone). Left, Available: a field that finds things whose name holds what is
+    typed (`search`, a page at a time from the server, with Show more; an empty field shows the first
     page) over the results. A row adds with a click, Enter, its "+" or a drag into the right
     column, and Add all shown adds every row of the results; a row never moves: an added one stays
     where it is with a check, and a thing in `exclude` (it holds access already) shows "Has
@@ -104,7 +104,7 @@
     description?: string;
     /** The thing in the list, singular and plural: ["person", "people"]. */
     noun: [string, string];
-    /** A page of the things whose name starts with q, after the cursor `after`. */
+    /** A page of the things whose name holds q, after the cursor `after`. */
     search?: (q: string, after?: string) => Promise<Page<GrantChoice>>;
     /** Ids that hold access already: they show as such and cannot be added. */
     exclude?: string[];
@@ -118,7 +118,7 @@
     held?: PermId[] | ((ids: string[]) => PermId[] | undefined);
     /** Whether things offered take permissions: Permissions for new items shows. */
     permissions?: boolean;
-    /** The placeholder of the find field; by default "Find a {noun} by the start of the name". */
+    /** The placeholder of the find field; by default "Find a {noun} by name". */
     find?: string;
     /** Answers the ranges of the address of this page: Add my address shows. */
     mine?: () => Promise<string[]>;
@@ -397,7 +397,7 @@
               type="search"
               autocomplete="off"
               spellcheck={false}
-              placeholder={find ?? `Find a ${noun[0]} by the start of the name`}
+              placeholder={find ?? `Find a ${noun[0]} by name`}
               aria-label={find ?? `Find a ${noun[0]}`}
               bind:value={filter}
               onkeydown={onSearchKey}
@@ -411,7 +411,7 @@
           {#if !searched && searching}
             <div class="p-2"><Loading inline /></div>
           {:else if searched && !found.length && !searchError}
-            <p class="px-2 py-2 text-body text-muted-foreground">{filter.trim() || !none ? `No ${noun[1]} match.` : none}</p>
+            <p class="px-2 py-2 text-body text-muted-foreground">{filter.trim() ? `No ${noun[0]}'s name holds “${filter.trim()}”.` : none || `No ${noun[1]} to add.`}</p>
           {/if}
           <ul class="flex flex-col gap-1" aria-label="Available {noun[1]}">
             {#each found as c (c.id)}

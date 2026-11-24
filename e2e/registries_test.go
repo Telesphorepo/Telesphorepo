@@ -103,7 +103,8 @@ func TestPermissionRegistry(t *testing.T) {
 }
 
 // TestAuditActions: GET /api/audit/actions lists the actions that the modules register, each
-// with a label and a subsystem, and the log records the actions of the services.
+// with a label, a subsystem, a sentence and a field for every detail key it records, so no fact
+// of Activity shows raw; and the log records the actions of the services.
 func TestAuditActions(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -111,6 +112,12 @@ func TestAuditActions(t *testing.T) {
 		ID        string `json:"id"`
 		Label     string `json:"label"`
 		Subsystem string `json:"subsystem"`
+		Sentence  string `json:"sentence"`
+		Fields    []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+			Kind  string `json:"kind"`
+		} `json:"fields"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/audit/actions", nil, s.Admin(), &actions)
 	var reg struct {
@@ -121,12 +128,23 @@ func TestAuditActions(t *testing.T) {
 	for _, sub := range reg.Subsystems {
 		subsystems[sub.ID] = true
 	}
+	// The kinds of a field that the web UI words (AuditField in web/src/lib/api/types.ts).
+	kinds := map[string]bool{"text": true, "count": true, "size": true, "bool": true, "list": true, "enum": true,
+		"perms": true, "time": true, "duration": true, "hidden": true}
 	listed := map[string]bool{}
+	fields := map[string]map[string]bool{} // the field keys of each action
 	for _, a := range actions {
-		if a.Label == "" || !subsystems[a.Subsystem] {
-			t.Fatalf("action %+v: a label and a subsystem of GET /api/permissions are required", a)
+		if a.Label == "" || !subsystems[a.Subsystem] || a.Sentence == "" {
+			t.Fatalf("action %+v: a label, a subsystem of GET /api/permissions and a sentence are required", a)
 		}
 		listed[a.ID] = true
+		fields[a.ID] = map[string]bool{}
+		for _, f := range a.Fields {
+			if f.Key == "" || f.Label == "" || !kinds[f.Kind] {
+				t.Errorf("action %s: field %+v needs a key, a label and a known kind", a.ID, f)
+			}
+			fields[a.ID][f.Key] = true
+		}
 	}
 	if st, b := s.API(t, http.MethodGet, "/api/audit/actions", nil, nil); st != http.StatusUnauthorized {
 		t.Fatalf("anonymous GET /api/audit/actions: status %d, want 401: %s", st, b)
@@ -164,6 +182,14 @@ func TestAuditActions(t *testing.T) {
 		}
 		if findAudit(all, c.action, c.actor) == nil {
 			t.Errorf("audit log has no %s event by %s", c.action, c.actor)
+		}
+	}
+	// Every detail key of every event has the words of a field of its action.
+	for _, e := range all {
+		for k := range e.Detail {
+			if !fields[e.Action][k] {
+				t.Errorf("%s event %d records detail %q, which its action registers no field for", e.Action, e.ID, k)
+			}
 		}
 	}
 }

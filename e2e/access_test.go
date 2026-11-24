@@ -268,6 +268,15 @@ func TestEffectiveAccess(t *testing.T) {
 		if permsOf(me, pub) != "repo.download/public" {
 			t.Fatalf("reader's access to a public repo: %+v", me)
 		}
+		// ?q= keeps the repos whose name holds it, in any case: a grant's and a public one.
+		for _, want := range []string{repo, pub} {
+			var found userAccess
+			q := strings.ToUpper(want[2:])
+			s.MustAPI(t, http.MethodGet, "/api/users/"+reader+"/access?q="+q, nil, s.Admin(), &found)
+			if len(found.Items) != 1 || found.Items[0].Repo != want {
+				t.Fatalf("GET /api/users/%s/access?q=%s: %+v, want only %s", reader, q, found.Items, want)
+			}
+		}
 		// Paging walks every repo once.
 		var all []string
 		after := ""

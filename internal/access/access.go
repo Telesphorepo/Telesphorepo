@@ -351,10 +351,11 @@ type User struct {
 	Repos       []UserRepo `json:"repos"`
 }
 
-// User returns a keyset page (by repo name, after the name after) of the repos u can use. A
-// disabled user can use none. On a proxy or a group a user holds no publish. next is "" at the
+// User returns a keyset page (by repo name, after the name after) of the repos u can use; with a
+// text (folded, namesearch.Text), the repos whose name holds it, those that start with it first.
+// A disabled user can use none. On a proxy or a group a user holds no publish. next is "" at the
 // end.
-func (e *Engine) User(ctx context.Context, u *auth.User, after string, limit int) (*User, string, error) {
+func (e *Engine) User(ctx context.Context, u *auth.User, text, after string, limit int) (*User, string, error) {
 	out := &User{Username: u.Username, Permissions: u.Permissions, Disabled: u.Disabled, Kind: u.Kind,
 		CanPublish: !u.Disabled, Repos: []UserRepo{}}
 	if u.Disabled {
@@ -376,9 +377,21 @@ func (e *Engine) User(ctx context.Context, u *auth.User, after string, limit int
 		var page []*repos.Repo
 		var next string
 		var err error
-		if allRepos {
+		switch {
+		case text != "":
+			// The search reads the public repos' grams and one lookup per grant of u.
+			ids := make([]int64, 0, len(sets))
+			for id := range sets {
+				ids = append(ids, id)
+			}
+			page, err = e.repos.PageSeen(ctx, repos.Seen{All: allRepos, Public: true, IDs: ids},
+				repos.ListQuery{After: after, Text: text, Limit: limit})
+			if len(page) == limit {
+				next = page[len(page)-1].Name
+			}
+		case allRepos:
 			page, next, err = e.repos.Page(ctx, after, limit)
-		} else {
+		default:
 			page, next, err = e.repos.PageVisibleTo(ctx, u.ID, after, limit)
 		}
 		if err != nil {

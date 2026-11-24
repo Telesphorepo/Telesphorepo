@@ -34,11 +34,11 @@ const repoColumns = `r.id, r.name, r.format, r.kind, r.anonymous_read, r.config,
   o.id, o.type, o.owner, o.ref, o.state, o.done, o.total, o.error, o.started_by, o.started_at, o.updated_at
 FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id`
 
-// listReposIn: ?1 from, ?2 to, ?3 format (” any), ?4 kind (” any), ?5 limit, then the ids. Each
-// parameter appears once: the plan guard binds one NULL per "?".
+// listReposIn: ?1 from, ?2 to, ?3 format (” any), ?4 kind (” any), ?5 limit, ?6 the text the name
+// holds (” any), then the ids. Each parameter appears once: the plan guard binds one NULL per "?".
 const listReposIn = `SELECT ` + repoColumns + `
 WHERE r.name >= ?1 AND r.name < ?2 AND r.format = coalesce(nullif(?3, ''), r.format) AND r.kind = coalesce(nullif(?4, ''), r.kind)
-  AND r.id IN (` + idsMark + `)
+  AND instr(r.name, ?6) > 0 AND r.id IN (` + idsMark + `)
 ORDER BY r.name LIMIT ?5`
 
 // listReposByIDs: the repos of the ids (the members of a group), in no order.
@@ -71,10 +71,10 @@ func withIDs(query string, ids []int64, args ...any) (string, []any) {
 	return strings.Replace(query, idsMark, marks, 1), args
 }
 
-// ListReposIn returns the repos of ids with a name in [from, to), of format and kind (” for any),
-// by name, at most limit.
-func (q *Queries) ListReposIn(ctx context.Context, ids []int64, from, to, format, kind string, limit int64) ([]GetRepoByNameRow, error) {
-	query, args := withIDs(listReposIn, ids, from, to, format, kind, limit)
+// ListReposIn returns the repos of ids with a name in [from, to) that holds text, of format and
+// kind (” for any), by name, at most limit.
+func (q *Queries) ListReposIn(ctx context.Context, ids []int64, from, to, text, format, kind string, limit int64) ([]GetRepoByNameRow, error) {
+	query, args := withIDs(listReposIn, ids, from, to, format, kind, limit, text)
 	return q.repoRows(ctx, query, args)
 }
 

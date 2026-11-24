@@ -14,18 +14,15 @@
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type Repo, type Trust, type TrustInput } from "$lib/api";
-  import { Keyset, RepoFormats, Resource } from "$lib/load.svelte";
-  import SourceMore from "$lib/components/SourceMore.svelte";
+  import { RepoFormats, Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { formats } from "$lib/formats/registry.svelte";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { Checkbox } from "$lib/components/ui/checkbox";
   import { Separator } from "$lib/components/ui/separator";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -45,7 +42,7 @@
   import OptionRow from "$lib/components/OptionRow.svelte";
   import WorkflowSetup from "./WorkflowSetup.svelte";
   import AdmissionTicket from "./AdmissionTicket.svelte";
-  import FormatIcon from "$lib/components/FormatIcon.svelte";
+  import RepoChoice from "./RepoChoice.svelte";
   import {
     conditionField,
     conditionsOf,
@@ -70,7 +67,6 @@
     type System,
   } from "./presets";
   import WorkflowIcon from "@lucide/svelte/icons/workflow";
-  import DatabaseIcon from "@lucide/svelte/icons/database";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import XIcon from "@lucide/svelte/icons/x";
   import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
@@ -84,13 +80,10 @@
   const returnTo = untrack(() => (back && /^\/(settings|repo)\/[^/]/.test(back) && !back.includes("//") ? back : null));
 
   const rule = new Resource<Trust | null>(() => (id === null ? Promise.resolve(null) : api.publish.trusts.get(id)));
-  // The hosted repositories where the person holds CI pipelines, 200 a page (GET /api/repos?perm=&kind=).
-  const repos = new Keyset((p) => api.repos.list({ perm: ["ci.pipelines"], kind: "hosted" }, p), 200);
-  // The formats of the chosen repositories, also of those on a page not loaded yet.
+  // The formats of the chosen repositories: the repositories step (RepoChoice) reads the pages it
+  // shows and the chosen repositories it has not seen, and tells this page.
   const repoFormats = new RepoFormats();
-  $effect(() => repoFormats.add(repos.items));
   const formatOf = (name: string) => repoFormats.format(name) || undefined;
-  $effect(() => repoFormats.want(draft?.value.repos ?? []));
   // A pipeline without its own audience checks tokens against the public address of the server.
   // The settings need one of General, Sign-in options, Storage or Network; without them the page skips the check.
   const readsSettings = (["general", "signin", "storage", "network"] as const).some((p) => auth.can(p));
@@ -98,16 +91,10 @@
   const noBaseURL = $derived(
     !!settings.data && !(settings.data.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
   );
-  // A CI pipeline publishes, so it names only hosted repositories, and only those where the person holds CI pipelines.
-  // A rehearsal repository (Rehearse publishing of the Nexus migration) comes right before the repository it rehearses.
+  // A CI pipeline publishes, so it names only hosted repositories, and only those where the person
+  // holds CI pipelines (RepoChoice). A rehearsal repository (Rehearse publishing of the Nexus
+  // migration) names the repository it rehearses.
   const rehearses = (r: Repo) => (typeof r.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
-  const sortedRepos = $derived(
-    [...repos.items].sort((a, b) => {
-        const ka = rehearses(a) || a.name;
-        const kb = rehearses(b) || b.name;
-        return ka === kb ? Number(!rehearses(a)) - Number(!rehearses(b)) : ka.localeCompare(kb);
-      }),
-  );
   /**
    * The rehearsal repository (<name>-rehearsal) of a repository that still copies from Nexus,
    * which a new pipeline publishes to first; the repository itself otherwise; null when the person
@@ -616,35 +603,7 @@
       </Area>
 
       <Area n={isNew ? 3 : undefined} title="Repositories it can publish to" footer={isNew && steps === 3 ? createRow : undefined}>
-        {#if repos.loading && repos.items.length === 0}
-          <Loading rows={3} />
-        {:else if repos.error && repos.items.length === 0}
-          <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
-        {:else if sortedRepos.length === 0}
-          {#if auth.can("repositories.all")}
-            <CompactEmpty icon={DatabaseIcon} text="Create a repository first, then come back to choose it.">
-              <Button variant="outline" href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>
-            </CompactEmpty>
-          {:else}
-            <CompactEmpty icon={DatabaseIcon} text="You hold CI pipelines on no repository that takes publishes." />
-          {/if}
-        {:else}
-          <div class="grid gap-1 sm:grid-cols-2">
-            {#each sortedRepos as r (r.name)}
-              <OptionRow
-                id="{fid}-repo-{r.name}"
-                label={r.name}
-                description={rehearses(r) ? `Rehearsal for ${rehearses(r)}: publish here first` : formats.title(r.format)}
-              >
-                {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
-                {#snippet control()}
-                  <Checkbox id="{fid}-repo-{r.name}" checked={v.repos.includes(r.name)} onCheckedChange={(on) => setRepo(r.name, on === true)} />
-                {/snippet}
-              </OptionRow>
-            {/each}
-          </div>
-          <SourceMore source={repos} />
-        {/if}
+        <RepoChoice id="{fid}-repos" chosen={v.repos} onchoose={setRepo} onrepos={(rs) => repoFormats.add(rs)} />
       </Area>
 
       {#if v.system !== "other"}

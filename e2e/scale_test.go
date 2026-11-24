@@ -192,6 +192,8 @@ func TestScale(t *testing.T) {
 	// holds it with a version per 1,000 rows, so its rarest segment (libN) holds fewer than the
 	// first probe of a search counts to at 100k, and more at 1M: the second probe decides there.
 	shared := path.Dir(path.Dir(sample.Path)) + "/"
+	// repoText is the name of the Maven repo but its first and last characters: a text inside it.
+	repoText := mvn[1 : len(mvn)-1]
 
 	ops := []scaleOp{
 		{name: "maven-get", path: func(*scaleServer) string { return "/maven/" + mvn + "/" + sample.Path },
@@ -212,6 +214,8 @@ func TestScale(t *testing.T) {
 		{name: "search-shared", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(shared) }, ok: []int{http.StatusOK}},
 		{name: "token-auth", path: func(*scaleServer) string { return "/api/me" }, ok: []int{http.StatusOK}},
 		{name: "repo-page", path: func(*scaleServer) string { return "/api/repos?limit=50" }, ok: []int{http.StatusOK}},
+		// A search of the repo names by a text inside them: the rows of its rarest trigram.
+		{name: "repo-search", path: func(*scaleServer) string { return "/api/repos?limit=50&q=" + url.QueryEscape(repoText) }, ok: []int{http.StatusOK}},
 		// The versions of an RPM package: the seek of rpm_packages_order (seed names its packages
 		// seedpkg<n>, so the first ones are at every size).
 		{name: "rpm-versions", path: func(*scaleServer) string { return "/api/repos/seed-rpm-00/versions?limit=20&path=Packages/seedpkg1/" }, ok: []int{http.StatusOK}},
@@ -249,6 +253,9 @@ func TestScale(t *testing.T) {
 			if b := scaleGet(t, s, q); !strings.Contains(string(b), sample.Path) {
 				t.Fatalf("%s at %s does not find %q: %s", q, s.name, sample.Path, b)
 			}
+		}
+		if q := "/api/repos?limit=50&q=" + url.QueryEscape(repoText); !strings.Contains(string(scaleGet(t, s, q)), `"`+mvn+`"`) {
+			t.Fatalf("%s at %s does not find %s", q, s.name, mvn)
 		}
 	}
 	t.Logf("maven repo %s, sample %s at every size, common term %q, shared folder %q", mvn, sample.Path, common, shared)

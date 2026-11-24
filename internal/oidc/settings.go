@@ -54,7 +54,7 @@ var (
 	PermissionMap = settings.Map(&settings.Def{Key: "oidc.permission_map", Label: "Permissions by claim value",
 		Help: "Each value of the permission claim gives these server permissions, for example {\"repo-admins\": [\"repositories.all\"]}. A person gets the permissions of every value they have."})
 	SessionTTL = settings.Duration(&settings.Def{Key: "oidc.session_ttl", Default: "12h", Label: "SSO session lifetime",
-		Help: "After this time, a person signed in through single sign-on must sign in again."})
+		Help: "A person signed in through single sign-on who does not use the UI for this time must sign in again. Each use starts the time again."})
 	ApprovalMaxAge = settings.Duration(&settings.Def{Key: "oidc.approval_max_age", Default: "5m", Label: "Sign-in age for approvals",
 		Help: "To approve a computer for the CLI, a person signs in at the identity provider again. The server takes that sign-in only when it is at most this old; a provider that skipped the new sign-in gives an older one.",
 		Validate: func(v any) error {

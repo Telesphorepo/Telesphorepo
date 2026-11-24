@@ -8,7 +8,8 @@
   let Add my address on the Access tab learn both addresses of a network.
   The allowed networks of a repository live on its Access tab and in Networks, not here.
   Proxies that sent forwarded headers without being trusted show as detected proxies, each with
-  Trust. The Caddyfile is the recommended setup.
+  Trust. The other trusted proxies (addresses, and network lists other than Cloudflare) are a
+  RangeGrid. The Caddyfile is the recommended setup.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -26,6 +27,7 @@
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
+  import RangeGrid from "$lib/components/RangeGrid.svelte";
   import CopyButton from "$lib/components/CopyButton.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import RangePaste from "$lib/components/RangePaste.svelte";
@@ -39,7 +41,7 @@
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import WaypointsIcon from "@lucide/svelte/icons/waypoints";
-  import XIcon from "@lucide/svelte/icons/x";
+  import ListIcon from "@lucide/svelte/icons/list";
 
   let {}: PageProps = $props();
 
@@ -122,13 +124,13 @@
     return a === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(a) || /^fe[89ab][0-9a-f]?:/.test(a);
   }
 
-  // The custom entries as list rows: addresses, then other network lists.
+  // The custom entries as cells: addresses, then other network lists.
   type Entry = { value: string; label: string; list: number; where: string };
   const entries = $derived<Entry[]>(
     draft
       ? [
           ...draft.value.custom.map((a) => ({ value: a, label: a, list: 0, where: isPrivate(a) ? "This machine or your network" : "" })),
-          ...draft.value.lists.map((id) => ({ value: "list:" + id, label: `Network list ${listName(id)}`, list: id, where: "" })),
+          ...draft.value.lists.map((id) => ({ value: "list:" + id, label: listName(id), list: id, where: "Network list" })),
         ]
       : [],
   );
@@ -191,7 +193,6 @@
     }
   });
   const caddyfile = $derived(`${host} {\n\treverse_proxy localhost:8080\n}`);
-  const quietDanger = "hover:bg-destructive/10 hover:text-destructive";
 </script>
 
 <PageHeader title="Network and proxy" description="How the server finds each visitor's address when a proxy sits in front of it." />
@@ -270,19 +271,21 @@
 
       {#if showCustom}
         <div class="mt-6 flex flex-col gap-6">
-          <ItemList source={entrySource} caption="Other trusted proxies" key={(e) => e.value}>
-            {#snippet title(e)}<span class="tabular-nums">{e.label}</span>{/snippet}
-            {#snippet meta(e)}{e.where}{/snippet}
-            {#snippet trailing(e)}
-              {#if !e.list}<CopyButton value={e.value} label="Copy {e.label}" />{/if}
-              {#if !locked}
-                <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {e.label}" onclick={() => removeEntry(e)}><XIcon /></Button>
-              {/if}
-            {/snippet}
+          <RangeGrid
+            source={entrySource}
+            caption="Other trusted proxies"
+            key={(e) => e.value}
+            text={(e) => e.label}
+            copy={(e) => (e.list ? undefined : e.value)}
+            onremove={locked ? undefined : removeEntry}
+            wide={entries.some((e) => e.where)}
+          >
+            {#snippet leading(e)}{#if e.list}<ListIcon class="size-4" />{/if}{/snippet}
+            {#snippet note(e)}{#if e.where}<span class="block truncate">{e.where}</span>{/if}{/snippet}
             {#snippet empty()}
               <CompactEmpty icon={WaypointsIcon} title="Specific addresses" state="None yet" text="Paste the addresses of your proxies below." />
             {/snippet}
-          </ItemList>
+          </RangeGrid>
           {#if !locked}<RangePaste id="{id}-paste" label="Add proxy addresses" onAdd={addCustom} />{/if}
         </div>
       {/if}

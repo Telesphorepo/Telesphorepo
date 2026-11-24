@@ -66,8 +66,10 @@ func Module() module.Module {
 		Register: func(x *module.Extender) {
 			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries"), Extra: dbq.Extra})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionUnlist, Label: "NuGet package unlisted", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionRelist, Label: "NuGet package relisted", Subsystem: "repo"},
+				audit.ActionDef{ID: ActionUnlist, Label: "NuGet package unlisted", Subsystem: "repo",
+					Sentence: "{actor} unlisted {target} in {repo}"},
+				audit.ActionDef{ID: ActionRelist, Label: "NuGet package relisted", Subsystem: "repo",
+					Sentence: "{actor} listed {target} again in {repo}"},
 			)
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q = host, dbq.New(host.DB.R)

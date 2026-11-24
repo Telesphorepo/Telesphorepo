@@ -50,7 +50,9 @@ var (
 	CookieSecure = Bool(&Def{Key: "cookie.secure", Default: "true", Dev: "false", Label: "Secure session cookie",
 		Help: "The browser sends the session cookie only over HTTPS. Turn this off only for a plain-HTTP setup."})
 	SessionTTL = Duration(&Def{Key: "session_ttl", Default: "168h", Label: "Session lifetime",
-		Help: "After this time, a person signed in to the UI must sign in again."})
+		Help: "A person signed in to the UI who does not use it for this time must sign in again. Each use starts the time again."})
+	SessionMaxAge = Duration(&Def{Key: "session_max_age", Default: "30d", Label: "Longest session",
+		Help: "This long after signing in to the UI, a person must sign in again, however active they are. It ends single sign-on sessions too."})
 	IndexDebounce = Duration(&Def{Key: "index.debounce", Default: "2s", Dev: "300ms", Label: "Index rebuild delay",
 		Help: "After a change, the server waits this long for more changes before it rebuilds the indexes of a repository (for example the Debian Packages files)."})
 	IndexMaxDelay = Duration(&Def{Key: "index.max_delay", Default: "30s", Label: "Max index rebuild delay",
@@ -203,7 +205,7 @@ func validateGeneral(d *Draft, _ Mode) error {
 // settings.general on Settings > General.
 func General() *Group {
 	return &Group{ID: "general", Label: "General", Perm: perm.SettingsGeneral, Defs: []*Def{
-		BaseURL.Def(), RepoDomains.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
+		BaseURL.Def(), RepoDomains.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(), SessionMaxAge.Def(),
 		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), DeleteWait.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
 		ServerName.Def(), ServerLogo.Def(),
 	}, Validate: validateGeneral}

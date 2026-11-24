@@ -9,6 +9,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 )
 
 // Effective access: who can download from and publish
@@ -47,7 +48,8 @@ type userAccessJSON struct {
 }
 
 func (a *API) writeUserAccess(w http.ResponseWriter, r *http.Request, u *auth.User) {
-	out, next, err := a.access.User(r.Context(), u, r.URL.Query().Get("after"), httpx.Limit(r))
+	q := r.URL.Query()
+	out, next, err := a.access.User(r.Context(), u, namesearch.Text(q.Get("q")), q.Get("after"), httpx.Limit(r))
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -56,7 +58,8 @@ func (a *API) writeUserAccess(w http.ResponseWriter, r *http.Request, u *auth.Us
 		out.Repos, route.Cursor(next)})
 }
 
-// userAccess returns the repos user {username} can use (people): ?after=<repo>&limit=.
+// userAccess returns the repos user {username} can use (people): ?after=<repo>&limit=, and ?q=
+// keeps the repos whose name holds it.
 func (a *API) userAccess(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	u, err := a.auth.GetUser(r.Context(), r.PathValue("username"))
 	if err != nil {
@@ -66,7 +69,7 @@ func (a *API) userAccess(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	a.writeUserAccess(w, r, u)
 }
 
-// myAccess returns the repos the caller can use: ?after=<repo>&limit=.
+// myAccess returns the repos the caller can use: ?after=<repo>&limit=&q=, as userAccess.
 func (a *API) myAccess(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p := c.P
 	u, err := a.auth.GetUser(r.Context(), p.Username)

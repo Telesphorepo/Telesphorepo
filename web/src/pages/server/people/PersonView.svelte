@@ -6,9 +6,10 @@
   the permissions read-only, with a link to Sign-in options for a person who can open it. The
   Repositories card lists the repositories where the person holds a grant, with the phrase of
   their permissions there under its name, and one line under the list counts the public
-  repositories they can also download from. Give access opens the grant dialog: the repositories
-  the caller manages access of on the left, the ones it gives on the right, each with its own
-  permissions, saved in one request; Change edits one repository and Remove takes its
+  repositories they can also download from. Past ten of them a search field keeps the ones whose
+  name holds what is typed (GET /api/users/{name}/access?q=, 250 ms after the last key). Give
+  access opens the grant dialog: the repositories the caller manages access of on the left, the
+  ones it gives on the right, each with its own permissions, saved in one request; Change edits one repository and Remove takes its
   access after a confirm; picked rows get one set of permissions, or lose their access after a
   confirm. Each change of repository permissions applies at once.
 -->
@@ -16,15 +17,17 @@
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, ApiError, type Repo, type PermId, type User, type UserRepoAccess } from "$lib/api";
-  import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
+  import { Keyset, Resource, Searched, type TableSource } from "$lib/load.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { allReposPermissions, labelOf, repoPhrase, serverRole, sortServerPermissions } from "$lib/permissions";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
+  import Toolbar from "$lib/components/Toolbar.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
@@ -46,6 +49,7 @@
   import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
   import UserXIcon from "@lucide/svelte/icons/user-x";
   import SearchXIcon from "@lucide/svelte/icons/search-x";
+  import SearchIcon from "@lucide/svelte/icons/search";
 
   let { name }: { name: string } = $props();
 
@@ -95,42 +99,48 @@
     user.data = next;
     toast.success(`Saved the server permissions of ${person}`);
     if (self) await auth.load();
-    await Promise.all([access.reload(), admins.reload()]);
+    await Promise.all([reloadAccess(), admins.reload()]);
   }
 
   // --- repositories ---
+  // Every repository of the person; the search asks for the names that hold the typed text and
+  // shows this list again when the field is empty.
   const access = new Keyset<UserRepoAccess>((p) => api.users.access(person, p));
+  const found = new Searched<UserRepoAccess>((q) => (q ? new Keyset((p) => api.users.access(person, p, q.toLowerCase())) : access));
+  const reloadAccess = () => Promise.all([access.reload(), found.query ? found.reload() : undefined]);
   // The public repositories that are not groups, for the line under the grants.
   const overview = new Resource(() => api.overview());
 
   // Only the grants are rows; the public repositories without one are counted in one line under them.
   type Row = { repo: string; format: string; public: boolean; perms: PermId[] };
-  const rows = $derived(
-    access.items
-      .filter((r) => r.via === "permission")
-      .map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [] })),
-  );
+  const grantsOf = (items: readonly UserRepoAccess[]) =>
+    items.filter((r) => r.via === "permission").map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [] }));
+  const rows = $derived(grantsOf(found.items));
+  // Of the whole list, whatever the search: what Give access leaves out, the public line, the search field.
+  const allRows = $derived(grantsOf(access.items));
   const publicOnly = $derived(
     Math.max(0, (overview.data?.public_repos ?? 0) - access.items.filter((x) => x.via === "permission" && x.public && x.kind !== "group").length),
   );
+  // The search shows once the list passes ten repositories, and stays while a search runs.
+  const searchable = $derived(allRows.length > 10 || access.hasMore || !!found.text.trim() || !!found.query);
   const source: TableSource<Row> = {
     get items() {
       return rows;
     },
     get loading() {
-      return access.loading;
+      return found.loading;
     },
     get error() {
-      return access.error;
+      return found.error;
     },
-    reload: () => access.reload(),
+    reload: () => found.reload(),
     get hasMore() {
-      return access.hasMore;
+      return found.hasMore;
     },
     get loadingMore() {
-      return access.loadingMore;
+      return found.loadingMore;
     },
-    more: () => access.more(),
+    more: () => found.more(),
   };
 
   const repoCount = (n: number) => count(n, "repository", "repositories");
@@ -140,11 +150,16 @@
 
   let picked = $state(new Set<string>());
   const pickedNames = $derived([...picked].sort((a, b) => a.localeCompare(b)));
+  // A new search starts with nothing picked.
+  $effect(() => {
+    void found.query;
+    untrack(() => (picked = new Set()));
+  });
 
   async function afterChange() {
     picked = new Set();
     if (self) await auth.load();
-    await Promise.all([access.reload(), admins.reload()]);
+    await Promise.all([reloadAccess(), admins.reload()]);
   }
 
   let removeOpen = $state(false);
@@ -160,8 +175,8 @@
 
   // --- give access and change permissions ---
   let giveOpen = $state(false);
-  const granted = $derived(new Set(rows.map((r) => r.repo)));
-  // The repositories where the caller holds Manage access whose name starts with q (GET /api/repos?perm=repo.access).
+  const granted = $derived(new Set(allRows.map((r) => r.repo)));
+  // The repositories where the caller holds Manage access whose name holds q (GET /api/repos?perm=repo.access).
   const formatOf = new Map<string, string>();
   async function findRepos(q: string, after?: string) {
     const page = await api.repos.list({ q, perm: ["repo.access"] }, { after, limit: 50 });
@@ -325,6 +340,14 @@
     {:else if u.disabled}
       <CompactEmpty icon={UserXIcon} text="A disabled account cannot use any repository. Enable the account to restore its access." />
     {:else}
+      {#if searchable}
+        <Toolbar>
+          <InputGroup.Root class="sm:w-72">
+            <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+            <InputGroup.Input bind:value={found.text} type="search" placeholder="Search by name" aria-label="Search the repositories of {person} by name" />
+          </InputGroup.Root>
+        </Toolbar>
+      {/if}
       <ItemList
         {source}
         caption="Repositories {person} can use"
@@ -355,10 +378,14 @@
           <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => askRemove(pickedNames)}>Remove access</Button>
         {/snippet}
         {#snippet empty()}
-          <CompactEmpty icon={DatabaseIcon} text="None yet. Give {person} access to a repository." />
+          {#if found.query}
+            <CompactEmpty icon={SearchXIcon} text="No repository's name holds “{found.query}”." />
+          {:else}
+            <CompactEmpty icon={DatabaseIcon} text="None yet. Give {person} access to a repository." />
+          {/if}
         {/snippet}
       </ItemList>
-      {#if publicOnly}
+      {#if publicOnly && !found.query}
         <p class="mt-4 text-meta text-muted-foreground">
           Can also download from the
           <a class="text-link underline-offset-4 hover:underline" href={href("/browse")}>{publicOnly === 1 ? "1 public repository" : `${publicOnly} public repositories`}</a>.

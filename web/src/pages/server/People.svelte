@@ -5,7 +5,7 @@
   the person's page (/settings/people/:name), where the account, its server permissions and its
   permissions on each repository change. New account opens a short form; after Create, the new
   person's page opens to set the permissions. Single sign-on accounts appear after their first
-  sign-in. The search field keeps the people whose name starts with what is typed: the server
+  sign-in. The search field keeps the people whose name holds what is typed: the server
   answers it (GET /api/users?q=), 250 ms after the last key. Pick rows (not your own, not the only
   administrator's) to disable people (after a confirm) or enable them at once.
 -->
@@ -110,7 +110,7 @@
   <Toolbar>
     <InputGroup.Root class="sm:w-72">
       <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search people by the start of the name" />
+      <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name" aria-label="Search people by name" />
     </InputGroup.Root>
   </Toolbar>
 {/if}
@@ -143,7 +143,7 @@
     {/snippet}
     {#snippet empty()}
       {#if prefix}
-        <CompactEmpty icon={SearchXIcon} text="No one's name starts with “{prefix}”." />
+        <CompactEmpty icon={SearchXIcon} text="No one's name holds “{prefix}”." />
       {:else}
         <CompactEmpty icon={UsersIcon} text="Only you so far. Add an account for each person who publishes or downloads private files.">
           <Button variant="outline" onclick={startCreate}><PlusIcon />New account</Button>

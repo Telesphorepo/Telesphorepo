@@ -19,6 +19,11 @@
 
   `icon` sits before the label, bare (a repository's FormatIcon). `children` render under the description, outside the hit target: a field, a note or a "Learn
   more" that belongs to the choice.
+
+  `compact` makes the row short for a long list of short choices (the repositories of a CI
+  pipeline): 8px above and below in place of 12px and the label on one line, cut with "…"; a
+  description, when there is one, is one cut line under it. `tooltip` is the row's tooltip: what
+  the icon says in words (the format), and the whole label when it is cut.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -30,6 +35,8 @@
     description,
     control,
     icon,
+    compact = false,
+    tooltip,
     children,
   }: {
     /** The id of the control. */
@@ -39,6 +46,10 @@
     control: Snippet;
     /** A bare 16px icon before the label: the FormatIcon of a repository. */
     icon?: Snippet;
+    /** One line: less padding, the label and the description cut with "…". */
+    compact?: boolean;
+    /** The tooltip of the row. */
+    tooltip?: string;
     /** More under the description, e.g. a field or a warning. Clicks here do not toggle. */
     children?: Snippet;
   } = $props();
@@ -56,14 +67,18 @@
 <div data-slot="option-row" class="option rounded-lg">
   <!-- The control is the keyboard target; the row only widens its pointer target. -->
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div data-hit class="hit flex cursor-pointer items-start gap-3 px-3 py-3" onclick={pick}>
+  <div data-hit class="hit flex cursor-pointer items-start gap-3 px-3 {compact ? 'py-2' : 'py-3'}" title={tooltip} onclick={pick}>
     <div class="flex h-5 items-center">{@render control()}</div>
-    <div class="flex min-w-0 flex-col gap-1">
+    <div class="flex min-w-0 flex-col {compact ? 'gap-0.5' : 'gap-1'}">
       <div class="flex min-w-0 items-center gap-2">
         {#if icon}<span aria-hidden="true" class="flex shrink-0 text-muted-foreground">{@render icon()}</span>{/if}
-        <Label for={id} class="cursor-[inherit] leading-5">{label}</Label>
+        {#if compact}
+          <Label for={id} class="min-w-0 cursor-[inherit] leading-5"><span class="min-w-0 truncate">{label}</span></Label>
+        {:else}
+          <Label for={id} class="cursor-[inherit] leading-5">{label}</Label>
+        {/if}
       </div>
-      {#if description}<p class="text-meta text-muted-foreground">{description}</p>{/if}
+      {#if description}<p class="text-meta text-muted-foreground {compact ? 'truncate' : ''}">{description}</p>{/if}
     </div>
   </div>
   {#if children}<div class="-mt-2 flex flex-col pr-3 pb-3 pl-10">{@render children()}</div>{/if}

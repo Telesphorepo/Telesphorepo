@@ -3,10 +3,12 @@
 // permission, auth.canRepo(repo, id) for a repository permission (repositories.all holds every
 // one), auth.allows(access) for a route.
 // Sign-in has two steps for an account with a second factor: signIn() answers {step: "second",
-// methods}, then finish with signInSecond().
+// methods}, then finish with signInSecond(). When a request finds the session ended, the person
+// goes to the sign-in page, which opens the page they were on after the sign-in.
 
 import {
   api,
+  ApiError,
   onSecondFactorRequired,
   onSessionLost,
   type Me,
@@ -14,17 +16,35 @@ import {
   type PermId,
   type SecondFactorMethod,
 } from "$lib/api";
-import { navigate, type Params } from "$lib/router.svelte";
+import { navigate, router, type Params } from "$lib/router.svelte";
 import type { Access } from "../modules/types";
 import { allReposPermissions, loadPermissions, managingRepoPermissions, repoPermissions } from "$lib/permissions";
 
 export type SignInResult = { step: "done"; user: Me } | { step: "second"; methods: SecondFactorMethod[] };
+
+/**
+ * Runs fn, and again after a growing wait (for about 15 seconds in all) while the server cannot be
+ * reached or answers 5xx: a restart (a deploy, the dev server rebuilding) is not a sign-out.
+ */
+async function untilReached<T>(fn: () => Promise<T>): Promise<T> {
+  for (let wait = 500; ; wait *= 2) {
+    try {
+      return await fn();
+    } catch (e) {
+      const transient = e instanceof ApiError && (e.status === 0 || e.status >= 500);
+      if (!transient || wait > 8000) throw e;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
 
 class Auth {
   /** null when signed out (anonymous visitors still browse anonymous-read repos). */
   user = $state<Me | null>(null);
   /** False until the first /api/me answers. */
   ready = $state(false);
+  /** True when a request found the session ended, until the next sign-in; the sign-in page says so. */
+  ended = $state(false);
 
   /** A local account without a second factor: its session reaches only the setup routes. */
   setupOnly = $derived(!!this.user?.second_factor_required);
@@ -91,19 +111,28 @@ class Auth {
   }
 
   constructor() {
+    // A visitor who never signed in gets 401 too: only a person who was signed in goes to sign in.
     onSessionLost(() => {
+      if (!this.user) return;
       this.user = null;
+      this.ended = true;
+      if (router.path !== "/login") {
+        navigate("/login", { query: { next: router.path + (router.search ? "?" + router.search : "") }, replace: true });
+      }
     });
     onSecondFactorRequired(() => {
       if (this.user) this.user = { ...this.user, second_factor_required: true };
     });
   }
 
-  /** Reads the permission registry and the current user; signed out on any error of /api/me. */
+  /**
+   * Reads the permission registry and the current user; signed out on an error of /api/me (a 401
+   * without a session), once the server can be reached (untilReached).
+   */
   async load() {
-    const registry = loadPermissions();
+    const registry = untilReached(loadPermissions);
     try {
-      this.user = await api.me();
+      this.user = await untilReached(api.me);
     } catch {
       this.user = null;
     }
@@ -115,12 +144,14 @@ class Auth {
     const a = await api.auth.login(username, password);
     if ("second_factor" in a) return { step: "second", methods: a.methods };
     this.user = a.session;
+    this.ended = false;
     return { step: "done", user: a.session };
   }
 
   async signInSecond(proof: Proof): Promise<Me> {
     const { session } = await api.auth.loginSecond(proof);
     this.user = session;
+    this.ended = false;
     return session;
   }
 

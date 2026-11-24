@@ -1,6 +1,7 @@
 // The one fetch wrapper of the UI. Every /api call goes through request(), which turns a non-2xx
 // answer (an RFC 9457 problem document) into an ApiError and tells the auth store when the session
-// is gone (401) or can only set up a second factor (403 second_factor_required).
+// is gone (401 with the refusal code "anonymous") or can only set up a second factor (403
+// second_factor_required).
 
 export class ApiError extends Error {
   constructor(
@@ -20,8 +21,15 @@ export class ApiError extends Error {
   }
 }
 
-/** The problem document of an error answer (RFC 9457), with the extension member fields. */
-type Problem = { type?: unknown; title?: unknown; detail?: unknown; fields?: unknown };
+/** The problem document of an error answer (RFC 9457), with the extension members fields and code. */
+type Problem = { type?: unknown; title?: unknown; detail?: unknown; fields?: unknown; code?: unknown };
+
+/**
+ * True for the answer to a request whose session has ended: the router found no credential (401
+ * with the refusal code "anonymous"). Any other 401 (a wrong password or second-factor code, a used
+ * single sign-on confirmation) comes with a session that is still open.
+ */
+const sessionEnded = (status: number, p: Problem | undefined) => status === 401 && p?.code === "anonymous";
 
 /** The message of a problem document: its detail, else its title, else fallback. */
 function problemMessage(p: Problem | undefined, fallback: string): string {
@@ -43,7 +51,7 @@ type Listener = () => void;
 const lost = new Set<Listener>();
 const setupOnly = new Set<Listener>();
 
-/** Calls fn when a request answers 401 outside the sign-in and second-factor routes. */
+/** Calls fn when a request without a publish session token finds the session ended (see sessionEnded). */
 export function onSessionLost(fn: Listener): () => void {
   lost.add(fn);
   return () => lost.delete(fn);
@@ -60,10 +68,6 @@ export function onSecondFactorRequired(fn: Listener): () => void {
  * WWW-Authenticate, so the browser never opens its own password popup.
  */
 const uiHeader = "X-Telesphorepo-UI";
-
-// A wrong password or second-factor code answers 401 on these routes. It must not look like an
-// expired session.
-const carriesCredentials = /^\/api\/(auth\/login|devices\/approve|publish\/sessions\/manual|security\/)/;
 
 export type Query = Record<string, string | number | boolean | null | undefined>;
 
@@ -114,14 +118,15 @@ export async function request<T = void>(method: string, url: string, opts: Reque
   if (!res.ok) {
     let message = res.statusText || `Request failed (${res.status})`;
     let fields: Record<string, string> | undefined;
+    let p: Problem | undefined;
     try {
-      const p = (await res.json()) as Problem;
+      p = (await res.json()) as Problem;
       message = problemMessage(p, message);
       fields = problemFields(p);
     } catch {
       /* not JSON */
     }
-    if (res.status === 401 && !opts.token && !carriesCredentials.test(url)) lost.forEach((f) => f());
+    if (!opts.token && sessionEnded(res.status, p)) lost.forEach((f) => f());
     if (res.status === 403 && message === "second_factor_required") {
       setupOnly.forEach((f) => f());
       message = "Add an authenticator app or a passkey to your account first.";
@@ -144,12 +149,14 @@ export async function requestText(url: string): Promise<string> {
   }
   if (!res.ok) {
     let message = res.statusText || `Request failed (${res.status})`;
+    let p: Problem | undefined;
     try {
-      message = problemMessage((await res.json()) as Problem, message);
+      p = (await res.json()) as Problem;
+      message = problemMessage(p, message);
     } catch {
       /* not JSON */
     }
-    if (res.status === 401) lost.forEach((f) => f());
+    if (sessionEnded(res.status, p)) lost.forEach((f) => f());
     throw new ApiError(res.status, message);
   }
   return res.text();

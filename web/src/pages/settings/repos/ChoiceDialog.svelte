@@ -2,8 +2,10 @@
   A short form that adds existing things to a repository (the members of a group). The dialog is the wide one (768px), since each row has a line of help. Each thing
   is a checkbox row, a 4px gap between rows; the submit button names how many it adds. A link
   under the rows creates a new one on its own page. With `more` (a paged source of the items),
-  "Load more" under the rows asks for the next page. The parent adds the chosen ids to its draft,
-  and the page's save bar saves them.
+  "Load more" under the rows asks for the next page. With `search` (a `Searched` of the parent), a
+  field over the rows finds things by name; Enter chooses the first one not chosen yet, and the
+  choices of an earlier search stay chosen. The parent adds the chosen ids to its draft, and the
+  page's save bar saves them.
 
     <ChoiceDialog bind:open title="Add CI pipelines to maven" noun={["CI pipeline", "CI pipelines"]}
       items={[{ id: "3", label: "release", detail: "GitHub Actions · acme/app" }]}
@@ -16,6 +18,7 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from "svelte";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
@@ -23,8 +26,10 @@
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import SourceMore from "$lib/components/SourceMore.svelte";
-  import type { TableSource } from "$lib/load.svelte";
+  import * as InputGroup from "$lib/components/ui/input-group";
+  import type { Searched, TableSource } from "$lib/load.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
+  import SearchIcon from "@lucide/svelte/icons/search";
 
   let {
     open = $bindable(false),
@@ -38,6 +43,8 @@
     newLabel,
     newHref,
     more,
+    search,
+    notFound,
     onAdd,
   }: {
     open?: boolean;
@@ -56,20 +63,56 @@
     newHref?: string;
     /** The paged source that `items` come from: its next page. */
     more?: TableSource<unknown>;
+    /** The search over the items: a field shows over the rows. */
+    search?: Searched<unknown>;
+    /** One sentence for a search that finds nothing to add. */
+    notFound?: (q: string) => string;
     onAdd: (ids: string[]) => void;
   } = $props();
 
   const id = $props.id();
   let chosen = $state<string[]>([]);
   $effect(() => {
-    if (open) chosen = [];
+    if (open) untrack(() => ((chosen = []), search?.clear()));
   });
+
+  // Enter in the field chooses the first thing for the typed text, once its page is here, and
+  // never submits the dialog.
+  let pickFirst = $state(false);
+  $effect(() => {
+    if (!pickFirst || !search || search.pending) return;
+    pickFirst = false;
+    const first = items.find((i) => !chosen.includes(i.id));
+    if (search.query && first) chosen = [...chosen, first.id];
+  });
+  function onKey(e: KeyboardEvent) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    search?.flush();
+    pickFirst = true;
+  }
 
   const toggle = (key: string, on: boolean) => (chosen = on ? [...chosen, key] : chosen.filter((x) => x !== key));
   const submitLabel = $derived(chosen.length === 0 ? "Add" : `Add ${chosen.length} ${chosen.length === 1 ? noun[0] : noun[1]}`);
 </script>
 
 <ShortFormDialog bind:open wide {title} {description} {submitLabel} canSubmit={chosen.length > 0} onSubmit={() => onAdd(chosen)}>
+  {#if search}
+    <InputGroup.Root>
+      <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+      <InputGroup.Input
+        id="{id}-find"
+        bind:value={search.text}
+        type="search"
+        autocomplete="off"
+        spellcheck={false}
+        placeholder="Find a {noun[0]} by name"
+        aria-label="Find a {noun[0]} by name"
+        oninput={() => (pickFirst = false)}
+        onkeydown={onKey}
+      />
+    </InputGroup.Root>
+  {/if}
   {#if loading && !items.length}
     <Loading rows={3} />
   {:else if error}
@@ -87,7 +130,8 @@
       {#if more}<SourceMore source={more} />{/if}
     </div>
   {:else}
-    <p class="text-body text-muted-foreground">{none}</p>
+    <p class="text-body text-muted-foreground">{search?.query ? (notFound?.(search.query) ?? `No ${noun[0]}'s name holds “${search.query}”.`) : none}</p>
+    {#if more}<SourceMore source={more} />{/if}
   {/if}
   {#if newHref}
     <div>

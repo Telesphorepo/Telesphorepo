@@ -17,6 +17,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/changelog"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/ops"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -264,7 +265,7 @@ func (a *API) deleteToken(w http.ResponseWriter, r *http.Request, c *route.Call)
 
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	q := r.URL.Query()
-	us, next, err := a.auth.ListUsers(r.Context(), strings.ToLower(strings.TrimSpace(q.Get("q"))), q.Get("after"), httpx.Limit(r))
+	us, next, err := a.auth.ListUsers(r.Context(), namesearch.Text(q.Get("q")), q.Get("after"), httpx.Limit(r))
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -364,7 +365,7 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			return
 		}
 	}
-	u, err := a.auth.UpdateUser(r.Context(), name, in.Password)
+	u, err := a.auth.UpdateUser(r.Context(), name, in.Password, p)
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -414,12 +415,12 @@ func (a *API) setUserPermissions(w http.ResponseWriter, r *http.Request, c *rout
 	httpx.WriteJSON(w, http.StatusOK, u)
 }
 
-// listPeople returns enabled usernames that start with ?q=, for a person picker: a keyset page
-// of at most 20 by username (?after=). Its policy needs people.manage, or repo.access on at least one
+// listPeople returns enabled usernames that hold ?q=, for a person picker: a keyset page of at
+// most 20 (?after=), the names that start with it first. Its policy needs people.manage, or repo.access on at least one
 // repository. The avatar of a person is drawn from the username, so only names come back.
 func (a *API) listPeople(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	q := r.URL.Query()
-	names, next, err := a.auth.People(r.Context(), strings.ToLower(strings.TrimSpace(q.Get("q"))), q.Get("after"), min(httpx.Limit(r), 20))
+	names, next, err := a.auth.People(r.Context(), namesearch.Text(q.Get("q")), q.Get("after"), min(httpx.Limit(r), 20))
 	if err != nil {
 		route.Fail(w, r, err)
 		return

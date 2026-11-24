@@ -22,6 +22,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
@@ -232,6 +233,9 @@ func (s *Service) CreateTrust(ctx context.Context, by int64, in TrustInput) (*Tr
 		if err := setTrustRepos(ctx, q, id, ids); err != nil {
 			return err
 		}
+		if err := writeTrustGrams(ctx, q, id, f.name); err != nil {
+			return err
+		}
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineCreate, Target: f.name,
 			Detail: map[string]any{"id": id, "issuer": f.issuer, "repos": in.Repos}})
 	})
@@ -279,6 +283,11 @@ func (s *Service) UpdateTrust(ctx context.Context, id int64, in TrustInput) (*Tr
 		if n == 0 {
 			return errorf(ErrNotFound, "trust policy not found")
 		}
+		if f.name != old.name {
+			if err := writeTrustGrams(ctx, q, id, f.name); err != nil {
+				return err
+			}
+		}
 		if in.Repos != nil {
 			if err := setTrustRepos(ctx, q, id, ids); err != nil {
 				return err
@@ -309,6 +318,13 @@ func (s *Service) DeleteTrust(ctx context.Context, id int64) error {
 		}); err != nil {
 			return err
 		}
+		t, err := q.GetTrust(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errorf(ErrNotFound, "trust policy not found")
+		}
+		if err != nil {
+			return err
+		}
 		n, err := q.DeleteTrust(ctx, id)
 		if err != nil {
 			return err
@@ -316,7 +332,7 @@ func (s *Service) DeleteTrust(ctx context.Context, id int64) error {
 		if n == 0 {
 			return errorf(ErrNotFound, "trust policy not found")
 		}
-		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineDelete, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"id": id}})
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineDelete, Target: t.Name, Detail: map[string]any{"id": id}})
 	})
 }
 
@@ -352,18 +368,29 @@ func (s *Service) GetTrust(ctx context.Context, id int64) (*Trust, error) {
 	return s.toTrust(ctx, t)
 }
 
-// Trusts returns a keyset page of the policies by name: the names after after ("" first page)
-// that start with prefix. next is the cursor of the next page, "" at the end. With all false only
-// the policies that list at least one repo and only repos among repoIDs are returned.
-func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, prefix, after string, limit int) ([]*Trust, string, error) {
-	lower, upper := trustNameRange(prefix, after)
+// Trusts returns a keyset page of the policies after the name after ("" first page): by name, or
+// with a text (folded, namesearch.Text) the policies whose name holds it in any case, those that
+// start with it first (namesearch.Compare). next is the cursor of the next page, "" at the end.
+// With all false only the policies that list at least one repo and only repos among repoIDs are
+// returned.
+func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, text, after string, limit int) ([]*Trust, string, error) {
+	if !all && len(repoIDs) == 0 || limit <= 0 {
+		return []*Trust{}, "", nil
+	}
 	var rows []dbq.PublishTrust
 	var err error
-	switch {
-	case all:
-		rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{Lower: lower, Upper: upper, Limit: int64(limit)})
-	case len(repoIDs) > 0:
-		rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{Lower: lower, Upper: upper, RepoIds: repoIDs, Limit: int64(limit)})
+	if text == "" {
+		lower, upper := "", "\xf5" // a name is valid UTF-8, so no byte of it is 0xF5 or above
+		if after != "" {
+			lower = after + "\x00"
+		}
+		if all {
+			rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{Lower: lower, Upper: upper, Limit: int64(limit)})
+		} else {
+			rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{Lower: lower, Upper: upper, RepoIds: idsJSON(repoIDs), Limit: int64(limit)})
+		}
+	} else {
+		rows, err = s.searchTrusts(ctx, all, repoIDs, text, after, limit)
 	}
 	if err != nil {
 		return nil, "", err
@@ -377,28 +404,51 @@ func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, prefix,
 		out = append(out, t)
 	}
 	next := ""
-	if len(rows) == limit && limit > 0 {
+	if len(rows) == limit {
 		next = rows[len(rows)-1].Name
 	}
 	return out, next, nil
 }
 
-// trustNameRange is the range [lower, upper) of the policy names after after that start with
-// prefix, under SQLite's byte-wise order. A name is valid UTF-8 (the JSON of the API), so no byte
-// of it is 0xF5 or above.
-func trustNameRange(prefix, after string) (lower, upper string) {
-	lower, upper = prefix, "\xf5"
-	if c := after + "\x00"; after != "" && c > lower {
-		lower = c
+// searchTrusts reads the policies of a search of text: the rows of the gram that namesearch.Gram
+// picks in publish_trust_grams, in the ranges of namesearch.Steps.
+func (s *Service) searchTrusts(ctx context.Context, all bool, repoIDs []int64, text, after string, limit int) ([]dbq.PublishTrust, error) {
+	g, ok, err := namesearch.Gram(ctx, text, func(ctx context.Context, g string, limit int64) (int64, error) {
+		return s.rq.CountTrustGram(ctx, dbq.CountTrustGramParams{Gram: g, Limit: limit})
+	})
+	if err != nil || !ok {
+		return nil, err
 	}
-	b := []byte(prefix)
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] < 0xf5 {
-			b[i]++
-			return lower, string(b[:i+1])
+	ids := idsJSON(repoIDs)
+	return namesearch.Page(ctx, text, after, limit, func(ctx context.Context, st namesearch.Step, n int) ([]dbq.PublishTrust, error) {
+		key, name := st.Key()
+		if all {
+			return s.rq.SearchTrusts(ctx, dbq.SearchTrustsParams{Gram: g, From: key, To: st.To, Key: key, After: name, Text: text, Limit: int64(n)})
+		}
+		return s.rq.SearchTrustsInRepos(ctx, dbq.SearchTrustsInReposParams{Gram: g, From: key, To: st.To, Key: key, After: name,
+			Text: text, RepoIds: ids, Limit: int64(n)})
+	})
+}
+
+// idsJSON is ids as a JSON array, the set of repos of a query that reads it with json_each.
+func idsJSON(ids []int64) string {
+	b, _ := json.Marshal(ids)
+	return string(b)
+}
+
+// writeTrustGrams writes the grams of the name of policy id (publish_trust_grams) in the
+// transaction of q, in place of the ones it had.
+func writeTrustGrams(ctx context.Context, q *dbq.Queries, id int64, name string) error {
+	if err := q.DeleteTrustGrams(ctx, id); err != nil {
+		return err
+	}
+	folded := namesearch.Fold(name)
+	for _, g := range namesearch.Grams(name) {
+		if err := q.InsertTrustGram(ctx, dbq.InsertTrustGramParams{Gram: g, Folded: folded, Name: name, TrustID: id}); err != nil {
+			return err
 		}
 	}
-	return lower, upper
+	return nil
 }
 
 // PipelinesOf returns the names of the CI pipelines that publish to repo id, sorted.

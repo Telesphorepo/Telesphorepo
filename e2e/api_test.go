@@ -106,6 +106,56 @@ func TestAPISession(t *testing.T) {
 
 	apiWant(t, s, http.MethodPost, "/api/auth/logout", nil, sess, http.StatusNoContent)
 	apiWant(t, s, http.MethodGet, "/api/me", nil, sess, http.StatusUnauthorized)
+
+	// A UI session ends session_ttl after its last use and session_max_age after the sign-in,
+	// however active: each use moves its end, and the cookie's, later, up to that limit.
+	const ttl, maxAge = 3 * time.Second, 6 * time.Second
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"session_ttl": ttl.String(), "session_max_age": maxAge.String()}, s.Admin(), nil)
+	sessionCookie := func(resp *http.Response) *http.Cookie {
+		for _, c := range resp.Cookies() {
+			if c.Name == "tr_session" {
+				return c
+			}
+		}
+		return nil
+	}
+	req = s.NewRequest(t, http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"alice-password-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, b = s.Do(t, req, nil)
+	first := sessionCookie(resp)
+	if resp.StatusCode != http.StatusOK || first == nil {
+		t.Fatalf("login with a short session_ttl: %d %s", resp.StatusCode, b)
+	}
+	start := time.Now()
+	me := func(at time.Duration) (int, *http.Cookie) {
+		time.Sleep(time.Until(start.Add(at)))
+		req := s.NewRequest(t, http.MethodGet, "/api/me", nil)
+		req.AddCookie(&http.Cookie{Name: first.Name, Value: first.Value})
+		req.Header.Set("X-Telesphorepo-UI", "1") // the web UI renews its session
+		resp, _ := s.Do(t, req, nil)
+		return resp.StatusCode, sessionCookie(resp)
+	}
+	limit := first.Expires.Add(maxAge - ttl) // the sign-in plus session_max_age
+	moved := false
+	// The last of these comes after the first end of the session.
+	for at := time.Second; at <= ttl; at += time.Second {
+		st, c := me(at)
+		if st != http.StatusOK {
+			t.Fatalf("GET /api/me %s after the sign-in, used every second: status %d, want 200", at, st)
+		}
+		if c != nil {
+			if c.Value != first.Value || c.Expires.After(limit) {
+				t.Fatalf("renewed cookie %+v: want the same value, ending by %s", c, limit)
+			}
+			moved = moved || c.Expires.After(first.Expires)
+		}
+	}
+	if !moved {
+		t.Fatalf("no use moved the end of the session cookie past %s", first.Expires)
+	}
+	if st, _ := me(maxAge + time.Second/2); st != http.StatusUnauthorized {
+		t.Fatalf("GET /api/me after session_max_age: status %d, want 401", st)
+	}
 }
 
 func TestAPICSRF(t *testing.T) {
@@ -242,7 +292,11 @@ func TestAPISessionRule(t *testing.T) {
 		frank := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ui"}, frank, http.StatusCreated)
 		apiWant(t, s, http.MethodGet, "/api/users", nil, frank, http.StatusForbidden)
+		// A new password ends frank's other sessions and keeps the one that set it.
+		elsewhere := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, frank, http.StatusOK)
+		apiWant(t, s, http.MethodGet, "/api/me", nil, frank, http.StatusOK)
+		apiWant(t, s, http.MethodGet, "/api/me", nil, elsewhere, http.StatusUnauthorized)
 	})
 
 	t.Run("a UI session on format routes", func(t *testing.T) {
@@ -439,6 +493,17 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	}
 	if got := names(dave, "q="+priv[:len(priv)-1]); !slices.Equal(got, []string{priv}) {
 		t.Fatalf("dave's repos that start with %s: %v", priv[:len(priv)-1], got)
+	}
+	// ?q= is a text inside the name, in any case: through a grant, a public repo (for dave and for
+	// a visitor), and every repo for a holder of all repositories, with a format.
+	for _, c := range []struct {
+		who  Auth
+		q    string
+		want string
+	}{{dave, strings.ToUpper(priv[2:]), priv}, {dave, pub[1:], pub}, {nil, pub[2:5], pub}, {admin, secret[3:] + "&format=maven", secret}} {
+		if got := names(c.who, "q="+c.q); !slices.Equal(got, []string{c.want}) {
+			t.Fatalf("GET /api/repos?q=%s: %v, want [%s]", c.q, got, c.want)
+		}
 	}
 	if got := names(dave, "format=debian"); !slices.Equal(got, []string{deb}) {
 		t.Fatalf("dave's debian repos: %v", got)

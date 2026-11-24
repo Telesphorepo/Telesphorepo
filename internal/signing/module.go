@@ -45,9 +45,18 @@ func Module() module.Module {
 				Help: "The OpenPGP keys that sign the indexes of repositories, so clients can check them."},
 				perm.Def{ID: PermManage, Label: "Manage signing keys", Help: "Create, import and delete signing keys, and download their public keys.", SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionKeyCreate, Label: "Signing key created", Subsystem: "signing"},
-				audit.ActionDef{ID: ActionKeyDelete, Label: "Signing key deleted", Subsystem: "signing"},
-				audit.ActionDef{ID: ActionKeyBind, Label: "Repository signing key set", Subsystem: "signing"},
+				audit.ActionDef{ID: ActionKeyCreate, Label: "Signing key created", Subsystem: "signing",
+					Sentence: "{actor} created the signing key {target}",
+					Fields: []audit.Field{
+						audit.Text("fingerprint", "Fingerprint").Quietly(),
+						audit.Bool("imported", "Imported", "imported", ""),
+					}},
+				audit.ActionDef{ID: ActionKeyDelete, Label: "Signing key deleted", Subsystem: "signing",
+					Sentence: "{actor} deleted the signing key {target}",
+					Fields:   []audit.Field{audit.Text("fingerprint", "Fingerprint").Quietly()}},
+				audit.ActionDef{ID: ActionKeyBind, Label: "Repository signing key set", Subsystem: "signing",
+					Sentence: "{actor} set the signing key of {repo} to {target}",
+					Fields:   []audit.Field{audit.Text("fingerprint", "Fingerprint").Quietly()}},
 			)
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				m.h = h

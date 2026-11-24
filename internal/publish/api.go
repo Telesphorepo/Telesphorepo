@@ -15,6 +15,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -51,6 +52,9 @@ var (
 		Help: "An enrolled device key of the Telesphorepo CLI can start publish sessions for this time. After this time, the developer must enroll the device again."})
 )
 
+// vias are the words of how a publish session started (Via*).
+var vias = map[string]string{ViaManual: "by hand", ViaDevice: "from a device", ViaOIDC: "from a CI pipeline"}
+
 // Module returns the publish module: devices, setup codes, publish sessions (the token kind
 // TokenPrefix), the Minter, CI trust policies, the publish log, the cleanup job, and the install
 // scripts and downloads of the Telesphorepo CLI (/install.sh, /install.ps1, /cli/). It provides
@@ -66,15 +70,52 @@ func Module() module.Module {
 				perm.Def{ID: PermPipelines, Label: "Manage CI pipelines", Help: "Add, change and delete the CI pipelines that may publish to the repository.",
 					Needs: []perm.ID{perm.RepoPublish}, SecondFactor: true})
 			x.AuditActions(
-				audit.ActionDef{ID: ActionSessionCreate, Label: "Publish session started", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionSessionClose, Label: "Publish session closed", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionDeviceApprove, Label: "Device approved", Subsystem: "people"},
-				audit.ActionDef{ID: ActionDeviceRevoke, Label: "Device revoked", Subsystem: "people"},
-				audit.ActionDef{ID: ActionDeviceSetup, Label: "Project set up", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionSetupCodeCreate, Label: "Setup line created", Subsystem: "repo"},
-				audit.ActionDef{ID: ActionPipelineCreate, Label: "CI pipeline created", Subsystem: "ci"},
-				audit.ActionDef{ID: ActionPipelineUpdate, Label: "CI pipeline changed", Subsystem: "ci"},
-				audit.ActionDef{ID: ActionPipelineDelete, Label: "CI pipeline deleted", Subsystem: "ci"},
+				audit.ActionDef{ID: ActionSessionCreate, Label: "Publish session started", Subsystem: "repo",
+					Sentence: "{actor} got a publish token for {repo}",
+					Fields:   []audit.Field{audit.Enum("via", "How", vias)}},
+				audit.ActionDef{ID: ActionSessionClose, Label: "Publish session closed", Subsystem: "repo",
+					Sentence: "{actor} ended the publish token for {repo}",
+					Fields:   []audit.Field{audit.Enum("via", "How", vias)}},
+				audit.ActionDef{ID: ActionDeviceApprove, Label: "Device approved", Subsystem: "people",
+					Sentence: "{actor} approved the device {target}",
+					Fields: []audit.Field{
+						audit.Hidden("device_id", "Device"),
+						audit.Text("owner", "Owner").Quietly(),
+						audit.Text("client", "Client").Quietly(), // older events
+					}},
+				audit.ActionDef{ID: ActionDeviceRevoke, Label: "Device revoked", Subsystem: "people",
+					Sentence: "{actor} removed the device {target}",
+					Fields: []audit.Field{
+						audit.Hidden("device_id", "Device"),
+						audit.Enum("by", "Removed by", map[string]string{"device": "from the device itself"}),
+					}},
+				audit.ActionDef{ID: ActionDeviceSetup, Label: "Project set up", Subsystem: "repo",
+					Sentence: "{actor} set up a project for {repo} on the device {target}",
+					Fields: []audit.Field{
+						audit.Hidden("device_id", "Device"),
+						audit.Bool("new", "New device", "new device", ""),
+					}},
+				audit.ActionDef{ID: ActionSetupCodeCreate, Label: "Setup line created", Subsystem: "repo",
+					Sentence: "{actor} created a setup line for {repo}",
+					Fields:   []audit.Field{audit.Time("expires_at", "Expires").Quietly()}},
+				audit.ActionDef{ID: ActionPipelineCreate, Label: "CI pipeline created", Subsystem: "ci",
+					Sentence: "{actor} created the CI pipeline {target}",
+					Fields: []audit.Field{
+						audit.Hidden("id", "CI pipeline"),
+						audit.List("repos", "Repositories"),
+						audit.Text("issuer", "CI system address").Quietly(),
+					}},
+				audit.ActionDef{ID: ActionPipelineUpdate, Label: "CI pipeline changed", Subsystem: "ci",
+					Sentence: "{actor} changed the CI pipeline {target}",
+					Fields: []audit.Field{
+						audit.Hidden("id", "CI pipeline"),
+						audit.Bool("sessions_closed", "Open publish tokens ended", "open publish tokens ended", ""),
+						audit.Text("added_repo", "Repository added").Quietly(), // a merge gives the pipelines of its source to its target
+						audit.Text("from_repo", "Taken over from").Quietly(),
+					}},
+				audit.ActionDef{ID: ActionPipelineDelete, Label: "CI pipeline deleted", Subsystem: "ci",
+					Sentence: "{actor} deleted the CI pipeline {target}",
+					Fields:   []audit.Field{audit.Hidden("id", "CI pipeline")}},
 			)
 			x.CIProvider(GitHubActions())
 			x.CIProvider(Jenkins())
@@ -514,7 +555,7 @@ func (m *mod) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineSco
 }
 
 // listTrusts returns a keyset page of the policies by name that the caller may see:
-// ?q=<start of the name>&after=<name>&limit=. A holder of All repositories reads a page of all policies; anyone else a
+// ?q=<text the name holds, in any case>&after=<name>&limit=. A holder of All repositories reads a page of all policies; anyone else a
 // page of the policies whose repos all lie where they hold the CI pipelines permission.
 func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	limit := httpx.Limit(r)
@@ -525,7 +566,7 @@ func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			ids = append(ids, id)
 		}
 	}
-	items, next, err := m.svc.Trusts(r.Context(), c.Managed.All, ids, strings.TrimSpace(r.URL.Query().Get("q")), after, limit)
+	items, next, err := m.svc.Trusts(r.Context(), c.Managed.All, ids, namesearch.Text(r.URL.Query().Get("q")), after, limit)
 	if err != nil {
 		publishFail(w, r, err)
 		return
