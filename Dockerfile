@@ -4,10 +4,10 @@
 # plain build sets them to the host, so it builds for the host.
 
 # Node of .node-version (the two stages below run Vite and Wrangler with it).
-FROM --platform=$BUILDPLATFORM node:26.13.0-alpine3.24 AS node
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24 AS node
 
 # The UI is platform independent: build it once on the build platform.
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS web
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.5-alpine AS web
 RUN apk add --no-cache libatomic libgcc libstdc++
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /src/web
