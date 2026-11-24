@@ -147,48 +147,49 @@ func (q *Queries) HasRepoNetworks(ctx context.Context, repoID int64) (bool, erro
 	return exists, err
 }
 
-const insertIPListGram = `-- name: InsertIPListGram :exec
-INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text) VALUES (?, ?, ?)
+const insertIPListGrams = `-- name: InsertIPListGrams :exec
+INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text)
+SELECT g.value, CAST(?1 AS INTEGER), CAST(?2 AS TEXT) FROM json_each(?3) g
 `
 
-type InsertIPListGramParams struct {
-	Gram   string
+type InsertIPListGramsParams struct {
 	ListID int64
 	Text   string
+	Grams  interface{}
 }
 
-func (q *Queries) InsertIPListGram(ctx context.Context, arg InsertIPListGramParams) error {
-	_, err := q.db.ExecContext(ctx, insertIPListGram, arg.Gram, arg.ListID, arg.Text)
+// The grams of a list in one statement: grams is a JSON array of the grams.
+func (q *Queries) InsertIPListGrams(ctx context.Context, arg InsertIPListGramsParams) error {
+	_, err := q.db.ExecContext(ctx, insertIPListGrams, arg.ListID, arg.Text, arg.Grams)
 	return err
 }
 
-const insertRepoNetwork = `-- name: InsertRepoNetwork :exec
-INSERT INTO repo_networks (repo_id, cidr, list_id, note) VALUES (?, ?, ?, ?)
+const insertRepoNetworks = `-- name: InsertRepoNetworks :exec
+INSERT INTO repo_networks (repo_id, cidr, list_id, note)
+SELECT CAST(?1 AS INTEGER), json_extract(n.value, '$.cidr'), json_extract(n.value, '$.list_id'),
+  json_extract(n.value, '$.note')
+FROM json_each(?2) n
 `
 
-type InsertRepoNetworkParams struct {
-	RepoID int64
-	Cidr   sql.NullString
-	ListID sql.NullInt64
-	Note   string
+type InsertRepoNetworksParams struct {
+	RepoID   int64
+	Networks interface{}
 }
 
-func (q *Queries) InsertRepoNetwork(ctx context.Context, arg InsertRepoNetworkParams) error {
-	_, err := q.db.ExecContext(ctx, insertRepoNetwork,
-		arg.RepoID,
-		arg.Cidr,
-		arg.ListID,
-		arg.Note,
-	)
+// The allowed networks of a repo in one statement, in entry order: networks is a JSON array of
+// {"cidr", "list_id", "note"} (cidr or list_id null).
+func (q *Queries) InsertRepoNetworks(ctx context.Context, arg InsertRepoNetworksParams) error {
+	_, err := q.db.ExecContext(ctx, insertRepoNetworks, arg.RepoID, arg.Networks)
 	return err
 }
 
-const insertTrustedProxyList = `-- name: InsertTrustedProxyList :exec
-INSERT INTO trusted_proxy_lists (list_id) VALUES (?)
+const insertTrustedProxyLists = `-- name: InsertTrustedProxyLists :exec
+INSERT INTO trusted_proxy_lists (list_id) SELECT value FROM json_each(?1)
 `
 
-func (q *Queries) InsertTrustedProxyList(ctx context.Context, listID int64) error {
-	_, err := q.db.ExecContext(ctx, insertTrustedProxyList, listID)
+// The IP lists that trusted proxies include, in one statement: list_ids is a JSON array.
+func (q *Queries) InsertTrustedProxyLists(ctx context.Context, listIds interface{}) error {
+	_, err := q.db.ExecContext(ctx, insertTrustedProxyLists, listIds)
 	return err
 }
 
@@ -240,29 +241,29 @@ func (q *Queries) ListIPLists(ctx context.Context, arg ListIPListsParams) ([]IpL
 	return items, nil
 }
 
-const listRepoNetworks = `-- name: ListRepoNetworks :many
-SELECT id, cidr, list_id, note FROM repo_networks WHERE repo_id = ? ORDER BY id
+const listNetworksAfter = `-- name: ListNetworksAfter :many
+SELECT id, repo_id, cidr, list_id, note FROM repo_networks WHERE id > ?1 ORDER BY id LIMIT ?2
 `
 
-type ListRepoNetworksRow struct {
-	ID     int64
-	Cidr   sql.NullString
-	ListID sql.NullInt64
-	Note   string
+type ListNetworksAfterParams struct {
+	After int64
+	Limit int64
 }
 
-// The allowed networks of a repo in entry order, through repo_networks_repo.
-func (q *Queries) ListRepoNetworks(ctx context.Context, repoID int64) ([]ListRepoNetworksRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoNetworks, repoID)
+// A page of every allowed network in id order (entry order within a repo), after the id after:
+// the start reads them all into memory, a page per query.
+func (q *Queries) ListNetworksAfter(ctx context.Context, arg ListNetworksAfterParams) ([]RepoNetwork, error) {
+	rows, err := q.db.QueryContext(ctx, listNetworksAfter, arg.After, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListRepoNetworksRow
+	var items []RepoNetwork
 	for rows.Next() {
-		var i ListRepoNetworksRow
+		var i RepoNetwork
 		if err := rows.Scan(
 			&i.ID,
+			&i.RepoID,
 			&i.Cidr,
 			&i.ListID,
 			&i.Note,
@@ -280,25 +281,65 @@ func (q *Queries) ListRepoNetworks(ctx context.Context, repoID int64) ([]ListRep
 	return items, nil
 }
 
-const listReposOfList = `-- name: ListReposOfList :many
-SELECT r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
-WHERE x.list_id = ?
+const listPublicReposIn = `-- name: ListPublicReposIn :many
+SELECT id, name FROM repos WHERE id IN (SELECT value FROM json_each(?1)) AND anonymous_read = 1
 `
 
-// The repos whose allowed networks name a list, through repo_networks_list_id.
-func (q *Queries) ListReposOfList(ctx context.Context, listID sql.NullInt64) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listReposOfList, listID)
+type ListPublicReposInRow struct {
+	ID   int64
+	Name string
+}
+
+// The public repos among a JSON array of repo ids (the repos with allowed networks): one seek
+// of the primary key per id.
+func (q *Queries) ListPublicReposIn(ctx context.Context, ids interface{}) ([]ListPublicReposInRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPublicReposIn, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []string
+	var items []ListPublicReposInRow
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var i ListPublicReposInRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
 			return nil, err
 		}
-		items = append(items, name)
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposOfLists = `-- name: ListReposOfLists :many
+SELECT x.list_id, r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
+WHERE x.list_id IN (SELECT value FROM json_each(?1))
+`
+
+type ListReposOfListsRow struct {
+	ListID sql.NullInt64
+	Name   string
+}
+
+// The repos whose allowed networks name each of the lists of a JSON array of list ids, through
+// repo_networks_list_id: one query for every list of GET /api/ip-lists.
+func (q *Queries) ListReposOfLists(ctx context.Context, listIds interface{}) ([]ListReposOfListsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposOfLists, listIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposOfListsRow
+	for rows.Next() {
+		var i ListReposOfListsRow
+		if err := rows.Scan(&i.ListID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -335,18 +376,6 @@ func (q *Queries) ListTrustedProxyLists(ctx context.Context) ([]int64, error) {
 		return nil, err
 	}
 	return items, nil
-}
-
-const nextNetworkRepo = `-- name: NextNetworkRepo :one
-SELECT repo_id FROM repo_networks WHERE repo_id > ? ORDER BY repo_id LIMIT 1
-`
-
-// The next repo after repo_id that has allowed networks: one seek on repo_networks_repo.
-func (q *Queries) NextNetworkRepo(ctx context.Context, repoID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, nextNetworkRepo, repoID)
-	var repo_id int64
-	err := row.Scan(&repo_id)
-	return repo_id, err
 }
 
 const repoIsPublic = `-- name: RepoIsPublic :one

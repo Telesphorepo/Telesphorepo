@@ -7,43 +7,36 @@ package dbq
 
 import (
 	"context"
+	"strings"
 )
 
 const addDownloads = `-- name: AddDownloads :exec
 
 INSERT INTO download_stats (repo_id, day, downloads, bytes)
-SELECT r.id, ?1, ?2, ?3 FROM repos r WHERE r.id = ?4
+SELECT r.id, json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]')
+FROM json_each(CAST(?1 AS TEXT)) j CROSS JOIN repos r
+WHERE r.id = json_extract(j.value, '$[0]')
 ON CONFLICT (repo_id, day) DO UPDATE SET
   downloads = download_stats.downloads + excluded.downloads,
   bytes = download_stats.bytes + excluded.bytes
 `
 
-type AddDownloadsParams struct {
-	Day       int64
-	Downloads int64
-	Bytes     int64
-	RepoID    int64
-}
-
 // The download counters (internal/stats).
-// One flush of a repo's counters of one day. A repo that was deleted since the downloads has no
-// row to add to, so the SELECT finds none and nothing is written.
-func (q *Queries) AddDownloads(ctx context.Context, arg AddDownloadsParams) error {
-	_, err := q.db.ExecContext(ctx, addDownloads,
-		arg.Day,
-		arg.Downloads,
-		arg.Bytes,
-		arg.RepoID,
-	)
+// One flush of the counters in one statement: rows is a JSON array of [repo_id, day, downloads,
+// bytes], one per repo and day. A repo that was deleted since the downloads has no row to add to,
+// so the join drops its counts.
+func (q *Queries) AddDownloads(ctx context.Context, rows string) error {
+	_, err := q.db.ExecContext(ctx, addDownloads, rows)
 	return err
 }
 
-const deleteEmptyWindowRepo = `-- name: DeleteEmptyWindowRepo :exec
-DELETE FROM download_window_repos WHERE repo_id = ?1 AND downloads <= 0
+const deleteEmptyWindowRepos = `-- name: DeleteEmptyWindowRepos :exec
+DELETE FROM download_window_repos
+WHERE downloads <= 0 AND repo_id IN (SELECT d.repo_id FROM download_stats d WHERE d.day = ?1)
 `
 
-func (q *Queries) DeleteEmptyWindowRepo(ctx context.Context, repoID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteEmptyWindowRepo, repoID)
+func (q *Queries) DeleteEmptyWindowRepos(ctx context.Context, day int64) error {
+	_, err := q.db.ExecContext(ctx, deleteEmptyWindowRepos, day)
 	return err
 }
 
@@ -84,52 +77,6 @@ func (q *Queries) GetWindowFirst(ctx context.Context) (int64, error) {
 	return first_day, err
 }
 
-const getWindowRepoDownloads = `-- name: GetWindowRepoDownloads :one
-SELECT downloads FROM download_window_repos WHERE repo_id = ?1
-`
-
-// The downloads of one repo in the window; no row for none.
-func (q *Queries) GetWindowRepoDownloads(ctx context.Context, repoID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getWindowRepoDownloads, repoID)
-	var downloads int64
-	err := row.Scan(&downloads)
-	return downloads, err
-}
-
-const listDownloadsOfDay = `-- name: ListDownloadsOfDay :many
-SELECT repo_id, downloads, bytes FROM download_stats WHERE day = ?1
-`
-
-type ListDownloadsOfDayRow struct {
-	RepoID    int64
-	Downloads int64
-	Bytes     int64
-}
-
-// The rows of one day, through download_stats_day: at most one per repo.
-func (q *Queries) ListDownloadsOfDay(ctx context.Context, day int64) ([]ListDownloadsOfDayRow, error) {
-	rows, err := q.db.QueryContext(ctx, listDownloadsOfDay, day)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListDownloadsOfDayRow
-	for rows.Next() {
-		var i ListDownloadsOfDayRow
-		if err := rows.Scan(&i.RepoID, &i.Downloads, &i.Bytes); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listWindowDays = `-- name: ListWindowDays :many
 SELECT day, downloads, bytes FROM download_window_days WHERE day >= ?1 ORDER BY day
 `
@@ -158,6 +105,50 @@ func (q *Queries) ListWindowDays(ctx context.Context, since int64) ([]DownloadWi
 	return items, nil
 }
 
+const listWindowRepoDownloads = `-- name: ListWindowRepoDownloads :many
+SELECT repo_id, downloads FROM download_window_repos WHERE repo_id IN (/*SLICE:ids*/?)
+`
+
+type ListWindowRepoDownloadsRow struct {
+	RepoID    int64
+	Downloads int64
+}
+
+// The downloads of the repos of ids in the window (a page of repos), a seek of the primary key per
+// id in one query; a repo without downloads has no row.
+func (q *Queries) ListWindowRepoDownloads(ctx context.Context, ids []int64) ([]ListWindowRepoDownloadsRow, error) {
+	query := listWindowRepoDownloads
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWindowRepoDownloadsRow
+	for rows.Next() {
+		var i ListWindowRepoDownloadsRow
+		if err := rows.Scan(&i.RepoID, &i.Downloads); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setWindowFirst = `-- name: SetWindowFirst :exec
 UPDATE download_window_state SET first_day = ?1 WHERE id = 1
 `
@@ -167,21 +158,18 @@ func (q *Queries) SetWindowFirst(ctx context.Context, firstDay int64) error {
 	return err
 }
 
-const subWindowRepo = `-- name: SubWindowRepo :exec
-UPDATE download_window_repos SET downloads = downloads - ?1, bytes = bytes - ?2
-WHERE repo_id = ?3
+const subWindowDay = `-- name: SubWindowDay :exec
+UPDATE download_window_repos SET
+  downloads = downloads - (SELECT s.downloads FROM download_stats s WHERE s.repo_id = download_window_repos.repo_id AND s.day = ?1),
+  bytes = bytes - (SELECT s.bytes FROM download_stats s WHERE s.repo_id = download_window_repos.repo_id AND s.day = ?1)
+WHERE repo_id IN (SELECT d.repo_id FROM download_stats d WHERE d.day = ?1)
 `
 
-type SubWindowRepoParams struct {
-	Downloads int64
-	Bytes     int64
-	RepoID    int64
-}
-
-// A day that left the window: its repo rows are subtracted one by one, the repo rows left empty are
-// deleted, and the day rows before the window go.
-func (q *Queries) SubWindowRepo(ctx context.Context, arg SubWindowRepoParams) error {
-	_, err := q.db.ExecContext(ctx, subWindowRepo, arg.Downloads, arg.Bytes, arg.RepoID)
+// A day that left the window: the rows of its repos (through download_stats_day, at most one per
+// repo) are subtracted from the repo totals in one statement, each a seek of the download_stats
+// primary key, the repo rows left empty are deleted, and the day rows before the window go.
+func (q *Queries) SubWindowDay(ctx context.Context, day int64) error {
+	_, err := q.db.ExecContext(ctx, subWindowDay, day)
 	return err
 }
 
@@ -229,17 +217,15 @@ func (q *Queries) TopWindowRepos(ctx context.Context, n int64) ([]TopWindowRepos
 	return items, nil
 }
 
-const touchRepoRedirect = `-- name: TouchRepoRedirect :exec
-UPDATE repo_redirects SET last_used_at = max(last_used_at, CAST(?1 AS INTEGER)) WHERE name = ?2
+const touchRepoRedirects = `-- name: TouchRepoRedirects :exec
+UPDATE repo_redirects SET last_used_at = max(last_used_at, CAST(json_extract(CAST(?1 AS TEXT), '$."' || name || '"') AS INTEGER))
+WHERE name IN (SELECT j.key FROM json_each(CAST(?1 AS TEXT)) j)
 `
 
-type TouchRepoRedirectParams struct {
-	At   int64
-	Name string
-}
-
-// The last use of a redirect, written with the download counters. It never moves back.
-func (q *Queries) TouchRepoRedirect(ctx context.Context, arg TouchRepoRedirectParams) error {
-	_, err := q.db.ExecContext(ctx, touchRepoRedirect, arg.At, arg.Name)
+// The last use of the redirects, written with the download counters in one statement: uses is a
+// JSON object of redirect name to Unix time, a seek of the primary key per name. A use never
+// moves back.
+func (q *Queries) TouchRepoRedirects(ctx context.Context, uses string) error {
+	_, err := q.db.ExecContext(ctx, touchRepoRedirects, uses)
 	return err
 }

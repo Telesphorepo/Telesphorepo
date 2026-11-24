@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
@@ -54,21 +55,36 @@ func (m *mod) eligible(repo *repos.Repo, path string) bool {
 func nowMS() int64 { return time.Now().UnixMilli() }
 
 // dirty writes an outbox row with an empty digest (apply the current state) for each path of
-// repo, in its own transaction.
+// repo, in one statement.
 func (m *mod) dirty(ctx context.Context, repoID int64, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	now := nowMS()
-	return m.h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		q := dbq.New(tx)
-		for _, p := range paths {
-			if err := q.UpsertOutbox(ctx, dbq.UpsertOutboxParams{RepoID: repoID, Path: p, DueAt: now}); err != nil {
-				return err
-			}
-		}
+	rows := make([]outboxRow, len(paths))
+	for i, p := range paths {
+		rows[i] = outboxRow{RepoID: repoID, Path: p}
+	}
+	return upsertOutbox(ctx, m.q, rows, nowMS())
+}
+
+// outboxRow is a dirty row of the outbox: the key and the digest of its pointer ("": apply the
+// current state).
+type outboxRow struct {
+	RepoID int64  `json:"repo_id"`
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+// upsertOutbox writes the dirty rows, due at now, in one statement of q.
+func upsertOutbox(ctx context.Context, q *dbq.Queries, rows []outboxRow, now int64) error {
+	if len(rows) == 0 {
 		return nil
-	})
+	}
+	js, err := json.Marshal(rows)
+	if err != nil {
+		return err
+	}
+	return q.UpsertOutboxes(ctx, dbq.UpsertOutboxesParams{DueAt: now, Rows: string(js)})
 }
 
 func (w watcher) Replacing(ctx context.Context, repo *repos.Repo, prev []*assets.Asset) error {
@@ -177,19 +193,16 @@ func (w watcher) Committed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, st
 	if m.cur.Load().mode != modeOn || m.edgeOf(repo) == nil {
 		return nil
 	}
-	q := dbq.New(tx)
-	now := nowMS()
-	n := 0
+	var rows []outboxRow
 	for _, a := range stored {
-		if !m.eligible(repo, a.Path) {
-			continue
+		if m.eligible(repo, a.Path) {
+			rows = append(rows, outboxRow{RepoID: repo.ID, Path: a.Path, SHA256: a.SHA256})
 		}
-		if err := q.UpsertOutbox(ctx, dbq.UpsertOutboxParams{RepoID: repo.ID, Path: a.Path, Sha256: a.SHA256, DueAt: now}); err != nil {
-			return err
-		}
-		n++
 	}
-	if n > 0 {
+	if err := upsertOutbox(ctx, dbq.New(tx), rows, nowMS()); err != nil {
+		return err
+	}
+	if len(rows) > 0 {
 		time.AfterFunc(50*time.Millisecond, m.wake) // after the commit
 	}
 	return nil
@@ -247,21 +260,28 @@ func (w watcher) Removed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, remo
 		return nil
 	}
 	q := dbq.New(tx)
-	now := nowMS()
-	queued := false
+	var dropped []string
+	var rows []outboxRow
 	for _, a := range removed {
 		if m.takeCleared(pointerKey(repo.ID, a.Path)) == v {
-			if err := q.DropRemoved(ctx, dbq.DropRemovedParams{RepoID: repo.ID, Path: a.Path}); err != nil {
-				return err
-			}
-			continue
+			dropped = append(dropped, a.Path)
+		} else {
+			rows = append(rows, outboxRow{RepoID: repo.ID, Path: a.Path})
 		}
-		if err := q.UpsertOutbox(ctx, dbq.UpsertOutboxParams{RepoID: repo.ID, Path: a.Path, DueAt: now}); err != nil {
+	}
+	if len(dropped) > 0 {
+		js, err := json.Marshal(dropped)
+		if err != nil {
 			return err
 		}
-		queued = true
+		if err := q.DropRemoved(ctx, dbq.DropRemovedParams{RepoID: repo.ID, Paths: string(js)}); err != nil {
+			return err
+		}
 	}
-	if queued {
+	if err := upsertOutbox(ctx, q, rows, nowMS()); err != nil {
+		return err
+	}
+	if len(rows) > 0 {
 		time.AfterFunc(50*time.Millisecond, m.wake)
 	}
 	return nil

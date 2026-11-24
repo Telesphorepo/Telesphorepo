@@ -39,8 +39,8 @@ type heldJSON struct {
 // {paths, prefixes} -> {members: [{repo, delete, reason}], paths: [{path, repos}], prefixes:
 // [{path, repos}]}. members lists, in read order, each member that holds a picked item, with the
 // access engine's Delete decision (repo.delete, the member's operation). A file costs one point
-// lookup per member, a folder one seek to its first file per member. A repository that is not a
-// group is its own one member.
+// lookup per member, a folder one seek to its first file per member, all in two queries
+// (assets.Pipeline.Held). A repository that is not a group is its own one member.
 func (a *API) fileHolders(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Paths    []string `json:"paths"`
@@ -68,36 +68,42 @@ func (a *API) fileHolders(w http.ResponseWriter, r *http.Request, c *route.Call)
 		Paths    []heldJSON   `json:"paths"`
 		Prefixes []heldJSON   `json:"prefixes"`
 	}{Members: []holderJSON{}, Paths: []heldJSON{}, Prefixes: []heldJSON{}}
-	for _, p := range rm.Paths {
-		h := heldJSON{Path: string(p), Repos: []string{}}
+	ids := make([]int64, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	paths := make([]string, len(rm.Paths))
+	for i, p := range rm.Paths {
+		paths[i] = string(p)
+	}
+	dirs := make([]string, len(rm.Prefixes))
+	for i, dir := range rm.Prefixes {
+		dirs[i] = string(dir)
+	}
+	files, folders, err := a.assets.Held(ctx, ids, paths, dirs)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	for _, p := range paths {
+		h := heldJSON{Path: p, Repos: []string{}}
 		for _, m := range members {
-			_, err := a.assets.Get(ctx, m.ID, string(p))
-			if errors.Is(err, assets.ErrNotFound) {
-				continue
+			if files[p][m.ID] {
+				h.Repos, held[m.ID] = append(h.Repos, m.Name), true
 			}
-			if err != nil {
-				route.Fail(w, r, err)
-				return
-			}
-			h.Repos, held[m.ID] = append(h.Repos, m.Name), true
 		}
 		out.Paths = append(out.Paths, h)
 	}
-	for _, dir := range rm.Prefixes {
-		h := heldJSON{Path: string(dir), Repos: []string{}}
+	for _, dir := range dirs {
+		h := heldJSON{Path: dir, Repos: []string{}}
 		for _, m := range members {
-			first, _, err := a.assets.List(ctx, m.ID, string(dir), "", 1)
-			if err != nil {
-				route.Fail(w, r, err)
-				return
-			}
-			if len(first) > 0 {
+			if folders[dir][m.ID] {
 				h.Repos, held[m.ID] = append(h.Repos, m.Name), true
 			}
 		}
 		out.Prefixes = append(out.Prefixes, h)
 	}
-	ctx, err := a.auth.WithGrants(ctx, c.P)
+	ctx, err = a.auth.WithGrants(ctx, c.P)
 	if err != nil {
 		route.Fail(w, r, err)
 		return

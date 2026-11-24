@@ -22,11 +22,6 @@ SELECT repo_id, full_name FROM docker_images WHERE full_name > sqlc.arg(after) O
 SELECT id, name FROM repos WHERE id IN (sqlc.slice(ids))
   AND EXISTS (SELECT 1 FROM docker_images i WHERE i.repo_id = repos.id);
 
--- A keyset page of the images of a repo by name, through the primary key.
--- name: ListRepoImages :many
-SELECT full_name FROM docker_images WHERE repo_id = sqlc.arg(repo_id) AND image > sqlc.arg(after)
-ORDER BY image LIMIT sqlc.arg(limit);
-
 -- name: GetManifest :one
 SELECT repo_id, image, digest, media_type, artifact_type, config_type, subject, size, total_size, platforms, annotations, created_at
 FROM docker_manifests WHERE repo_id = ? AND image = ? AND digest = ?;
@@ -90,9 +85,11 @@ DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest
 -- name: DeleteStaleLink :exec
 DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest = ? AND refs = 0 AND unreferenced_at < ?;
 
--- An image of the repo that links a blob, through docker_links_digest.
--- name: RepoLinkOf :one
-SELECT image FROM docker_links WHERE repo_id = ? AND digest = ? LIMIT 1;
+-- The blobs of a set (a JSON array of digests) that an image of the repo links: one seek of
+-- docker_links_digest per digest.
+-- name: RepoLinkedDigests :many
+SELECT CAST(j.value AS TEXT) AS digest FROM json_each(sqlc.arg(digests)) j
+WHERE EXISTS (SELECT 1 FROM docker_links l WHERE l.repo_id = sqlc.arg(repo_id) AND l.digest = j.value);
 
 -- The links that no manifest used since before a cutoff, oldest first, through the partial
 -- docker_links_unreferenced.
@@ -122,6 +119,13 @@ ORDER BY tag LIMIT sqlc.arg(limit);
 SELECT tag, digest, updated_at FROM docker_tags
 WHERE repo_id = sqlc.arg(repo_id) AND image = sqlc.arg(image) AND (updated_at, tag) < (sqlc.arg(before_at), CAST(sqlc.arg(before_tag) AS TEXT))
 ORDER BY updated_at DESC, tag DESC LIMIT sqlc.arg(limit);
+
+-- The tags of a set (a JSON array) that an image has, through the primary key: the versions that a
+-- group merge asks a member about, in one query (format.Spec HasVersions).
+-- name: TagsIn :many
+SELECT t.tag FROM docker_tags t
+WHERE t.repo_id = sqlc.arg(repo_id) AND t.image = sqlc.arg(image) AND t.tag IN (SELECT value FROM json_each(sqlc.arg(tags)))
+  AND EXISTS (SELECT 1 FROM docker_images i WHERE i.repo_id = t.repo_id AND i.image = t.image);
 
 -- The tags of a manifest digest, through docker_tags_digest.
 -- name: TagsOfDigest :many

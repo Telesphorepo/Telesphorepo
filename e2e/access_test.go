@@ -147,13 +147,27 @@ func TestEffectiveAccess(t *testing.T) {
 		if !slices.Contains(admins, boss) || !slices.Contains(admins, s.AdminUser) || len(admins) != a.Download.Admins {
 			t.Fatalf("?admins=1: admins in people = %v, want %s and %s", admins, s.AdminUser, boss)
 		}
+
+		// ?q= keeps the people whose name holds it in any case, the admins too with ?admins=1; the
+		// counts stay those of the repo, and the sentences of the whole access are left out.
+		q := strings.ToUpper(reader[2:])
+		found := getAccess(t, s, repo, "?q="+q)
+		if got := peopleOf(found.People); !slices.Equal(got, want[:1]) || len(found.Publish.People) != 0 || found.Download.Sentence != "" {
+			t.Fatalf("?q=%s: people %v, publish %v, sentence %q; want only %s", q, got, peopleOf(found.Publish.People), found.Download.Sentence, reader)
+		}
+		q = strings.ToUpper(boss[1:])
+		found = getAccess(t, s, repo, "?admins=1&q="+q)
+		if got := peopleOf(found.Download.People); !slices.Equal(got, []string{boss + ":" + everyRepoPerm + "/all_repos"}) || found.Download.Admins != a.Download.Admins {
+			t.Fatalf("?admins=1&q=%s: download people %v, admins %d; want only %s of %d", q, got, found.Download.Admins, boss, a.Download.Admins)
+		}
 	})
 
 	t.Run("CI pipeline and networks", func(t *testing.T) {
 		office := "office-" + randHex(2)
 		s.MustAPI(t, http.MethodPost, "/api/ip-lists", map[string]any{"name": office, "title": "Office",
 			"ranges": []string{"203.0.113.0/24"}}, s.Admin(), nil)
-		createTrust(t, s, trustPolicy{Name: "app-main-" + randHex(2), Issuer: "https://token.actions.githubusercontent.com",
+		rule := "app-main-" + randHex(2)
+		createTrust(t, s, trustPolicy{Name: rule, Issuer: "https://token.actions.githubusercontent.com",
 			Claims: map[string][]string{"repository": {"acme/app"}, "ref": {"refs/heads/main"},
 				"workflow_ref": {"acme/app/.github/workflows/release.yml@*"}}, Repos: []string{repo}})
 		s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", map[string]any{
@@ -174,6 +188,24 @@ func TestEffectiveAccess(t *testing.T) {
 		}
 		wantSentence(t, "download", a.Download.Sentence, "2 people and anyone at Office and 10.0.0.0/8.")
 		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main).")
+
+		// ?q= keeps a CI pipeline by its name, an IP list by its title and a range by its label.
+		for q, want := range map[string]string{strings.ToUpper(rule[4:]): "ci " + rule, "FFIC": "list " + office, "vpn": "range 10.0.0.0/8"} {
+			f := getAccess(t, s, repo, "?q="+q)
+			var got []string
+			for _, c := range f.Publish.CI {
+				got = append(got, "ci "+c.Rule)
+			}
+			for _, l := range f.Download.Networks.Lists {
+				got = append(got, "list "+l.Name)
+			}
+			for _, c := range f.Download.Networks.CIDRs {
+				got = append(got, "range "+c.CIDR)
+			}
+			if !slices.Equal(got, []string{want}) || len(f.People) != 0 {
+				t.Fatalf("?q=%s: %v and people %v, want only %s", q, got, peopleOf(f.People), want)
+			}
+		}
 
 		// A repository with allowed networks is not made public: anyone would download already.
 		st, b := s.API(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{repo}, "anonymous_read": true}, s.Admin())
@@ -249,6 +281,12 @@ func TestEffectiveAccess(t *testing.T) {
 		if strings.Join(b.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") ||
 			permsOf(b, private) != everyRepoPerm+"/all_repos" || permsOf(b, repo) != everyRepoPerm+"/all_repos" {
 			t.Fatalf("admin's access: %+v", b)
+		}
+		// ?name= answers those repos alone, with what the person holds on each it can use.
+		var named userAccess
+		s.MustAPI(t, http.MethodGet, "/api/users/"+writer+"/access?name="+repo+"&name="+private, nil, s.Admin(), &named)
+		if len(named.Items) != 1 || permsOf(named, repo) != "repo.download,repo.publish/permission" || named.Next != nil {
+			t.Fatalf("GET /api/users/%s/access?name=%s&name=%s: %+v, want only %s", writer, repo, private, named, repo)
 		}
 		var g userAccess
 		s.MustAPI(t, http.MethodGet, "/api/users/"+gone+"/access", nil, s.Admin(), &g)

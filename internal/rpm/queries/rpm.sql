@@ -30,8 +30,10 @@ FROM rpm_packages WHERE asset_id = ? LIMIT 1;
 SELECT filename FROM rpm_packages
 WHERE repo_id = ? AND name = ? AND version = ? AND release = ? AND arch = ? AND upload_sha256 = ? LIMIT 1;
 
--- name: DeletePackage :exec
-DELETE FROM rpm_packages WHERE id = ?;
+-- Removes the packages of the deleted files of a remove batch (a JSON array of asset ids), their
+-- parts with them, through rpm_packages_asset.
+-- name: DeletePackagesOfAssets :many
+DELETE FROM rpm_packages WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids))) RETURNING id;
 
 -- Whether a package name has a file, through rpm_packages_order.
 -- name: PackageHasFiles :one

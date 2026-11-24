@@ -29,6 +29,30 @@ FROM devices d JOIN users u ON u.id = d.user_id
 WHERE d.id < sqlc.arg(before)
 ORDER BY d.id DESC LIMIT sqlc.arg(limit);
 
+-- The search of every device (internal/namesearch, migration 0004_device_and_log_search.sql),
+-- newest first: the devices below before in the rows of one gram whose name or owner's username
+-- holds the text (instr on the gram row).
+-- name: SearchDevices :many
+SELECT d.id, d.user_id, u.username, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+FROM device_grams g JOIN devices d ON d.id = g.device_id JOIN users u ON u.id = d.user_id
+WHERE g.gram = sqlc.arg(gram) AND g.device_id < sqlc.arg(before) AND instr(g.text, sqlc.arg(text)) > 0
+ORDER BY g.device_id DESC LIMIT sqlc.arg(limit);
+
+-- The same search among one person's devices, through device_grams_user.
+-- name: SearchUserDevices :many
+SELECT d.id, d.user_id, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+FROM device_grams g JOIN devices d ON d.id = g.device_id
+WHERE g.gram = sqlc.arg(gram) AND g.user_id = sqlc.arg(user_id) AND g.device_id < sqlc.arg(before)
+  AND instr(g.text, sqlc.arg(text)) > 0
+ORDER BY g.device_id DESC LIMIT sqlc.arg(limit);
+
+-- The probe of a gram: its rows, up to limit.
+-- name: CountDeviceGram :one
+SELECT count(*) FROM (SELECT 1 FROM device_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));
+
+-- name: InsertDeviceGram :exec
+INSERT OR IGNORE INTO device_grams (gram, device_id, user_id, text) VALUES (?, ?, ?, ?);
+
 -- 0 rows: unknown or already revoked.
 -- name: RevokeDevice :execrows
 UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL;
@@ -131,8 +155,11 @@ WHERE g.gram = sqlc.arg(gram) AND g.folded >= sqlc.arg(from) AND g.folded < sqlc
 -- name: CountTrustGram :one
 SELECT count(*) FROM (SELECT 1 FROM publish_trust_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));
 
--- name: InsertTrustGram :exec
-INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id) VALUES (?, ?, ?, ?);
+-- The grams of a policy's name in one statement: grams is a JSON array of the grams.
+-- name: InsertTrustGrams :exec
+INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id)
+SELECT g.value, CAST(sqlc.arg(folded) AS TEXT), CAST(sqlc.arg(name) AS TEXT), CAST(sqlc.arg(trust_id) AS INTEGER)
+FROM json_each(sqlc.arg(grams)) g;
 
 -- The grams of a policy, through publish_trust_grams_trust (a rename writes them again).
 -- name: DeleteTrustGrams :exec
@@ -145,8 +172,10 @@ DELETE FROM publish_trusts WHERE id = ?;
 -- name: DeleteTrustRepos :exec
 DELETE FROM publish_trust_repos WHERE trust_id = ?;
 
--- name: InsertTrustRepo :exec
-INSERT INTO publish_trust_repos (trust_id, repo_id) VALUES (?, ?);
+-- The repos of a policy in one statement: repo_ids is a JSON array of repo ids.
+-- name: InsertTrustRepos :exec
+INSERT INTO publish_trust_repos (trust_id, repo_id)
+SELECT CAST(sqlc.arg(trust_id) AS INTEGER), r.value FROM json_each(sqlc.arg(repo_ids)) r;
 
 -- A merge adds repo to_id to every policy that lists repo from_id, through
 -- publish_trust_repos_repo. A policy that lists both keeps one row.
@@ -155,10 +184,11 @@ INSERT INTO publish_trust_repos (trust_id, repo_id)
 SELECT tr.trust_id, sqlc.arg(to_id) FROM publish_trust_repos tr WHERE tr.repo_id = sqlc.arg(from_id)
 ON CONFLICT (trust_id, repo_id) DO NOTHING;
 
--- The repos of a policy in repo id order (the primary key order).
--- name: ListTrustRepos :many
-SELECT r.id, r.name FROM publish_trust_repos tr JOIN repos r ON r.id = tr.repo_id
-WHERE tr.trust_id = ? ORDER BY tr.repo_id;
+-- The repos of the policies of a page (a JSON array of policy ids), in no order: one range of
+-- the primary key per policy. The caller sorts them.
+-- name: ListTrustReposOf :many
+SELECT tr.trust_id, r.id, r.name FROM publish_trust_repos tr JOIN repos r ON r.id = tr.repo_id
+WHERE tr.trust_id IN (SELECT value FROM json_each(sqlc.arg(trust_ids)));
 
 -- The enabled policies of an issuer that list the repo, through publish_trusts_issuer.
 -- name: ListMatchingTrusts :many
@@ -299,6 +329,46 @@ LEFT JOIN users u ON u.id = s.user_id
 LEFT JOIN devices d ON d.id = s.device_id
 LEFT JOIN publish_trusts t ON t.id = s.trust_id
 WHERE s.id < sqlc.arg(before)
+ORDER BY s.id DESC LIMIT sqlc.arg(limit);
+
+-- The publish log of one repo, as ListPublishLog, through publish_sessions_repo.
+-- name: ListPublishLogOfRepo :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.repo_id = sqlc.arg(repo_id) AND s.id < sqlc.arg(before)
+ORDER BY s.id DESC LIMIT sqlc.arg(limit);
+
+-- The publish log of one person, as ListPublishLog, through publish_sessions_user.
+-- name: ListPublishLogOfUser :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.user_id = sqlc.arg(user_id) AND s.id < sqlc.arg(before)
+ORDER BY s.id DESC LIMIT sqlc.arg(limit);
+
+-- The publish log of one person in one repo, as ListPublishLog, through
+-- publish_sessions_user_repo.
+-- name: ListPublishLogOfUserRepo :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.user_id = sqlc.arg(user_id) AND s.repo_id = sqlc.arg(repo_id) AND s.id < sqlc.arg(before)
 ORDER BY s.id DESC LIMIT sqlc.arg(limit);
 
 -- Keyset page of one user's publish sessions, newest first: ids below before.

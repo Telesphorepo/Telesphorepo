@@ -123,19 +123,31 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 	q := dbq.New(tx)
 	var names []string
 	var follow []repopath.Path
+	var tarballs []string
 	for _, a := range removed {
-		if !strings.HasSuffix(a.Path, ".tgz") {
+		if strings.HasSuffix(a.Path, ".tgz") {
+			tarballs = append(tarballs, a.Path)
+		}
+	}
+	if len(tarballs) == 0 {
+		return nil, nil
+	}
+	js, err := json.Marshal(tarballs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.DeleteVersionsOfTarballs(ctx, dbq.DeleteVersionsOfTarballsParams{RepoID: repo.ID, Tarballs: string(js)})
+	if err != nil {
+		return nil, err
+	}
+	gone := make(map[string]dbq.DeleteVersionsOfTarballsRow, len(rows))
+	for _, r := range rows {
+		gone[r.Tarball] = r
+	}
+	for _, t := range tarballs { // in the order of the batch
+		v, ok := gone[t]
+		if !ok {
 			continue
-		}
-		v, err := q.GetVersionOfTarball(ctx, dbq.GetVersionOfTarballParams{RepoID: repo.ID, Tarball: a.Path})
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := q.DeleteVersion(ctx, dbq.DeleteVersionParams{RepoID: repo.ID, Name: v.Name, Version: v.Version}); err != nil {
-			return nil, err
 		}
 		if !slices.Contains(names, v.Name) {
 			names = append(names, v.Name)

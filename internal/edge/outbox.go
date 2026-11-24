@@ -512,17 +512,11 @@ func (m *mod) mark(ctx context.Context, keys ...string) {
 	if len(keys) == 0 || m.cur.Load().mode != modeOn {
 		return
 	}
-	now := nowMS()
-	err := m.h.DB.Tx(ctx, func(tx *sql.Tx) error {
-		q := dbq.New(tx)
-		for _, k := range keys {
-			if err := q.UpsertOutbox(ctx, dbq.UpsertOutboxParams{RepoID: 0, Path: k, DueAt: now}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	rows := make([]outboxRow, len(keys))
+	for i, k := range keys {
+		rows[i] = outboxRow{Path: k}
+	}
+	if err := upsertOutbox(ctx, m.q, rows, nowMS()); err != nil {
 		// The reconcile writes the object within 5 minutes.
 		m.h.Log.Error("edge mark failed", "error", err.Error())
 		return

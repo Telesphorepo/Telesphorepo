@@ -267,6 +267,14 @@ func (h *hosts) checkDomains(d *settings.Draft) {
 	}
 	next := settings.DomainsOf(d.Next)
 	own := h.view.Get(d.Next).own
+	// The repos of the domains that the change adds or points elsewhere, in one lookup.
+	var names []string
+	for host, name := range next {
+		if !own[host] && prev[host] != name {
+			names = append(names, name)
+		}
+	}
+	found, lookupErr := h.repos.ByNames(context.Background(), names)
 	var msgs []string
 	for _, host := range sortedKeys(next) {
 		name := next[host]
@@ -277,12 +285,12 @@ func (h *hosts) checkDomains(d *settings.Draft) {
 		if prev[host] == name {
 			continue
 		}
-		repo, err := h.repos.ByName(context.Background(), name)
+		repo := found[name]
 		switch {
-		case errors.Is(err, repos.ErrNotFound):
+		case lookupErr != nil:
+			msgs = append(msgs, fmt.Sprintf("%s: the repository %s could not be read: %v", host, name, lookupErr))
+		case repo == nil:
 			msgs = append(msgs, fmt.Sprintf("%s: there is no repository %s", host, name))
-		case err != nil:
-			msgs = append(msgs, fmt.Sprintf("%s: the repository %s could not be read: %v", host, name, err))
 		case !h.mux.RepoRooted(repo.Format):
 			title := repo.Format
 			if s := h.formats.Get(repo.Format); s != nil {

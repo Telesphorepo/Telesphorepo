@@ -366,9 +366,63 @@ func (s *Service) UserSessions(ctx context.Context, userID, after int64, limit i
 	return out, nextID(len(rows), limit, func() int64 { return rows[len(rows)-1].ID }), nil
 }
 
-// Log returns a newest-first keyset page of every session (the admin publish log).
-func (s *Service) Log(ctx context.Context, after int64, limit int) ([]SessionInfo, int64, error) {
-	rows, err := s.rq.ListPublishLog(ctx, dbq.ListPublishLogParams{Before: beforeCursor(after), Limit: int64(limit)})
+// LogFilter keeps the sessions of the publish log of one repo (by name) and of one person (by
+// username); "" keeps every one.
+type LogFilter struct {
+	Repo, User string
+}
+
+// Log returns a newest-first keyset page of every session that f keeps (the admin publish log).
+// Each filter reads its own index: publish_sessions_repo, publish_sessions_user, or both through
+// publish_sessions_user_repo.
+func (s *Service) Log(ctx context.Context, f LogFilter, after int64, limit int) ([]SessionInfo, int64, error) {
+	var repoID, userID int64
+	if f.Repo != "" {
+		r, err := s.repos.ByName(ctx, f.Repo)
+		if errors.Is(err, repos.ErrNotFound) {
+			return []SessionInfo{}, 0, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		repoID = r.ID
+	}
+	if f.User != "" {
+		u, err := s.auth.GetUser(ctx, f.User)
+		if errors.Is(err, auth.ErrNotFound) {
+			return []SessionInfo{}, 0, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		userID = u.ID
+	}
+	before, n := beforeCursor(after), int64(limit)
+	var rows []dbq.ListPublishLogRow
+	var err error
+	switch {
+	case repoID != 0 && userID != 0:
+		var found []dbq.ListPublishLogOfUserRepoRow
+		found, err = s.rq.ListPublishLogOfUserRepo(ctx, dbq.ListPublishLogOfUserRepoParams{UserID: nullID(userID), RepoID: repoID,
+			Before: before, Limit: n})
+		for _, r := range found {
+			rows = append(rows, dbq.ListPublishLogRow(r))
+		}
+	case repoID != 0:
+		var found []dbq.ListPublishLogOfRepoRow
+		found, err = s.rq.ListPublishLogOfRepo(ctx, dbq.ListPublishLogOfRepoParams{RepoID: repoID, Before: before, Limit: n})
+		for _, r := range found {
+			rows = append(rows, dbq.ListPublishLogRow(r))
+		}
+	case userID != 0:
+		var found []dbq.ListPublishLogOfUserRow
+		found, err = s.rq.ListPublishLogOfUser(ctx, dbq.ListPublishLogOfUserParams{UserID: nullID(userID), Before: before, Limit: n})
+		for _, r := range found {
+			rows = append(rows, dbq.ListPublishLogRow(r))
+		}
+	default:
+		rows, err = s.rq.ListPublishLog(ctx, dbq.ListPublishLogParams{Before: before, Limit: n})
+	}
 	if err != nil {
 		return nil, 0, err
 	}

@@ -15,8 +15,14 @@ const listRepoGrants = `-- name: ListRepoGrants :many
 SELECT u.username, u.disabled, u.kind, p.perm,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS server_perms
 FROM repo_permissions p JOIN users u ON u.id = p.user_id
-WHERE p.repo_id = ?
+WHERE p.repo_id = ?1
+  AND (CAST(?2 AS TEXT) = '' OR instr(lower(u.username), ?2) > 0)
 `
+
+type ListRepoGrantsParams struct {
+	RepoID int64
+	Text   string
+}
 
 type ListRepoGrantsRow struct {
 	Username    string
@@ -29,9 +35,12 @@ type ListRepoGrantsRow struct {
 // Effective access (internal/access): who can download from and publish to a repo, and what a
 // person can do in each repo. Every query is bounded by one repo, one user or one permission.
 // The grants of one repo with their users and their server permissions, one row per permission,
-// through the repo_permissions primary key. The caller groups and sorts them.
-func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoGrantsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoGrants, repoID)
+// through the repo_permissions primary key. The caller groups and sorts them. A text (folded as
+// by namesearch.Text) keeps the users whose folded name holds it: instr on the rows of this
+// repo's grants, which the report reads whole without a text, so a search costs this repo's
+// grants and never the users of the server (as user_name_grams would for a short text).
+func (q *Queries) ListRepoGrants(ctx context.Context, arg ListRepoGrantsParams) ([]ListRepoGrantsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoGrants, arg.RepoID, arg.Text)
 	if err != nil {
 		return nil, err
 	}

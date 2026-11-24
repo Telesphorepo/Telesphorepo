@@ -115,7 +115,7 @@
   >
     <div class="flex flex-col gap-3">
       <CodeSnippet label={windows ? "PowerShell" : "Terminal"} value={line} />
-      <p class="max-w-prose text-meta text-pretty text-muted-foreground">
+      <p class="text-meta text-pretty text-muted-foreground">
         {#if windows}
           The script adds its folder to your PATH. This PowerShell window can run telesphorepo at once; open a new terminal to run it anywhere else.
         {:else}
@@ -154,7 +154,7 @@
       {#if chosen}
         <div class="flex flex-col gap-3">
           <CodeBlock title={windows ? `PowerShell, for ${chosen.name}` : `Terminal, for ${chosen.name}`} code={commands} />
-          <p class="max-w-prose text-meta text-pretty text-muted-foreground">
+          <p class="text-meta text-pretty text-muted-foreground">
             {#if windows}
               The last line adds the folder to your PATH; open a new terminal afterwards.
             {:else}
@@ -169,7 +169,7 @@
   <Section title="Update" description="After the server is updated, run this to install the CLI of the new server version.">
     <div class="flex flex-col gap-3">
       <CodeSnippet value="telesphorepo update" />
-      <p class="max-w-prose text-meta text-pretty text-muted-foreground">On a computer that uses more than one server, add the server address after update.</p>
+      <p class="text-meta text-pretty text-muted-foreground">On a computer that uses more than one server, add the server address after update.</p>
     </div>
   </Section>
 {/if}

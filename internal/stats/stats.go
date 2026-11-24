@@ -1,14 +1,14 @@
 // Package stats counts the downloads of each repo per day, and keeps the last use of each repo
 // redirect. The read path adds to counters in memory (Add, UseRedirect); Flush writes them, one
-// upsert per repo and day and one update per used redirect in one transaction, so a download
-// costs no write of its own. The audit module flushes every minute and at shutdown, deletes the
-// days past its retention setting and answers GET /api/stats.
+// upsert of every repo and day and one update of every used redirect in one transaction, so a
+// download costs no write of its own. The audit module flushes every minute and at shutdown,
+// deletes the days past its retention setting and answers GET /api/stats.
 package stats
 
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -77,9 +77,9 @@ func (c *Counter) RedirectUsed(name string) time.Time {
 	return time.Unix(at, 0)
 }
 
-// Flush writes the pending counters and redirect uses in one transaction: one upsert per repo
-// and day, one update per redirect. On a failed write they go back to the pending ones, so the
-// next flush writes them.
+// Flush writes the pending counters and redirect uses in one transaction: one upsert of every
+// repo and day, one update of every redirect. On a failed write they go back to the pending ones,
+// so the next flush writes them.
 func (c *Counter) Flush(ctx context.Context) error {
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
@@ -96,13 +96,25 @@ func (c *Counter) Flush(ctx context.Context) error {
 		if err := rollWindow(ctx, q); err != nil {
 			return err
 		}
-		for k, n := range batch {
-			if err := q.AddDownloads(ctx, dbq.AddDownloadsParams{RepoID: k.repo, Day: k.day, Downloads: n.downloads, Bytes: n.bytes}); err != nil {
+		if len(batch) > 0 {
+			rows := make([][4]int64, 0, len(batch))
+			for k, n := range batch {
+				rows = append(rows, [4]int64{k.repo, k.day, n.downloads, n.bytes})
+			}
+			js, err := json.Marshal(rows)
+			if err != nil {
+				return err
+			}
+			if err := q.AddDownloads(ctx, string(js)); err != nil {
 				return err
 			}
 		}
-		for name, at := range used {
-			if err := q.TouchRepoRedirect(ctx, dbq.TouchRepoRedirectParams{At: at, Name: name}); err != nil {
+		if len(used) > 0 {
+			js, err := json.Marshal(used)
+			if err != nil {
+				return err
+			}
+			if err := q.TouchRepoRedirects(ctx, string(js)); err != nil {
 				return err
 			}
 		}
@@ -145,7 +157,7 @@ func (c *Counter) roll(ctx context.Context) error {
 }
 
 // rollWindow subtracts each day that has left the window from the totals, reading only the rows of
-// that day, and moves the first day of the window to today's.
+// that day (two statements per day), and moves the first day of the window to today's.
 func rollWindow(ctx context.Context, q *dbq.Queries) error {
 	first, err := q.GetWindowFirst(ctx)
 	if err != nil {
@@ -156,17 +168,11 @@ func rollWindow(ctx context.Context, q *dbq.Queries) error {
 		return nil
 	}
 	for day := first; day < want; day += int64(Day / time.Second) {
-		rows, err := q.ListDownloadsOfDay(ctx, day)
-		if err != nil {
+		if err := q.SubWindowDay(ctx, day); err != nil {
 			return err
 		}
-		for _, r := range rows {
-			if err := q.SubWindowRepo(ctx, dbq.SubWindowRepoParams{Downloads: r.Downloads, Bytes: r.Bytes, RepoID: r.RepoID}); err != nil {
-				return err
-			}
-			if err := q.DeleteEmptyWindowRepo(ctx, r.RepoID); err != nil {
-				return err
-			}
+		if err := q.DeleteEmptyWindowRepos(ctx, day); err != nil {
+			return err
 		}
 	}
 	if err := q.DeleteWindowDaysBefore(ctx, want); err != nil {
@@ -218,20 +224,20 @@ func (c *Counter) Top(ctx context.Context, n int) ([]TopRow, error) {
 	return out, nil
 }
 
-// Recent returns the written downloads of the repos ids over the window, one seek per repo; a repo
-// without downloads has no entry.
+// Recent returns the written downloads of the repos ids over the window, in one query of their
+// rows; a repo without downloads has no entry.
 func (c *Counter) Recent(ctx context.Context, ids []int64) (map[int64]int64, error) {
 	out := make(map[int64]int64, len(ids))
-	for _, id := range ids {
-		n, err := c.rq.GetWindowRepoDownloads(ctx, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			out[id] = n
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := c.rq.ListWindowRepoDownloads(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if r.Downloads > 0 {
+			out[r.RepoID] = r.Downloads
 		}
 	}
 	return out, nil

@@ -5,15 +5,24 @@
 
 -- The outbox ------------------------------------------------------------------------------------
 
--- A new dirty row, or the replacement of the row of the key. A put that timed out stays known.
--- name: UpsertOutbox :exec
-INSERT INTO edge_outbox (repo_id, path, sha256, due_at) VALUES (?, ?, ?, ?)
+-- New dirty rows, or the replacement of the row of each key, in one statement: rows is a JSON
+-- array of {"repo_id", "path", "sha256"}. A put that timed out stays known.
+-- name: UpsertOutboxes :exec
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at)
+SELECT json_extract(r.value, '$.repo_id'), json_extract(r.value, '$.path'), json_extract(r.value, '$.sha256'),
+  CAST(sqlc.arg(due_at) AS INTEGER)
+FROM json_each(sqlc.arg(rows)) r WHERE true
 ON CONFLICT (repo_id, path) DO UPDATE SET sha256 = excluded.sha256, due_at = excluded.due_at,
   attempts = 0, seq = edge_outbox.seq + 1, error = '';
 
--- A backfill row: a key that is dirty already keeps its row, which the backfill marks.
--- name: InsertOutbox :exec
-INSERT INTO edge_outbox (repo_id, path, sha256, due_at, backfill) VALUES (?, ?, ?, ?, 1)
+-- The backfill rows of a page of assets in one statement: rows is a JSON array of
+-- {"repo_id", "path", "sha256"}. A key that is dirty already keeps its row, which the backfill
+-- marks.
+-- name: InsertOutboxes :exec
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at, backfill)
+SELECT json_extract(r.value, '$.repo_id'), json_extract(r.value, '$.path'), json_extract(r.value, '$.sha256'),
+  CAST(sqlc.arg(due_at) AS INTEGER), 1
+FROM json_each(sqlc.arg(rows)) r WHERE true
 ON CONFLICT (repo_id, path) DO UPDATE SET backfill = 1;
 
 -- Whether a row of the backfill is not written yet, through edge_outbox_backfill.
@@ -46,10 +55,12 @@ SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE timed_out_at > 0) AS timed_out;
 -- name: DeleteOutbox :execrows
 DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND seq = ?;
 
--- The row of a removed path whose pointers Removing deleted in every bucket of the current view.
--- A row with a put of unknown outcome stays, for its second application.
+-- The rows of the removed paths of a repo (a JSON array) whose pointers Removing deleted in every
+-- bucket of the current view, in one statement. A row with a put of unknown outcome stays, for
+-- its second application.
 -- name: DropRemoved :exec
-DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND timed_out_at = 0;
+DELETE FROM edge_outbox WHERE repo_id = sqlc.arg(repo_id) AND path IN (SELECT value FROM json_each(sqlc.arg(paths)))
+  AND timed_out_at = 0;
 
 -- A failed attempt: the next try and the error.
 -- name: RetryOutbox :execrows

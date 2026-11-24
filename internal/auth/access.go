@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -185,40 +186,48 @@ func userNeedsFactor(ctx context.Context, q *dbq.Queries, id int64) (bool, error
 	return needsFactor(perm.SetOfStrings(server), repoManaging), nil
 }
 
+// usersNeedFactor is userNeedsFactor for the users of ids, by id: two queries whatever their
+// number.
+func usersNeedFactor(ctx context.Context, q *dbq.Queries, ids []int64) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.ListUsersPerms(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	server := map[int64][]string{}
+	for _, r := range rows {
+		server[r.UserID] = append(server[r.UserID], r.Perm)
+	}
+	users, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	perms, err := json.Marshal(managingRepoPerms())
+	if err != nil {
+		return nil, err
+	}
+	managing, err := q.ListUsersWithRepoPermIn(ctx, dbq.ListUsersWithRepoPermInParams{Users: string(users), Perms: string(perms)})
+	if err != nil {
+		return nil, err
+	}
+	repoManaging := make(map[int64]bool, len(managing))
+	for _, id := range managing {
+		repoManaging[id] = true
+	}
+	for _, id := range ids {
+		out[id] = needsFactor(perm.SetOfStrings(server[id]), repoManaging[id])
+	}
+	return out, nil
+}
+
 // Grant is one pair of a user and a repo whose permission set SetPermissions changed.
 type Grant struct {
 	Repo     *repos.Repo
 	Username string
 	Old, New perm.Set
-}
-
-// pairs reads every user and repo of a list change of permissions. An unknown name returns a
-// *repos.MissingError. The repos come from the read pool; a repo deleted before the write
-// transaction ends fails its foreign key, and the transaction changes nothing.
-func (s *Service) pairs(ctx context.Context, q *dbq.Queries, users, repoNames []string) ([]int64, []*repos.Repo, error) {
-	rs := make([]*repos.Repo, 0, len(repoNames))
-	for _, name := range repoNames {
-		r, err := s.repos.ByName(ctx, name)
-		if errors.Is(err, repos.ErrNotFound) {
-			return nil, nil, &repos.MissingError{Kind: "repository", Name: name}
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		rs = append(rs, r)
-	}
-	ids := make([]int64, 0, len(users))
-	for _, name := range users {
-		row, err := q.GetUserIDKind(ctx, name)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, &repos.MissingError{Kind: "user", Name: name}
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		ids = append(ids, row.ID)
-	}
-	return ids, rs, nil
 }
 
 // ErrNotHeld refuses a change of a permission that the caller does not hold.
@@ -236,6 +245,9 @@ func (s *Service) SetPermissions(ctx context.Context, by *Principal, users, repo
 	return s.SetGroups(ctx, by, []GrantGroup{{Users: users, Repos: repoNames, Perms: ids}})
 }
 
+// pair is a repo and a user of a permission change.
+type pair struct{ repo, user int64 }
+
 // SetGroups sets, for each group, the repository permission set of every pair of its users and
 // repos to its perms, all groups in one transaction; no perms removes the pairs. It checks each
 // set against the permission registry (an unknown ID or a broken need is an error) and reads
@@ -246,6 +258,11 @@ func (s *Service) SetPermissions(ctx context.Context, by *Principal, users, repo
 // whole change loses their UI sessions. Each changed pair records grant.set in the same
 // transaction. A pair named by two groups gets the set of the last one. It returns the pairs
 // whose set changed.
+//
+// A change costs a fixed number of statements whatever its number of pairs: the repos are read
+// in one lookup of the list (from the read pool; a repo deleted before the write transaction ends
+// fails its foreign key, and the transaction changes nothing), the users, the second-factor needs,
+// the old sets of the pairs, the deletes, the inserts and the events each in one statement.
 func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGroup) ([]Grant, error) {
 	g := perm.Current()
 	sets := make([]perm.Set, len(groups))
@@ -256,25 +273,71 @@ func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGr
 		}
 		sets[k] = set
 	}
+	var repoNames, userNames []string // every name once, in its first order
+	seen := map[string]bool{}
+	for _, gr := range groups {
+		for _, n := range gr.Repos {
+			if !seen["r"+n] {
+				seen["r"+n] = true
+				repoNames = append(repoNames, n)
+			}
+		}
+		for _, n := range gr.Users {
+			if !seen["u"+n] {
+				seen["u"+n] = true
+				userNames = append(userNames, n)
+			}
+		}
+	}
+	reposBy, err := s.repos.ByNames(ctx, repoNames)
+	if err != nil {
+		return nil, err
+	}
+	// The caller's permissions on the repos come from its grants, read once.
+	byCtx, err := s.WithGrants(ctx, by)
+	if err != nil {
+		return nil, err
+	}
 	var changed []Grant
 	var order []string           // the usernames, in their first order
 	var userIDs map[string]int64 // by username
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		changed = changed[:0]
 		order = order[:0]
 		userIDs = map[string]int64{}
 		q := s.wq.WithTx(tx)
+		named, err := q.ListUsersNamed(ctx, userNames)
+		if err != nil {
+			return err
+		}
+		ids := make(map[string]int64, len(named))
+		for _, u := range named {
+			ids[u.Username] = u.ID
+		}
 		type part struct {
 			uids []int64
 			rs   []*repos.Repo
 		}
 		parts := make([]part, len(groups))
 		held := map[int64]perm.Set{} // by repo ID
-		before := map[int64]bool{}   // by user ID: needed a second factor before the change
 		for k, gr := range groups {
-			uids, rs, err := s.pairs(ctx, q, gr.Users, gr.Repos)
-			if err != nil {
-				return err
+			// Each group's repos, then its users, are checked in their order, so the first unknown
+			// name is the one reported.
+			rs := make([]*repos.Repo, 0, len(gr.Repos))
+			for _, name := range gr.Repos {
+				r := reposBy[name]
+				if r == nil {
+					return &repos.MissingError{Kind: "repository", Name: name}
+				}
+				rs = append(rs, r)
+			}
+			uids := make([]int64, 0, len(gr.Users))
+			for _, name := range gr.Users {
+				id, ok := ids[name]
+				if !ok {
+					return &repos.MissingError{Kind: "user", Name: name}
+				}
+				uids = append(uids, id)
 			}
 			parts[k] = part{uids, rs}
 			for _, r := range rs {
@@ -283,7 +346,7 @@ func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGr
 				}
 				if by == nil {
 					held[r.ID] = g.AllRepo()
-				} else if held[r.ID], err = s.RepoPerms(ctx, by, r); err != nil {
+				} else if held[r.ID], err = s.RepoPerms(byCtx, by, r); err != nil {
 					return err
 				}
 			}
@@ -293,20 +356,37 @@ func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGr
 				}
 				userIDs[gr.Users[i]] = uid
 				order = append(order, gr.Users[i])
-				if before[uid], err = userNeedsFactor(ctx, q, uid); err != nil {
-					return err
+			}
+		}
+		uids := make([]int64, len(order))
+		for i, name := range order {
+			uids[i] = userIDs[name]
+		}
+		before, err := usersNeedFactor(ctx, q, uids)
+		if err != nil {
+			return err
+		}
+		var asked [][2]int64
+		for _, pt := range parts {
+			for _, uid := range pt.uids {
+				for _, r := range pt.rs {
+					asked = append(asked, [2]int64{r.ID, uid})
 				}
 			}
 		}
+		cur, err := pairSets(ctx, q, asked)
+		if err != nil {
+			return err
+		}
+		var touched []pair // the pairs whose set changes, in their first order
+		isTouched := map[pair]bool{}
+		var events []audit.Event
 		for k, gr := range groups {
 			perms := sets[k]
 			for i, uid := range parts[k].uids {
 				for _, r := range parts[k].rs {
-					rows, err := q.ListRepoUserPerms(ctx, dbq.ListRepoUserPermsParams{RepoID: r.ID, UserID: uid})
-					if err != nil {
-						return err
-					}
-					old := perm.SetOfStrings(rows)
+					key := pair{r.ID, uid}
+					old := cur[key]
 					if old == perms {
 						continue
 					}
@@ -314,36 +394,34 @@ func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGr
 					if !held[r.ID].Contains(diff) {
 						return ErrNotHeld
 					}
-					if _, err := q.DeleteRepoUserPerms(ctx, dbq.DeleteRepoUserPermsParams{RepoID: r.ID, UserID: uid}); err != nil {
-						return err
+					if !isTouched[key] {
+						isTouched[key] = true
+						touched = append(touched, key)
 					}
-					for _, n := range perms.Strings() {
-						if err := q.AddRepoPerm(ctx, dbq.AddRepoPermParams{RepoID: r.ID, UserID: uid, Perm: n}); err != nil {
-							if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-								return &repos.MissingError{Kind: "repository", Name: r.Name}
-							}
-							return err
-						}
-					}
-					if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.GrantSet, RepoID: r.ID, Repo: r.Name,
-						Target: gr.Users[i], Detail: map[string]any{"old": old.Strings(), "new": perms.Strings()}}); err != nil {
-						return err
-					}
+					cur[key] = perms // a later group that names the pair changes it from here
+					events = append(events, audit.Event{Action: audit.GrantSet, RepoID: r.ID, Repo: r.Name,
+						Target: gr.Users[i], Detail: map[string]any{"old": old.Strings(), "new": perms.Strings()}})
 					changed = append(changed, Grant{Repo: r, Username: gr.Users[i], Old: old, New: perms})
 				}
 			}
 		}
-		for _, name := range order {
-			uid := userIDs[name]
-			after, err := userNeedsFactor(ctx, q, uid)
-			if err != nil {
+		if len(touched) > 0 {
+			if err := s.writePairs(ctx, tx, q, touched, cur, events); err != nil {
 				return err
 			}
-			if !before[uid] && after {
-				if err := q.DeleteUserSessions(ctx, uid); err != nil {
-					return err
-				}
+		}
+		after, err := usersNeedFactor(ctx, q, uids)
+		if err != nil {
+			return err
+		}
+		var ended []int64
+		for _, uid := range uids {
+			if !before[uid] && after[uid] {
+				ended = append(ended, uid)
 			}
+		}
+		if len(ended) > 0 {
+			return q.DeleteUsersSessions(ctx, ended)
 		}
 		return nil
 	})
@@ -364,6 +442,88 @@ func (s *Service) SetGroups(ctx context.Context, by *Principal, groups []GrantGr
 		s.changed(ctx, c)
 	}
 	return changed, nil
+}
+
+// pairSets reads the repository permission set of each pair of pairs ([repo, user]) in q: one
+// query, a seek per pair. A pair without a grant holds the empty set.
+func pairSets(ctx context.Context, q *dbq.Queries, pairs [][2]int64) (map[pair]perm.Set, error) {
+	out := make(map[pair]perm.Set, len(pairs))
+	if len(pairs) == 0 {
+		return out, nil
+	}
+	js, err := json.Marshal(pairs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.ListPairPerms(ctx, string(js))
+	if err != nil {
+		return nil, err
+	}
+	strs := map[pair][]string{}
+	for _, r := range rows {
+		k := pair{r.RepoID, r.UserID}
+		strs[k] = append(strs[k], r.Perm)
+	}
+	for k, list := range strs {
+		out[k] = perm.SetOfStrings(list)
+	}
+	return out, nil
+}
+
+// writePairs gives each pair of touched its set in sets, in tx, and records events: one delete,
+// one insert of the grants and one of the events. A repo deleted since it was read fails its
+// foreign key: the answer names it.
+func (s *Service) writePairs(ctx context.Context, tx *sql.Tx, q *dbq.Queries, touched []pair, sets map[pair]perm.Set, events []audit.Event) error {
+	drop := make([][2]int64, len(touched))
+	var add [][3]any
+	for i, k := range touched {
+		drop[i] = [2]int64{k.repo, k.user}
+		for _, n := range sets[k].Strings() {
+			add = append(add, [3]any{k.repo, k.user, n})
+		}
+	}
+	js, err := json.Marshal(drop)
+	if err != nil {
+		return err
+	}
+	if err := q.DeletePairPerms(ctx, string(js)); err != nil {
+		return err
+	}
+	if len(add) > 0 {
+		if js, err = json.Marshal(add); err != nil {
+			return err
+		}
+		err = q.AddPairPerms(ctx, string(js))
+	}
+	if err == nil {
+		err = s.audit.RecordAllTx(ctx, tx, events)
+	}
+	if err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+		return goneRepo(ctx, q, touched, events, err)
+	}
+	return err
+}
+
+// goneRepo returns the *repos.MissingError of the first repo of touched that is gone, else err.
+func goneRepo(ctx context.Context, q *dbq.Queries, touched []pair, events []audit.Event, err error) error {
+	ids := make([]int64, len(touched))
+	for i, k := range touched {
+		ids[i] = k.repo
+	}
+	rows, qerr := q.ListReposByIDs(ctx, ids)
+	if qerr != nil {
+		return err
+	}
+	here := make(map[int64]bool, len(rows))
+	for _, r := range rows {
+		here[r.ID] = true
+	}
+	for _, e := range events {
+		if !here[e.RepoID] {
+			return &repos.MissingError{Kind: "repository", Name: e.Repo}
+		}
+	}
+	return err
 }
 
 // ListPermissions returns the permission sets on repo, by username.

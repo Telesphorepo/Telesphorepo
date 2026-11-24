@@ -24,6 +24,78 @@ func (q *Queries) CountCopyingNexusRepos(ctx context.Context, sourceID int64) (i
 	return count, err
 }
 
+const countNexusSourceRepos = `-- name: CountNexusSourceRepos :many
+SELECT source_id, count(*) AS repos, CAST(sum(kind = 'hosted') AS INTEGER) AS hosted
+FROM nexus_source_repos WHERE source_id IN (SELECT value FROM json_each(?1))
+GROUP BY source_id
+`
+
+type CountNexusSourceReposRow struct {
+	SourceID int64
+	Repos    int64
+	Hosted   int64
+}
+
+// The mapped repos of each source of source_ids, and the hosted ones among them, through the
+// primary key of nexus_source_repos.
+func (q *Queries) CountNexusSourceRepos(ctx context.Context, sourceIds interface{}) ([]CountNexusSourceReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, countNexusSourceRepos, sourceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountNexusSourceReposRow
+	for rows.Next() {
+		var i CountNexusSourceReposRow
+		if err := rows.Scan(&i.SourceID, &i.Repos, &i.Hosted); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countNexusSwitchOvers = `-- name: CountNexusSwitchOvers :many
+SELECT source_id, count(*) AS switched
+FROM nexus_switch_overs WHERE source_id IN (SELECT value FROM json_each(?1))
+GROUP BY source_id
+`
+
+type CountNexusSwitchOversRow struct {
+	SourceID int64
+	Switched int64
+}
+
+// The switch-overs of each source of source_ids, through the primary key of nexus_switch_overs.
+func (q *Queries) CountNexusSwitchOvers(ctx context.Context, sourceIds interface{}) ([]CountNexusSwitchOversRow, error) {
+	rows, err := q.db.QueryContext(ctx, countNexusSwitchOvers, sourceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountNexusSwitchOversRow
+	for rows.Next() {
+		var i CountNexusSwitchOversRow
+		if err := rows.Scan(&i.SourceID, &i.Switched); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createNexusSource = `-- name: CreateNexusSource :one
 
 INSERT INTO nexus_sources (name, base_url, credentials, created_by, created_at)
@@ -111,21 +183,6 @@ func (q *Queries) DeleteNexusSource(ctx context.Context, id int64) error {
 	return err
 }
 
-const deleteNexusSourceRepo = `-- name: DeleteNexusSourceRepo :exec
-DELETE FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?
-`
-
-type DeleteNexusSourceRepoParams struct {
-	SourceID   int64
-	SourceRepo string
-}
-
-// Removes the mapping of one Nexus repo of a source (a save keeps the switched-over ones).
-func (q *Queries) DeleteNexusSourceRepo(ctx context.Context, arg DeleteNexusSourceRepoParams) error {
-	_, err := q.db.ExecContext(ctx, deleteNexusSourceRepo, arg.SourceID, arg.SourceRepo)
-	return err
-}
-
 const deleteOldNexusSyncs = `-- name: DeleteOldNexusSyncs :execrows
 DELETE FROM nexus_syncs
 WHERE source_id = ?1 AND id <= ?2 AND state <> 'running' AND trigger <> 'cutover'
@@ -144,6 +201,35 @@ func (q *Queries) DeleteOldNexusSyncs(ctx context.Context, arg DeleteOldNexusSyn
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deleteUnswitchedNexusSourceRepos = `-- name: DeleteUnswitchedNexusSourceRepos :exec
+DELETE FROM nexus_source_repos WHERE nexus_source_repos.source_id = ?1 AND nexus_source_repos.source_repo NOT IN (
+  SELECT o.source_repo FROM nexus_switch_overs o WHERE o.source_id = ?1)
+`
+
+// Removes the mapping of the repos of a source that did not switch over (a save keeps the
+// switched-over ones), through the primary keys.
+func (q *Queries) DeleteUnswitchedNexusSourceRepos(ctx context.Context, sourceID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteUnswitchedNexusSourceRepos, sourceID)
+	return err
+}
+
+const endNexusSyncRepos = `-- name: EndNexusSyncRepos :exec
+UPDATE nexus_sync_repos SET state = ?1, error = ?2
+WHERE sync_id = ?3 AND state IN ('pending', 'running')
+`
+
+type EndNexusSyncReposParams struct {
+	State  string
+	Error  string
+	SyncID int64
+}
+
+// Ends every repo of a sync that has not ended, through the primary key.
+func (q *Queries) EndNexusSyncRepos(ctx context.Context, arg EndNexusSyncReposParams) error {
+	_, err := q.db.ExecContext(ctx, endNexusSyncRepos, arg.State, arg.Error, arg.SyncID)
+	return err
 }
 
 const finishNexusSync = `-- name: FinishNexusSync :execrows
@@ -169,42 +255,6 @@ func (q *Queries) FinishNexusSync(ctx context.Context, arg FinishNexusSyncParams
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-const getLatestNexusSync = `-- name: GetLatestNexusSync :one
-SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
-  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
-FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
-WHERE s.source_id = ? ORDER BY s.id DESC LIMIT 1
-`
-
-type GetLatestNexusSyncRow struct {
-	ID            int64
-	SourceID      int64
-	State         string
-	Trigger       string
-	StartedBy     sql.NullInt64
-	StartedAt     int64
-	FinishedAt    sql.NullInt64
-	Error         string
-	StartedByName string
-}
-
-func (q *Queries) GetLatestNexusSync(ctx context.Context, sourceID int64) (GetLatestNexusSyncRow, error) {
-	row := q.db.QueryRowContext(ctx, getLatestNexusSync, sourceID)
-	var i GetLatestNexusSyncRow
-	err := row.Scan(
-		&i.ID,
-		&i.SourceID,
-		&i.State,
-		&i.Trigger,
-		&i.StartedBy,
-		&i.StartedAt,
-		&i.FinishedAt,
-		&i.Error,
-		&i.StartedByName,
-	)
-	return i, err
 }
 
 const getNexusMerge = `-- name: GetNexusMerge :one
@@ -271,25 +321,6 @@ func (q *Queries) GetNexusMerge(ctx context.Context, id int64) (GetNexusMergeRow
 	return i, err
 }
 
-const getNexusMergeBySync = `-- name: GetNexusMergeBySync :one
-SELECT id, source_name, target_name FROM nexus_merges WHERE sync_id = ? ORDER BY id DESC LIMIT 1
-`
-
-type GetNexusMergeBySyncRow struct {
-	ID         int64
-	SourceName string
-	TargetName string
-}
-
-// The merge whose final sync is sync_id, in any state, through nexus_merges_sync: a sync shows
-// as part of its merge.
-func (q *Queries) GetNexusMergeBySync(ctx context.Context, syncID int64) (GetNexusMergeBySyncRow, error) {
-	row := q.db.QueryRowContext(ctx, getNexusMergeBySync, syncID)
-	var i GetNexusMergeBySyncRow
-	err := row.Scan(&i.ID, &i.SourceName, &i.TargetName)
-	return i, err
-}
-
 const getNexusMergeChoice = `-- name: GetNexusMergeChoice :one
 SELECT take FROM nexus_merge_choices WHERE merge_id = ? AND path = ?
 `
@@ -340,24 +371,6 @@ func (q *Queries) GetNexusSource(ctx context.Context, id int64) (NexusSource, er
 		&i.CutoverSyncID,
 		&i.CutoverFailed,
 	)
-	return i, err
-}
-
-const getNexusSourceByTarget = `-- name: GetNexusSourceByTarget :one
-SELECT s.id, s.name FROM nexus_source_repos m JOIN nexus_sources s ON s.id = m.source_id
-WHERE m.target_repo_id = ? LIMIT 1
-`
-
-type GetNexusSourceByTargetRow struct {
-	ID   int64
-	Name string
-}
-
-// The source that a target repo mirrors, through nexus_source_repos_target.
-func (q *Queries) GetNexusSourceByTarget(ctx context.Context, targetRepoID int64) (GetNexusSourceByTargetRow, error) {
-	row := q.db.QueryRowContext(ctx, getNexusSourceByTarget, targetRepoID)
-	var i GetNexusSourceByTargetRow
-	err := row.Scan(&i.ID, &i.Name)
 	return i, err
 }
 
@@ -479,21 +492,6 @@ func (q *Queries) InsertNexusMerge(ctx context.Context, arg InsertNexusMergePara
 	return id, err
 }
 
-const insertNexusMergeChoice = `-- name: InsertNexusMergeChoice :exec
-INSERT INTO nexus_merge_choices (merge_id, path, take) VALUES (?, ?, ?)
-`
-
-type InsertNexusMergeChoiceParams struct {
-	MergeID int64
-	Path    string
-	Take    int64
-}
-
-func (q *Queries) InsertNexusMergeChoice(ctx context.Context, arg InsertNexusMergeChoiceParams) error {
-	_, err := q.db.ExecContext(ctx, insertNexusMergeChoice, arg.MergeID, arg.Path, arg.Take)
-	return err
-}
-
 const insertNexusMergeChoiceIfNone = `-- name: InsertNexusMergeChoiceIfNone :exec
 INSERT INTO nexus_merge_choices (merge_id, path, take) VALUES (?, ?, ?) ON CONFLICT (merge_id, path) DO NOTHING
 `
@@ -510,26 +508,58 @@ func (q *Queries) InsertNexusMergeChoiceIfNone(ctx context.Context, arg InsertNe
 	return err
 }
 
-const insertNexusSourceRepo = `-- name: InsertNexusSourceRepo :exec
-INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id) VALUES (?, ?, ?, ?, ?)
+const insertNexusMergeChoices = `-- name: InsertNexusMergeChoices :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take)
+SELECT CAST(?1 AS INTEGER), json_extract(c.value, '$.path'), json_extract(c.value, '$.take')
+FROM json_each(?2) c
 `
 
-type InsertNexusSourceRepoParams struct {
-	SourceID     int64
-	SourceRepo   string
-	SourceFormat string
-	Kind         string
-	TargetRepoID int64
+type InsertNexusMergeChoicesParams struct {
+	MergeID int64
+	Choices interface{}
 }
 
-func (q *Queries) InsertNexusSourceRepo(ctx context.Context, arg InsertNexusSourceRepoParams) error {
-	_, err := q.db.ExecContext(ctx, insertNexusSourceRepo,
-		arg.SourceID,
-		arg.SourceRepo,
-		arg.SourceFormat,
-		arg.Kind,
-		arg.TargetRepoID,
-	)
+// The choices of a merge in one statement: choices is a JSON array of {"path", "take"}.
+func (q *Queries) InsertNexusMergeChoices(ctx context.Context, arg InsertNexusMergeChoicesParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusMergeChoices, arg.MergeID, arg.Choices)
+	return err
+}
+
+const insertNexusMergeChoicesIfNone = `-- name: InsertNexusMergeChoicesIfNone :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take)
+SELECT CAST(?1 AS INTEGER), p.value, CAST(?2 AS INTEGER) FROM json_each(?3) p WHERE true
+ON CONFLICT (merge_id, path) DO NOTHING
+`
+
+type InsertNexusMergeChoicesIfNoneParams struct {
+	MergeID int64
+	Take    int64
+	Paths   interface{}
+}
+
+// The choices that a merge saves itself, unless one is saved, in one statement: paths is a JSON
+// array of the paths, each with take.
+func (q *Queries) InsertNexusMergeChoicesIfNone(ctx context.Context, arg InsertNexusMergeChoicesIfNoneParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusMergeChoicesIfNone, arg.MergeID, arg.Take, arg.Paths)
+	return err
+}
+
+const insertNexusSourceRepos = `-- name: InsertNexusSourceRepos :exec
+INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id)
+SELECT CAST(?1 AS INTEGER), json_extract(r.value, '$.source_repo'), json_extract(r.value, '$.source_format'),
+  json_extract(r.value, '$.kind'), json_extract(r.value, '$.target_repo_id')
+FROM json_each(?2) r
+`
+
+type InsertNexusSourceReposParams struct {
+	SourceID int64
+	Repos    interface{}
+}
+
+// The mapping of a save in one statement: repos is a JSON array of
+// {"source_repo", "source_format", "kind", "target_repo_id"}.
+func (q *Queries) InsertNexusSourceRepos(ctx context.Context, arg InsertNexusSourceReposParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusSourceRepos, arg.SourceID, arg.Repos)
 	return err
 }
 
@@ -558,26 +588,44 @@ func (q *Queries) InsertNexusSwitchOver(ctx context.Context, arg InsertNexusSwit
 	return err
 }
 
-const insertNexusSyncFailure = `-- name: InsertNexusSyncFailure :exec
-INSERT INTO nexus_sync_failures (sync_id, source_repo, path, reason) VALUES (?, ?, ?, ?)
+const insertNexusSwitchOversOfSync = `-- name: InsertNexusSwitchOversOfSync :exec
+INSERT INTO nexus_switch_overs (source_id, source_repo, sync_id, failed, switched_at)
+SELECT ?1, r.source_repo, r.sync_id, r.failed, ?2
+FROM nexus_sync_repos r WHERE r.sync_id = ?3
+ON CONFLICT (source_id, source_repo) DO NOTHING
+`
+
+type InsertNexusSwitchOversOfSyncParams struct {
+	SourceID   int64
+	SwitchedAt int64
+	SyncID     int64
+}
+
+// The switch-overs of every repo of the final sync sync_id of source source_id at once (a repo
+// that switched over again is left as it is).
+func (q *Queries) InsertNexusSwitchOversOfSync(ctx context.Context, arg InsertNexusSwitchOversOfSyncParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusSwitchOversOfSync, arg.SourceID, arg.SwitchedAt, arg.SyncID)
+	return err
+}
+
+const insertNexusSyncFailures = `-- name: InsertNexusSyncFailures :exec
+INSERT INTO nexus_sync_failures (sync_id, source_repo, path, reason)
+SELECT CAST(?1 AS INTEGER), CAST(?2 AS TEXT),
+  json_extract(f.value, '$.path'), json_extract(f.value, '$.reason')
+FROM json_each(?3) f WHERE true
 ON CONFLICT (sync_id, source_repo, path) DO UPDATE SET reason = excluded.reason
 `
 
-type InsertNexusSyncFailureParams struct {
+type InsertNexusSyncFailuresParams struct {
 	SyncID     int64
 	SourceRepo string
-	Path       string
-	Reason     string
+	Failures   interface{}
 }
 
-// A repeated failure of the same file (a resumed page) replaces the reason and keeps its id.
-func (q *Queries) InsertNexusSyncFailure(ctx context.Context, arg InsertNexusSyncFailureParams) error {
-	_, err := q.db.ExecContext(ctx, insertNexusSyncFailure,
-		arg.SyncID,
-		arg.SourceRepo,
-		arg.Path,
-		arg.Reason,
-	)
+// The failures of one saved page of a sync in one statement: failures is a JSON array of
+// {"path", "reason"}. A repeated failure of the same file replaces the reason and keeps its id.
+func (q *Queries) InsertNexusSyncFailures(ctx context.Context, arg InsertNexusSyncFailuresParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusSyncFailures, arg.SyncID, arg.SourceRepo, arg.Failures)
 	return err
 }
 
@@ -717,24 +765,202 @@ func (q *Queries) ListDueNexusSources(ctx context.Context, arg ListDueNexusSourc
 	return items, nil
 }
 
-const listMovesInto = `-- name: ListMovesInto :many
-SELECT repo_id FROM repo_moves WHERE into_repo_id = ? ORDER BY repo_id
+const listLatestNexusMergesOf = `-- name: ListLatestNexusMergesOf :many
+SELECT g.target_repo_id, g.id, g.state FROM nexus_merges g
+WHERE g.id IN (SELECT (SELECT max(x.id) FROM nexus_merges x WHERE x.target_repo_id = j.value) FROM json_each(?1) j)
 `
 
-// The moving repos of a repo, through repo_moves_into.
-func (q *Queries) ListMovesInto(ctx context.Context, intoRepoID int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, listMovesInto, intoRepoID)
+type ListLatestNexusMergesOfRow struct {
+	TargetRepoID int64
+	ID           int64
+	State        string
+}
+
+// The newest merge into each repo of ids, through nexus_merges_target.
+func (q *Queries) ListLatestNexusMergesOf(ctx context.Context, ids interface{}) ([]ListLatestNexusMergesOfRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestNexusMergesOf, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []int64
+	var items []ListLatestNexusMergesOfRow
 	for rows.Next() {
-		var repo_id int64
-		if err := rows.Scan(&repo_id); err != nil {
+		var i ListLatestNexusMergesOfRow
+		if err := rows.Scan(&i.TargetRepoID, &i.ID, &i.State); err != nil {
 			return nil, err
 		}
-		items = append(items, repo_id)
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLatestNexusSyncs = `-- name: ListLatestNexusSyncs :many
+SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
+  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
+WHERE s.id IN (SELECT (SELECT max(x.id) FROM nexus_syncs x WHERE x.source_id = j.value) FROM json_each(?1) j)
+`
+
+type ListLatestNexusSyncsRow struct {
+	ID            int64
+	SourceID      int64
+	State         string
+	Trigger       string
+	StartedBy     sql.NullInt64
+	StartedAt     int64
+	FinishedAt    sql.NullInt64
+	Error         string
+	StartedByName string
+}
+
+// The newest sync of each source of source_ids: one seek of nexus_syncs_source per source.
+func (q *Queries) ListLatestNexusSyncs(ctx context.Context, sourceIds interface{}) ([]ListLatestNexusSyncsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestNexusSyncs, sourceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLatestNexusSyncsRow
+	for rows.Next() {
+		var i ListLatestNexusSyncsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.State,
+			&i.Trigger,
+			&i.StartedBy,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Error,
+			&i.StartedByName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMovesOf = `-- name: ListMovesOf :many
+SELECT x.into_repo_id, x.repo_id, r.name FROM repo_moves x JOIN repos r ON r.id = x.repo_id
+WHERE x.into_repo_id IN (SELECT value FROM json_each(?1))
+`
+
+type ListMovesOfRow struct {
+	IntoRepoID int64
+	RepoID     int64
+	Name       string
+}
+
+// The moving repos of each repo of ids, with their names, through repo_moves_into; the caller
+// orders them by repo id (creation).
+func (q *Queries) ListMovesOf(ctx context.Context, ids interface{}) ([]ListMovesOfRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMovesOf, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMovesOfRow
+	for rows.Next() {
+		var i ListMovesOfRow
+		if err := rows.Scan(&i.IntoRepoID, &i.RepoID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusMergeChoicesIn = `-- name: ListNexusMergeChoicesIn :many
+SELECT path, take FROM nexus_merge_choices
+WHERE merge_id = ?1 AND path >= ?2 AND path < ?3
+`
+
+type ListNexusMergeChoicesInParams struct {
+	MergeID int64
+	From    string
+	To      string
+}
+
+type ListNexusMergeChoicesInRow struct {
+	Path string
+	Take int64
+}
+
+// The choices of a merge whose path is in [from, to), through the primary key (the labels).
+func (q *Queries) ListNexusMergeChoicesIn(ctx context.Context, arg ListNexusMergeChoicesInParams) ([]ListNexusMergeChoicesInRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusMergeChoicesIn, arg.MergeID, arg.From, arg.To)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusMergeChoicesInRow
+	for rows.Next() {
+		var i ListNexusMergeChoicesInRow
+		if err := rows.Scan(&i.Path, &i.Take); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusMergesBySyncs = `-- name: ListNexusMergesBySyncs :many
+SELECT sync_id, id, source_name, target_name FROM nexus_merges
+WHERE sync_id IN (SELECT value FROM json_each(?1))
+`
+
+type ListNexusMergesBySyncsRow struct {
+	SyncID     int64
+	ID         int64
+	SourceName string
+	TargetName string
+}
+
+// The merges whose final sync is one of sync_ids, through nexus_merges_sync; the caller keeps
+// the newest of each sync.
+func (q *Queries) ListNexusMergesBySyncs(ctx context.Context, syncIds interface{}) ([]ListNexusMergesBySyncsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusMergesBySyncs, syncIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusMergesBySyncsRow
+	for rows.Next() {
+		var i ListNexusMergesBySyncsRow
+		if err := rows.Scan(
+			&i.SyncID,
+			&i.ID,
+			&i.SourceName,
+			&i.TargetName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -864,6 +1090,42 @@ func (q *Queries) ListNexusSources(ctx context.Context, arg ListNexusSourcesPara
 	return items, nil
 }
 
+const listNexusSourcesByTargets = `-- name: ListNexusSourcesByTargets :many
+SELECT m.target_repo_id, s.id, s.name FROM nexus_source_repos m JOIN nexus_sources s ON s.id = m.source_id
+WHERE m.target_repo_id IN (SELECT value FROM json_each(?1))
+`
+
+type ListNexusSourcesByTargetsRow struct {
+	TargetRepoID int64
+	ID           int64
+	Name         string
+}
+
+// The source that each target repo of ids mirrors, through nexus_source_repos_target (a target
+// mirrors at most one source).
+func (q *Queries) ListNexusSourcesByTargets(ctx context.Context, ids interface{}) ([]ListNexusSourcesByTargetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSourcesByTargets, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusSourcesByTargetsRow
+	for rows.Next() {
+		var i ListNexusSourcesByTargetsRow
+		if err := rows.Scan(&i.TargetRepoID, &i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNexusSwitchOvers = `-- name: ListNexusSwitchOvers :many
 SELECT source_id, source_repo, sync_id, failed, switched_at
 FROM nexus_switch_overs WHERE source_id = ? ORDER BY source_repo
@@ -885,6 +1147,42 @@ func (q *Queries) ListNexusSwitchOvers(ctx context.Context, sourceID int64) ([]N
 			&i.SyncID,
 			&i.Failed,
 			&i.SwitchedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusSwitchedMappings = `-- name: ListNexusSwitchedMappings :many
+SELECT m.source_id, m.source_repo, m.source_format, m.kind, m.target_repo_id
+FROM nexus_switch_overs o JOIN nexus_source_repos m ON m.source_id = o.source_id AND m.source_repo = o.source_repo
+WHERE o.source_id = ? ORDER BY o.source_repo
+`
+
+// The mapping rows of the repos of a source that switched over, through the primary keys.
+func (q *Queries) ListNexusSwitchedMappings(ctx context.Context, sourceID int64) ([]NexusSourceRepo, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSwitchedMappings, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NexusSourceRepo
+	for rows.Next() {
+		var i NexusSourceRepo
+		if err := rows.Scan(
+			&i.SourceID,
+			&i.SourceRepo,
+			&i.SourceFormat,
+			&i.Kind,
+			&i.TargetRepoID,
 		); err != nil {
 			return nil, err
 		}
@@ -1076,6 +1374,79 @@ func (q *Queries) ListNexusSyncRepos(ctx context.Context, syncID int64) ([]Nexus
 	return items, nil
 }
 
+const listNexusSyncReposDetail = `-- name: ListNexusSyncReposDetail :many
+SELECT r.source_repo, r.source_format, r.checked, r.imported, r.skipped, r.ignored, r.failed, r.bytes,
+  r.active_at, r.state, r.error, CAST(COALESCE(t.name, '') AS TEXT) AS target,
+  CAST(COALESCE((SELECT p.checked FROM nexus_syncs s
+    JOIN nexus_sync_repos p ON p.sync_id = s.id AND p.source_repo = r.source_repo
+    WHERE s.source_id = ?1 AND s.id < r.sync_id AND p.state = 'done'
+    ORDER BY s.id DESC LIMIT 1), 0) AS INTEGER) AS previous_checked
+FROM nexus_sync_repos r LEFT JOIN repos t ON t.id = r.target_repo_id
+WHERE r.sync_id = ?2 ORDER BY r.source_repo
+`
+
+type ListNexusSyncReposDetailParams struct {
+	SourceID int64
+	SyncID   int64
+}
+
+type ListNexusSyncReposDetailRow struct {
+	SourceRepo      string
+	SourceFormat    string
+	Checked         int64
+	Imported        int64
+	Skipped         int64
+	Ignored         int64
+	Failed          int64
+	Bytes           int64
+	ActiveAt        int64
+	State           string
+	Error           string
+	Target          string
+	PreviousChecked int64
+}
+
+// A sync's repos in source repo order with the name of each target (” when it is gone) and the
+// checked count of the repo's newest earlier walk that reached the end (0 for none): newest first
+// through nexus_syncs_source, then the primary key of nexus_sync_repos. Retention bounds the walk
+// to 100 syncs.
+func (q *Queries) ListNexusSyncReposDetail(ctx context.Context, arg ListNexusSyncReposDetailParams) ([]ListNexusSyncReposDetailRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSyncReposDetail, arg.SourceID, arg.SyncID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusSyncReposDetailRow
+	for rows.Next() {
+		var i ListNexusSyncReposDetailRow
+		if err := rows.Scan(
+			&i.SourceRepo,
+			&i.SourceFormat,
+			&i.Checked,
+			&i.Imported,
+			&i.Skipped,
+			&i.Ignored,
+			&i.Failed,
+			&i.Bytes,
+			&i.ActiveAt,
+			&i.State,
+			&i.Error,
+			&i.Target,
+			&i.PreviousChecked,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNexusSyncs = `-- name: ListNexusSyncs :many
 SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
   CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
@@ -1179,24 +1550,32 @@ func (q *Queries) ListNexusTargetRepos(ctx context.Context, targetRepoID int64) 
 	return items, nil
 }
 
-const listRehearsalsFor = `-- name: ListRehearsalsFor :many
-SELECT repo_id FROM repo_rehearsals WHERE for_repo_id = ? ORDER BY repo_id
+const listRehearsalsOf = `-- name: ListRehearsalsOf :many
+SELECT x.for_repo_id, x.repo_id, r.name FROM repo_rehearsals x JOIN repos r ON r.id = x.repo_id
+WHERE x.for_repo_id IN (SELECT value FROM json_each(?1))
 `
 
-// The rehearsal repos of a repo, through repo_rehearsals_for.
-func (q *Queries) ListRehearsalsFor(ctx context.Context, forRepoID int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, listRehearsalsFor, forRepoID)
+type ListRehearsalsOfRow struct {
+	ForRepoID int64
+	RepoID    int64
+	Name      string
+}
+
+// The rehearsal repos of each repo of ids, with their names, through repo_rehearsals_for; the
+// caller orders them by repo id (creation).
+func (q *Queries) ListRehearsalsOf(ctx context.Context, ids interface{}) ([]ListRehearsalsOfRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRehearsalsOf, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []int64
+	var items []ListRehearsalsOfRow
 	for rows.Next() {
-		var repo_id int64
-		if err := rows.Scan(&repo_id); err != nil {
+		var i ListRehearsalsOfRow
+		if err := rows.Scan(&i.ForRepoID, &i.RepoID, &i.Name); err != nil {
 			return nil, err
 		}
-		items = append(items, repo_id)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -1227,6 +1606,39 @@ func (q *Queries) ListRepoMoves(ctx context.Context) ([]ListRepoMovesRow, error)
 	for rows.Next() {
 		var i ListRepoMovesRow
 		if err := rows.Scan(&i.RepoID, &i.IntoRepoID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoNamesIn = `-- name: ListRepoNamesIn :many
+SELECT id, name FROM repos WHERE id IN (SELECT value FROM json_each(?1))
+`
+
+type ListRepoNamesInRow struct {
+	ID   int64
+	Name string
+}
+
+// The names of the repos of ids that exist, through the primary key of repos.
+func (q *Queries) ListRepoNamesIn(ctx context.Context, ids interface{}) ([]ListRepoNamesInRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoNamesIn, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRepoNamesInRow
+	for rows.Next() {
+		var i ListRepoNamesInRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1304,29 +1716,6 @@ func (q *Queries) ListRunningNexusSyncs(ctx context.Context) ([]NexusSync, error
 		return nil, err
 	}
 	return items, nil
-}
-
-const previousNexusChecked = `-- name: PreviousNexusChecked :one
-SELECT r.checked FROM nexus_syncs s
-JOIN nexus_sync_repos r ON r.sync_id = s.id AND r.source_repo = ?1
-WHERE s.source_id = ?2 AND s.id < ?3 AND r.state = 'done'
-ORDER BY s.id DESC LIMIT 1
-`
-
-type PreviousNexusCheckedParams struct {
-	SourceRepo string
-	SourceID   int64
-	Before     int64
-}
-
-// The checked count of the newest walk of a source repo that reached the end, in a sync of the
-// source before sync before: newest first through nexus_syncs_source, then the primary key of
-// nexus_sync_repos. Retention bounds the walk to 100 syncs.
-func (q *Queries) PreviousNexusChecked(ctx context.Context, arg PreviousNexusCheckedParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, previousNexusChecked, arg.SourceRepo, arg.SourceID, arg.Before)
-	var checked int64
-	err := row.Scan(&checked)
-	return checked, err
 }
 
 const purgeNexusMergeChoices = `-- name: PurgeNexusMergeChoices :execrows
@@ -1592,6 +1981,66 @@ func (q *Queries) SetNexusSyncRepoState(ctx context.Context, arg SetNexusSyncRep
 		arg.SourceRepo,
 	)
 	return err
+}
+
+const sumNexusSyncRepos = `-- name: SumNexusSyncRepos :many
+SELECT sync_id, count(*) AS repos,
+  CAST(sum(checked) AS INTEGER) AS checked, CAST(sum(imported) AS INTEGER) AS imported,
+  CAST(sum(skipped) AS INTEGER) AS skipped, CAST(sum(ignored) AS INTEGER) AS ignored,
+  CAST(sum(failed) AS INTEGER) AS failed, CAST(sum(bytes) AS INTEGER) AS bytes,
+  CAST(sum(state IN ('done', 'failed', 'cancelled')) AS INTEGER) AS done,
+  CAST(COALESCE(max(CASE WHEN state = 'running' THEN source_repo END), '') AS TEXT) AS current_repo
+FROM nexus_sync_repos WHERE sync_id IN (SELECT value FROM json_each(?1))
+GROUP BY sync_id
+`
+
+type SumNexusSyncReposRow struct {
+	SyncID      int64
+	Repos       int64
+	Checked     int64
+	Imported    int64
+	Skipped     int64
+	Ignored     int64
+	Failed      int64
+	Bytes       int64
+	Done        int64
+	CurrentRepo string
+}
+
+// The sums of the repos of each sync of sync_ids, through the primary key of nexus_sync_repos:
+// done counts the ended repos, current_repo is the last running repo by name (” for none).
+func (q *Queries) SumNexusSyncRepos(ctx context.Context, syncIds interface{}) ([]SumNexusSyncReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumNexusSyncRepos, syncIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SumNexusSyncReposRow
+	for rows.Next() {
+		var i SumNexusSyncReposRow
+		if err := rows.Scan(
+			&i.SyncID,
+			&i.Repos,
+			&i.Checked,
+			&i.Imported,
+			&i.Skipped,
+			&i.Ignored,
+			&i.Failed,
+			&i.Bytes,
+			&i.Done,
+			&i.CurrentRepo,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateNexusSyncRepoProgress = `-- name: UpdateNexusSyncRepoProgress :exec

@@ -53,19 +53,45 @@ func (q *Queries) DeleteTagsOfPackage(ctx context.Context, arg DeleteTagsOfPacka
 	return err
 }
 
-const deleteVersion = `-- name: DeleteVersion :exec
-DELETE FROM npm_versions WHERE npm_versions.repo_id = ? AND name = ? AND version = ?
+const deleteVersionsOfTarballs = `-- name: DeleteVersionsOfTarballs :many
+DELETE FROM npm_versions WHERE (repo_id, tarball) IN (SELECT CAST(?1 AS INTEGER), value FROM json_each(?2))
+RETURNING name, version, tarball
 `
 
-type DeleteVersionParams struct {
-	RepoID  int64
-	Name    string
-	Version string
+type DeleteVersionsOfTarballsParams struct {
+	RepoID   int64
+	Tarballs interface{}
 }
 
-func (q *Queries) DeleteVersion(ctx context.Context, arg DeleteVersionParams) error {
-	_, err := q.db.ExecContext(ctx, deleteVersion, arg.RepoID, arg.Name, arg.Version)
-	return err
+type DeleteVersionsOfTarballsRow struct {
+	Name    string
+	Version string
+	Tarball string
+}
+
+// Removes the versions of the deleted tarballs of a remove batch (a JSON array of paths), through
+// npm_versions_tarball (the row value keeps the planner off a range of the primary key).
+func (q *Queries) DeleteVersionsOfTarballs(ctx context.Context, arg DeleteVersionsOfTarballsParams) ([]DeleteVersionsOfTarballsRow, error) {
+	rows, err := q.db.QueryContext(ctx, deleteVersionsOfTarballs, arg.RepoID, arg.Tarballs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeleteVersionsOfTarballsRow
+	for rows.Next() {
+		var i DeleteVersionsOfTarballsRow
+		if err := rows.Scan(&i.Name, &i.Version, &i.Tarball); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getPackage = `-- name: GetPackage :one
@@ -180,28 +206,6 @@ func (q *Queries) GetVersionFile(ctx context.Context, arg GetVersionFileParams) 
 	return i, err
 }
 
-const getVersionOfTarball = `-- name: GetVersionOfTarball :one
-SELECT name, version FROM npm_versions WHERE repo_id = ? AND tarball = ?
-`
-
-type GetVersionOfTarballParams struct {
-	RepoID  int64
-	Tarball string
-}
-
-type GetVersionOfTarballRow struct {
-	Name    string
-	Version string
-}
-
-// The version of a tarball, through npm_versions_tarball.
-func (q *Queries) GetVersionOfTarball(ctx context.Context, arg GetVersionOfTarballParams) (GetVersionOfTarballRow, error) {
-	row := q.db.QueryRowContext(ctx, getVersionOfTarball, arg.RepoID, arg.Tarball)
-	var i GetVersionOfTarballRow
-	err := row.Scan(&i.Name, &i.Version)
-	return i, err
-}
-
 const getVersionTarball = `-- name: GetVersionTarball :one
 SELECT tarball FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?
 `
@@ -255,12 +259,16 @@ func (q *Queries) InsertVersion(ctx context.Context, arg InsertVersionParams) er
 }
 
 const listRepoTagsAfter = `-- name: ListRepoTagsAfter :many
-SELECT name, tag, version FROM npm_tags
-WHERE repo_id = ?1 AND (name, tag) > (?2, ?3)
-ORDER BY name, tag LIMIT ?4
+SELECT f.name, f.tag, f.version,
+  EXISTS (SELECT 1 FROM npm_packages p WHERE p.repo_id = ?1 AND p.name = f.name) AS owned,
+  CAST(coalesce((SELECT t.version FROM npm_tags t WHERE t.repo_id = ?1 AND t.name = f.name AND t.tag = f.tag), '') AS TEXT) AS target
+FROM npm_tags f
+WHERE f.repo_id = ?2 AND (f.name, f.tag) > (?3, ?4)
+ORDER BY f.name, f.tag LIMIT ?5
 `
 
 type ListRepoTagsAfterParams struct {
+	IntoID int64
 	RepoID int64
 	Name   string
 	Tag    string
@@ -271,11 +279,16 @@ type ListRepoTagsAfterRow struct {
 	Name    string
 	Tag     string
 	Version string
+	Owned   bool
+	Target  string
 }
 
-// A keyset page of every dist-tag of a repo by package and tag, through the primary key (a merge).
+// A keyset page of every dist-tag of a repo by package and tag, through the primary key, each with
+// whether the repo into has the package and the version of into's tag of the same name (” for
+// none), through the primary keys (a merge).
 func (q *Queries) ListRepoTagsAfter(ctx context.Context, arg ListRepoTagsAfterParams) ([]ListRepoTagsAfterRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRepoTagsAfter,
+		arg.IntoID,
 		arg.RepoID,
 		arg.Name,
 		arg.Tag,
@@ -288,7 +301,13 @@ func (q *Queries) ListRepoTagsAfter(ctx context.Context, arg ListRepoTagsAfterPa
 	var items []ListRepoTagsAfterRow
 	for rows.Next() {
 		var i ListRepoTagsAfterRow
-		if err := rows.Scan(&i.Name, &i.Tag, &i.Version); err != nil {
+		if err := rows.Scan(
+			&i.Name,
+			&i.Tag,
+			&i.Version,
+			&i.Owned,
+			&i.Target,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

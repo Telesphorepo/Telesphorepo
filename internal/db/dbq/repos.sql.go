@@ -11,23 +11,25 @@ import (
 	"strings"
 )
 
-const clearRebuild = `-- name: ClearRebuild :exec
-DELETE FROM rebuilds WHERE repo_id = ? AND grp = ? AND unit = ? AND marked_at <= ?
+const clearRebuilds = `-- name: ClearRebuilds :exec
+DELETE FROM rebuilds WHERE repo_id = ?1 AND grp = ?2
+  AND unit IN (SELECT value FROM json_each(?3)) AND marked_at <= ?4
 `
 
-type ClearRebuildParams struct {
+type ClearRebuildsParams struct {
 	RepoID   int64
 	Grp      string
-	Unit     string
+	Units    interface{}
 	MarkedAt int64
 }
 
-// Deletes a unit unless it was marked again after the rebuild started.
-func (q *Queries) ClearRebuild(ctx context.Context, arg ClearRebuildParams) error {
-	_, err := q.db.ExecContext(ctx, clearRebuild,
+// Deletes the units of a rebuild (a JSON array) that were not marked again after it started, in
+// one statement: a seek of the primary key per unit.
+func (q *Queries) ClearRebuilds(ctx context.Context, arg ClearRebuildsParams) error {
+	_, err := q.db.ExecContext(ctx, clearRebuilds,
 		arg.RepoID,
 		arg.Grp,
-		arg.Unit,
+		arg.Units,
 		arg.MarkedAt,
 	)
 	return err
@@ -346,18 +348,20 @@ func (q *Queries) HasRebuild(ctx context.Context, arg HasRebuildParams) (bool, e
 	return exists, err
 }
 
-const insertGroupMember = `-- name: InsertGroupMember :exec
-INSERT INTO repo_group_members (group_id, member_id, position) VALUES (?, ?, ?)
+const insertGroupMembers = `-- name: InsertGroupMembers :exec
+INSERT INTO repo_group_members (group_id, member_id, position)
+SELECT ?1, j.value, j.key FROM json_each(CAST(?2 AS TEXT)) j
 `
 
-type InsertGroupMemberParams struct {
-	GroupID  int64
-	MemberID int64
-	Position int64
+type InsertGroupMembersParams struct {
+	GroupID int64
+	Members string
 }
 
-func (q *Queries) InsertGroupMember(ctx context.Context, arg InsertGroupMemberParams) error {
-	_, err := q.db.ExecContext(ctx, insertGroupMember, arg.GroupID, arg.MemberID, arg.Position)
+// The members of a group in one statement: members is a JSON array of member ids in read order,
+// each at its index.
+func (q *Queries) InsertGroupMembers(ctx context.Context, arg InsertGroupMembersParams) error {
+	_, err := q.db.ExecContext(ctx, insertGroupMembers, arg.GroupID, arg.Members)
 	return err
 }
 
@@ -951,6 +955,49 @@ func (q *Queries) ListRepoRedirects(ctx context.Context, arg ListRepoRedirectsPa
 	var items []ListRepoRedirectsRow
 	for rows.Next() {
 		var i ListRepoRedirectsRow
+		if err := rows.Scan(&i.Name, &i.RepoID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoRedirectsNamed = `-- name: ListRepoRedirectsNamed :many
+SELECT name, repo_id FROM repo_redirects WHERE name IN (/*SLICE:names*/?)
+`
+
+type ListRepoRedirectsNamedRow struct {
+	Name   string
+	RepoID int64
+}
+
+// The redirects of names, through the primary key (a page of names in one query).
+func (q *Queries) ListRepoRedirectsNamed(ctx context.Context, names []string) ([]ListRepoRedirectsNamedRow, error) {
+	query := listRepoRedirectsNamed
+	var queryParams []interface{}
+	if len(names) > 0 {
+		for _, v := range names {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:names*/?", strings.Repeat(",?", len(names))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:names*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRepoRedirectsNamedRow
+	for rows.Next() {
+		var i ListRepoRedirectsNamedRow
 		if err := rows.Scan(&i.Name, &i.RepoID); err != nil {
 			return nil, err
 		}

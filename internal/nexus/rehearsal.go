@@ -90,26 +90,67 @@ func (s *Service) forgetRepo(id int64) {
 			}
 		}
 	}
+	delete(s.names, id)
 }
 
-// rehearsalsOf returns the names of the rehearsal repos of repo id, by creation.
-func (s *Service) rehearsalsOf(ctx context.Context, id int64) ([]string, error) {
-	ids, err := dbq.New(s.db.R).ListRehearsalsFor(ctx, id)
+// loadNames reads the names of the repos that the rehearsal and moving repos name (the values of
+// the fields rehearsal_for and moves_into) into memory, in one query. It runs at Init, after
+// loadRehearsals and loadMoves.
+func (s *Service) loadNames(ctx context.Context) error {
+	s.rehMu.RLock()
+	seen := map[int64]bool{}
+	var ids []int64
+	for _, m := range []map[int64]int64{s.reh, s.moves} {
+		for _, id := range m {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	s.rehMu.RUnlock()
+	names, err := s.repoNames(ctx, ids)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("nexus: load the names of the repos that rehearsals and moves name: %w", err)
 	}
-	out := make([]string, 0, len(ids))
-	for _, rid := range ids {
-		r, err := s.repos.ByID(ctx, rid)
-		if errors.Is(err, repos.ErrNotFound) {
-			continue
+	s.rehMu.Lock()
+	defer s.rehMu.Unlock()
+	for id, name := range names {
+		s.names[id] = name
+	}
+	return nil
+}
+
+// renamed keeps the names in memory current after a change of repos (repos.Service.AfterChange):
+// a rename of a repo that a rehearsal or a moving repo names.
+func (s *Service) renamed(_ context.Context, n repos.Notice) {
+	s.rehMu.Lock()
+	defer s.rehMu.Unlock()
+	for _, r := range n.Changed {
+		if _, ok := s.names[r.ID]; ok {
+			s.names[r.ID] = r.Name
 		}
+	}
+}
+
+// nameField is the value of the field rehearsal_for or moves_into that names repo id: its name
+// from memory as JSON, nil for none (id 0).
+func (s *Service) nameField(id int64) json.RawMessage {
+	if id == 0 {
+		return nil
+	}
+	s.rehMu.RLock()
+	name, ok := s.names[id]
+	s.rehMu.RUnlock()
+	if !ok {
+		r, err := s.repos.ByID(context.Background(), id)
 		if err != nil {
-			return nil, err
+			return nil
 		}
-		out = append(out, r.Name)
+		name = r.Name
 	}
-	return out, nil
+	raw, _ := json.Marshal(name)
+	return raw
 }
 
 // rehearsalField is the repo field rehearsal_for of the hosted repos: the name of the repo that
@@ -133,18 +174,7 @@ func (s *Service) rehearsalField() repos.Field {
 			id, _ := ctx.Value(rehearsalKey{}).(int64)
 			return dbq.New(tx).InsertRepoRehearsal(ctx, dbq.InsertRepoRehearsalParams{RepoID: repo.ID, ForRepoID: id, CreatedAt: time.Now().Unix()})
 		},
-		Load: func(repoID int64) json.RawMessage {
-			id := s.rehearsalFor(repoID)
-			if id == 0 {
-				return nil
-			}
-			r, err := s.repos.ByID(context.Background(), id)
-			if err != nil {
-				return nil
-			}
-			raw, _ := json.Marshal(r.Name)
-			return raw
-		},
+		Load: func(repoID int64) json.RawMessage { return s.nameField(s.rehearsalFor(repoID)) },
 	}
 }
 
@@ -191,6 +221,7 @@ func (s *Service) Rehearse(ctx context.Context, sourceID int64, sourceRepo strin
 	}
 	s.rehMu.Lock()
 	s.reh[r.ID] = target.ID
+	s.names[target.ID] = target.Name
 	s.rehMu.Unlock()
 
 	// The people who can publish to the repo can download and publish here.
@@ -345,18 +376,13 @@ func (s *Service) switchOvers(ctx context.Context, id int64) (map[string]*Switch
 // switchedMappings returns the mapping rows of the repos of source id that switched over, by
 // Nexus repo name.
 func (s *Service) switchedMappings(ctx context.Context, id int64) (map[string]dbq.NexusSourceRepo, error) {
-	q := dbq.New(s.db.R)
-	rows, err := q.ListNexusSwitchOvers(ctx, id)
+	rows, err := dbq.New(s.db.R).ListNexusSwitchedMappings(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]dbq.NexusSourceRepo, len(rows))
-	for _, r := range rows {
-		m, err := q.GetNexusSourceRepo(ctx, dbq.GetNexusSourceRepoParams{SourceID: id, SourceRepo: r.SourceRepo})
-		if err != nil {
-			return nil, err
-		}
-		out[r.SourceRepo] = m
+	for _, m := range rows {
+		out[m.SourceRepo] = m
 	}
 	return out, nil
 }

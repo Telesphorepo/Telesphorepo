@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -286,20 +286,22 @@ func (m *mod) approveDevice(w http.ResponseWriter, r *http.Request, c *route.Cal
 }
 
 // listDevices returns the caller's devices, or every device with its owner for a holder of
-// people.manage, newest first: ?after=<id>&limit=.
+// people.manage, newest first: ?after=<id>&limit=&q=. q keeps the devices whose name or owner's
+// username holds it, in any case.
 func (m *mod) listDevices(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p := c.P
 	after, ok := route.IDCursor(w, r)
 	if !ok {
 		return
 	}
+	text := namesearch.Text(r.URL.Query().Get("q"))
 	var items []Device
 	var next int64
 	var err error
 	if p.Perms.Has(perm.PeopleManage) {
-		items, next, err = m.svc.Devices(r.Context(), after, httpx.Limit(r))
+		items, next, err = m.svc.Devices(r.Context(), text, after, httpx.Limit(r))
 	} else {
-		items, next, err = m.svc.UserDevices(r.Context(), p.UserID, after, httpx.Limit(r))
+		items, next, err = m.svc.UserDevices(r.Context(), p.UserID, text, after, httpx.Limit(r))
 	}
 	if err != nil {
 		publishFail(w, r, err)
@@ -477,13 +479,17 @@ func (m *mod) mintRoute(w http.ResponseWriter, r *http.Request, cred MintCred, n
 	}
 }
 
-// publishLog returns every session, newest first (activity): ?after=<id>&limit=.
+// publishLog returns every session, newest first (activity):
+// ?after=<id>&limit=&repo=<name>&user=<username>. repo keeps the sessions of one repo, user those
+// of one person (from their devices and their manual sessions); an unknown repo or person has
+// none.
 func (m *mod) publishLog(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	after, ok := route.IDCursor(w, r)
 	if !ok {
 		return
 	}
-	items, next, err := m.svc.Log(r.Context(), after, httpx.Limit(r))
+	q := r.URL.Query()
+	items, next, err := m.svc.Log(r.Context(), LogFilter{Repo: q.Get("repo"), User: q.Get("user")}, after, httpx.Limit(r))
 	if err != nil {
 		publishFail(w, r, err)
 		return
@@ -494,46 +500,62 @@ func (m *mod) publishLog(w http.ResponseWriter, r *http.Request, c *route.Call) 
 // --- trust policies (CI pipelines) ---
 
 // pipelineScope is what CI pipelines p may see and change: every one for a holder of All
-// repositories (all), else those whose repos are all in names, the repos where p holds the
-// pipelines permission.
+// repositories, else those whose repos are all among the repos where p holds the pipelines
+// permission (Call.Managed).
 type pipelineScope struct {
-	all   bool
-	names map[string]bool
+	m *route.Managed
 }
 
-// covers reports whether the scope holds every repo of a pipeline. A pipeline without repos
-// belongs only to a holder of All repositories.
-func (s pipelineScope) covers(repos []string) bool {
-	if s.all {
+// covers reports whether the scope holds every repo of a pipeline, by id. A pipeline without
+// repos belongs only to a holder of All repositories.
+func (s pipelineScope) covers(ids []int64) bool {
+	if s.m.All {
 		return true
 	}
-	if len(repos) == 0 {
+	if len(ids) == 0 {
 		return false
 	}
-	for _, r := range repos {
-		if !s.names[r] {
+	for _, id := range ids {
+		if !s.m.IDs[id] {
 			return false
 		}
 	}
 	return true
 }
 
+// coversNames is covers for the repo names of a request: each must be the own name of a repo in
+// the scope (one query for the names; a redirect or an unknown name is outside it).
+func (m *mod) coversNames(w http.ResponseWriter, r *http.Request, s pipelineScope, names []string) (bool, bool) {
+	if s.m.All {
+		return true, true
+	}
+	if len(names) == 0 {
+		return false, true
+	}
+	ids := map[string]int64{}
+	for chunk := range slices.Chunk(names, namedPage) {
+		found, err := m.h.Repos.Named(r.Context(), chunk)
+		if err != nil {
+			route.Fail(w, r, err)
+			return false, false
+		}
+		for _, repo := range found {
+			ids[repo.Name] = repo.ID
+		}
+	}
+	for _, n := range names {
+		id, ok := ids[n]
+		if !ok || !s.m.IDs[id] {
+			return false, true
+		}
+	}
+	return true, true
+}
+
 // pipelines returns the pipeline scope of the caller: the repos where the route policy found the
 // pipelines permission (Call.Managed).
 func (m *mod) pipelines(w http.ResponseWriter, r *http.Request, c *route.Call) (*auth.Principal, pipelineScope, bool) {
-	s := pipelineScope{all: c.Managed.All, names: map[string]bool{}}
-	for id := range c.Managed.IDs {
-		repo, err := m.h.Repos.ByID(r.Context(), id)
-		if errors.Is(err, repos.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			route.Fail(w, r, err)
-			return nil, pipelineScope{}, false
-		}
-		s.names[repo.Name] = true
-	}
-	return c.P, s, true
+	return c.P, pipelineScope{m: c.Managed}, true
 }
 
 // trustInScope reads pipeline {id} and answers 404 when it is outside the scope.
@@ -547,7 +569,7 @@ func (m *mod) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineSco
 		publishFail(w, r, err)
 		return nil, false
 	}
-	if !s.covers(t.Repos) {
+	if !s.covers(t.repoIDs) {
 		httpx.Error(w, r, http.StatusNotFound, "trust policy not found")
 		return nil, false
 	}
@@ -600,7 +622,9 @@ func (m *mod) createTrust(w http.ResponseWriter, r *http.Request, c *route.Call)
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	if !scope.covers(in.Repos) {
+	if covered, ok := m.coversNames(w, r, scope, in.Repos); !ok {
+		return
+	} else if !covered {
 		httpx.Error(w, r, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
 		return
 	}
@@ -639,9 +663,13 @@ func (m *mod) updateTrust(w http.ResponseWriter, r *http.Request, c *route.Call)
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	if in.Repos != nil && !scope.covers(in.Repos) {
-		httpx.Error(w, r, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
-		return
+	if in.Repos != nil {
+		if covered, ok := m.coversNames(w, r, scope, in.Repos); !ok {
+			return
+		} else if !covered {
+			httpx.Error(w, r, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
+			return
+		}
 	}
 	t, err := m.svc.UpdateTrust(r.Context(), cur.ID, in)
 	if err != nil {

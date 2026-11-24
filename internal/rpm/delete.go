@@ -3,6 +3,7 @@ package rpm
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -26,20 +27,11 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 	q := dbq.New(tx)
 	mark := false
 	var current []string
+	var ids []int64 // the package files: their rows go in one statement
 	for _, a := range removed {
 		switch {
 		case strings.HasPrefix(a.Path, "Packages/"):
-			row, err := q.GetPackageOfAsset(ctx, a.ID)
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			if err := q.DeletePackage(ctx, row.ID); err != nil {
-				return nil, err
-			}
-			mark = true
+			ids = append(ids, a.ID)
 		case a.Path == repomdPath || a.Path == repomdSig:
 			mark = true
 		case strings.HasPrefix(a.Path, "repodata/"):
@@ -54,6 +46,17 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 				mark = true
 			}
 		}
+	}
+	if len(ids) > 0 {
+		js, err := json.Marshal(ids)
+		if err != nil {
+			return nil, err
+		}
+		gone, err := q.DeletePackagesOfAssets(ctx, string(js))
+		if err != nil {
+			return nil, err
+		}
+		mark = mark || len(gone) > 0
 	}
 	if !mark {
 		return nil, nil

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/cargo/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/version"
@@ -50,8 +51,9 @@ type versionRow struct {
 	remote              bool
 }
 
-func (h *Handler) summary(ctx context.Context, v versionRow) (format.Version, error) {
-	pv, err := h.host.Builds.Loader().Get(ctx, v.build)
+// summary is the format.Version of v, with its CI build record from loader.
+func summary(ctx context.Context, loader *ci.Loader, v versionRow) (format.Version, error) {
+	pv, err := loader.Get(ctx, v.build)
 	return format.Version{Version: v.version, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: v.at, CI: pv, Remote: v.remote}, err
 }
 
@@ -104,18 +106,31 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		if found {
 			i++
 		}
-		for _, v := range all[i:min(len(all), i+limit+1)] {
-			r, err := h.proxyRow(ctx, from, v)
-			if err != nil {
-				return nil, nil, "", err
-			}
-			rows = append(rows, r)
+		page := all[i:min(len(all), i+limit+1)]
+		paths := make([]string, len(page))
+		for j, v := range page {
+			paths[j] = cratePath(v.name, v.vers)
+		}
+		stored, err := h.host.Assets.GetMany(ctx, from.ID, paths)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		for j, v := range page {
+			rows = append(rows, proxyRowOf(v, stored[paths[j]]))
 		}
 	default:
 		return nil, nil, "", nil
 	}
 	if len(rows) == 0 && after == "" {
 		return nil, nil, "", nil
+	}
+	loader := h.host.Builds.Loader()
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.build
+	}
+	if err := loader.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
 	}
 	var out []format.Version
 	next := ""
@@ -125,7 +140,7 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 			break
 		}
 		art.Title, art.Name = r.name, r.name
-		s, err := h.summary(ctx, r)
+		s, err := summary(ctx, loader, r)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -178,7 +193,7 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, vers, buil
 		return nil, nil, nil, "", err
 	}
 	art.Title, art.Name = r.name, r.name
-	s, err := h.summary(ctx, r)
+	s, err := summary(ctx, h.host.Builds.Loader(), r)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -202,18 +217,26 @@ func byKeyDesc(v proxyVersion, key string) int { return strings.Compare(key, v.k
 // proxyRow is the row of v: its stored .crate when the proxy has it (one lookup by path), else a
 // remote version with the index's cksum.
 func (h *Handler) proxyRow(ctx context.Context, repo *repos.Repo, v proxyVersion) (versionRow, error) {
-	p := cratePath(v.name, v.vers)
-	r := versionRow{name: v.name, version: v.vers, path: p, sha256: v.cksum, at: v.at}
-	a, err := h.host.Assets.Get(ctx, repo.ID, p)
+	a, err := h.host.Assets.Get(ctx, repo.ID, cratePath(v.name, v.vers))
 	switch {
 	case errors.Is(err, assets.ErrNotFound):
-		r.remote = true
-		return r, nil
+		a = nil
 	case err != nil:
 		return versionRow{}, err
 	}
+	return proxyRowOf(v, a), nil
+}
+
+// proxyRowOf is the row of v with its stored .crate a, or a remote version with the index's cksum
+// when a is nil.
+func proxyRowOf(v proxyVersion, a *assets.Asset) versionRow {
+	r := versionRow{name: v.name, version: v.vers, path: cratePath(v.name, v.vers), sha256: v.cksum, at: v.at}
+	if a == nil {
+		r.remote = true
+		return r
+	}
 	r.size, r.sha256, r.updated, r.build = a.Size, a.SHA256, a.UpdatedAt, a.BuildID
-	return r, nil
+	return r
 }
 
 // proxyVersions returns the versions of crate (lowercase) that the index file of a proxy names,

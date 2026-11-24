@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -59,6 +60,8 @@ type Trust struct {
 	Repos     []string            `json:"repos"`
 	CreatedAt time.Time           `json:"created_at"`
 	Disabled  bool                `json:"disabled"`
+
+	repoIDs []int64 // the ids of Repos, for the scope of a caller (pipelineScope)
 }
 
 // TrustInput creates a policy, or changes the fields that are set (PATCH). Name, Issuer and
@@ -167,17 +170,26 @@ func parseJWKS(s string) ([]crypto.PublicKey, error) {
 	return keys, nil
 }
 
-// repoIDs resolves repo names to ids, in name order without duplicates.
+// namedPage is how many names one lookup of repoIDs reads.
+const namedPage = 500
+
+// repoIDs resolves repo names to ids as ByName does (a redirect answers for its repo), in name
+// order without duplicates: repos.Service.ByNames, one lookup per namedPage names.
 func (s *Service) repoIDs(ctx context.Context, names []string) ([]int64, error) {
 	names = slices.Compact(slices.Sorted(slices.Values(names)))
-	ids := make([]int64, 0, len(names))
-	for _, n := range names {
-		r, err := s.repos.ByName(ctx, n)
-		if errors.Is(err, repos.ErrNotFound) {
-			return nil, errorf(ErrInvalid, "unknown repo "+n)
-		}
+	found := make(map[string]*repos.Repo, len(names))
+	for chunk := range slices.Chunk(names, namedPage) {
+		page, err := s.repos.ByNames(ctx, chunk)
 		if err != nil {
 			return nil, err
+		}
+		maps.Copy(found, page)
+	}
+	ids := make([]int64, 0, len(names))
+	for _, n := range names {
+		r := found[n]
+		if r == nil {
+			return nil, errorf(ErrInvalid, "unknown repo "+n)
 		}
 		if r.Kind != repos.KindHosted {
 			return nil, errorf(ErrInvalid, r.Name+" is a "+r.Kind+"; a CI pipeline publishes to a repository that takes uploads")
@@ -191,12 +203,10 @@ func setTrustRepos(ctx context.Context, q *dbq.Queries, trustID int64, ids []int
 	if err := q.DeleteTrustRepos(ctx, trustID); err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := q.InsertTrustRepo(ctx, dbq.InsertTrustRepoParams{TrustID: trustID, RepoID: id}); err != nil {
-			return err
-		}
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	return q.InsertTrustRepos(ctx, dbq.InsertTrustReposParams{TrustID: trustID, RepoIds: idsJSON(ids)})
 }
 
 func boolInt(b bool) int64 {
@@ -336,24 +346,45 @@ func (s *Service) DeleteTrust(ctx context.Context, id int64) error {
 	})
 }
 
-func (s *Service) toTrust(ctx context.Context, t dbq.PublishTrust) (*Trust, error) {
-	rs, err := s.rq.ListTrustRepos(ctx, t.ID)
+// toTrusts converts rows with their repos, read in one query for all of them.
+func (s *Service) toTrusts(ctx context.Context, ts []dbq.PublishTrust) ([]*Trust, error) {
+	out := make([]*Trust, 0, len(ts))
+	if len(ts) == 0 {
+		return out, nil
+	}
+	ids := make([]int64, len(ts))
+	for i, t := range ts {
+		ids[i] = t.ID
+	}
+	rs, err := s.rq.ListTrustReposOf(ctx, idsJSON(ids))
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, len(rs))
-	for i, r := range rs {
-		names[i] = r.Name
+	type repo struct {
+		id   int64
+		name string
 	}
-	slices.Sort(names)
-	claims, err := decodeClaims(t.Claims)
-	if err != nil {
-		return nil, err
+	of := make(map[int64][]repo, len(ts))
+	for _, r := range rs {
+		of[r.TrustID] = append(of[r.TrustID], repo{r.ID, r.Name})
 	}
-	return &Trust{
-		ID: t.ID, Name: t.Name, Issuer: t.Issuer, Audience: t.Audience, Claims: claims, JWKS: t.Jwks,
-		Repos: names, CreatedAt: unixTime(t.CreatedAt), Disabled: t.Disabled != 0,
-	}, nil
+	for _, t := range ts {
+		rs := of[t.ID]
+		slices.SortFunc(rs, func(a, b repo) int { return strings.Compare(a.name, b.name) })
+		names, rids := make([]string, len(rs)), make([]int64, len(rs))
+		for i, r := range rs {
+			names[i], rids[i] = r.name, r.id
+		}
+		claims, err := decodeClaims(t.Claims)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &Trust{
+			ID: t.ID, Name: t.Name, Issuer: t.Issuer, Audience: t.Audience, Claims: claims, JWKS: t.Jwks,
+			Repos: names, CreatedAt: unixTime(t.CreatedAt), Disabled: t.Disabled != 0, repoIDs: rids,
+		})
+	}
+	return out, nil
 }
 
 // GetTrust returns one policy with its repos.
@@ -365,7 +396,11 @@ func (s *Service) GetTrust(ctx context.Context, id int64) (*Trust, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.toTrust(ctx, t)
+	out, err := s.toTrusts(ctx, []dbq.PublishTrust{t})
+	if err != nil {
+		return nil, err
+	}
+	return out[0], nil
 }
 
 // Trusts returns a keyset page of the policies after the name after ("" first page): by name, or
@@ -395,13 +430,9 @@ func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, text, a
 	if err != nil {
 		return nil, "", err
 	}
-	out := make([]*Trust, 0, len(rows))
-	for _, r := range rows {
-		t, err := s.toTrust(ctx, r)
-		if err != nil {
-			return nil, "", err
-		}
-		out = append(out, t)
+	out, err := s.toTrusts(ctx, rows)
+	if err != nil {
+		return nil, "", err
 	}
 	next := ""
 	if len(rows) == limit {
@@ -442,13 +473,15 @@ func writeTrustGrams(ctx context.Context, q *dbq.Queries, id int64, name string)
 	if err := q.DeleteTrustGrams(ctx, id); err != nil {
 		return err
 	}
-	folded := namesearch.Fold(name)
-	for _, g := range namesearch.Grams(name) {
-		if err := q.InsertTrustGram(ctx, dbq.InsertTrustGramParams{Gram: g, Folded: folded, Name: name, TrustID: id}); err != nil {
-			return err
-		}
+	grams := namesearch.Grams(name)
+	if len(grams) == 0 {
+		return nil
 	}
-	return nil
+	js, err := json.Marshal(grams)
+	if err != nil {
+		return err
+	}
+	return q.InsertTrustGrams(ctx, dbq.InsertTrustGramsParams{Folded: namesearch.Fold(name), Name: name, TrustID: id, Grams: string(js)})
 }
 
 // PipelinesOf returns the names of the CI pipelines that publish to repo id, sorted.

@@ -378,12 +378,14 @@ func writeListGrams(ctx context.Context, q *dbq.Queries, id int64, name, title s
 			grams = append(grams, g)
 		}
 	}
-	for _, g := range grams {
-		if err := q.InsertIPListGram(ctx, dbq.InsertIPListGramParams{Gram: g, ListID: id, Text: text}); err != nil {
-			return err
-		}
+	if len(grams) == 0 {
+		return nil
 	}
-	return nil
+	js, err := json.Marshal(grams)
+	if err != nil {
+		return err
+	}
+	return q.InsertIPListGrams(ctx, dbq.InsertIPListGramsParams{ListID: id, Text: text, Grams: string(js)})
 }
 
 // sortLists sorts lists: presets first, then by name.
@@ -446,23 +448,67 @@ func (s *Service) storeList(change func(m map[string]*listState)) {
 // Usage returns what names list name: the allowed networks of repos (through
 // repo_networks_list_id) and the trusted proxies.
 func (s *Service) Usage(ctx context.Context, name string) (Usage, error) {
-	st := (*s.lists.Load())[name]
-	if st == nil {
-		return Usage{Repos: []string{}}, nil
+	u, err := s.Usages(ctx, []string{name})
+	return u[name], err
+}
+
+// Usages returns what names each list of names, by name, in one query for all of them (Usage).
+// An unknown name has no usage.
+func (s *Service) Usages(ctx context.Context, names []string) (map[string]Usage, error) {
+	all := *s.lists.Load()
+	ids := make([]int64, 0, len(names))
+	for _, n := range names {
+		if st := all[n]; st != nil {
+			ids = append(ids, st.id)
+		}
 	}
-	return s.usage(ctx, s.rq, st.id)
+	byID, err := s.usages(ctx, s.rq, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Usage, len(names))
+	for _, n := range names {
+		if st := all[n]; st != nil {
+			out[n] = byID[st.id]
+		} else {
+			out[n] = Usage{Repos: []string{}}
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) usage(ctx context.Context, q *dbq.Queries, id int64) (Usage, error) {
-	names, err := q.ListReposOfList(ctx, sql.NullInt64{Int64: id, Valid: true})
+	u, err := s.usages(ctx, q, []int64{id})
+	return u[id], err
+}
+
+// usages returns what names each list of ids, by id: the repos of all of them in one query.
+func (s *Service) usages(ctx context.Context, q *dbq.Queries, ids []int64) (map[int64]Usage, error) {
+	out := make(map[int64]Usage, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	js, err := json.Marshal(ids)
 	if err != nil {
-		return Usage{}, err
+		return nil, err
 	}
-	if names == nil {
-		names = []string{}
+	rows, err := q.ListReposOfLists(ctx, string(js))
+	if err != nil {
+		return nil, err
 	}
-	slices.Sort(names)
-	return Usage{Repos: names, TrustedProxies: s.trusts(id)}, nil
+	names := make(map[int64][]string, len(ids))
+	for _, r := range rows {
+		names[r.ListID.Int64] = append(names[r.ListID.Int64], r.Name)
+	}
+	for _, id := range ids {
+		n := names[id]
+		if n == nil {
+			n = []string{}
+		}
+		slices.Sort(n)
+		out[id] = Usage{Repos: n, TrustedProxies: s.trusts(id)}
+	}
+	return out, nil
 }
 
 // ListInput is a custom list as an admin writes it. A nil field keeps the current value on an

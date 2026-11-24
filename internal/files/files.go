@@ -54,7 +54,9 @@ type Node struct {
 	// a.jar.sha1), when that file is in the same folder; absent elsewhere.
 	SideOf string `json:"side_of,omitempty"`
 
-	key []byte // repopath.NameKey of Name: the order of a group's merge
+	key      []byte // repopath.NameKey of Name: the order of a group's merge
+	uploader int64  // the user id of UploadedBy (fill)
+	build    int64  // the build id of Build (fill)
 }
 
 // File is one file with its details (GET /api/repos/{name}/file).
@@ -144,9 +146,9 @@ func (s *Service) versionNames(ctx context.Context, repoID int64, dir string) (h
 // order of repopath.NameKey (versions first, "1.2" before "1.10", then the other names by their
 // bytes). When the name of every folder starts with a digit, the folders come newest first, and
 // the same for the files. A checksum or signature whose file is in the folder names it in
-// SideOf. A page is two seeks for the order, one range of the index per kind and one seek per
-// checksum or signature on it, however large the folder is. next is the cursor of the next page,
-// "" at the end.
+// SideOf. A page is two seeks for the order, one range of the index per kind, and one query each
+// for the files of its checksums and signatures, its uploaders and its builds, however large the
+// folder is. next is the cursor of the next page, "" at the end.
 func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string, limit int) ([]Node, string, error) {
 	c, err := parseCursor(after)
 	if err != nil {
@@ -169,6 +171,9 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 	if err := s.markSides(ctx, []*repos.Repo{repo}, dir, out); err != nil {
 		return nil, "", err
 	}
+	if err := s.fill(ctx, out); err != nil {
+		return nil, "", err
+	}
 	return out, next, nil
 }
 
@@ -187,8 +192,27 @@ func sideBase(name string) string {
 }
 
 // markSides sets SideOf of each checksum or signature among nodes whose file is in folder dir of
-// one of repos: one seek per such file and repo, until one holds it.
+// one of repos: one query, a seek per such file and repo.
 func (s *Service) markSides(ctx context.Context, repos []*repos.Repo, dir string, nodes []Node) error {
+	var bases []string
+	for _, n := range nodes {
+		if n.Type == "file" {
+			if base := sideBase(n.Name); base != "" {
+				bases = append(bases, base)
+			}
+		}
+	}
+	if len(bases) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(repos))
+	for i, r := range repos {
+		ids[i] = r.ID
+	}
+	held, err := s.assets.TreeFilesNamed(ctx, ids, dir, bases)
+	if err != nil {
+		return err
+	}
 	for i := range nodes {
 		n := &nodes[i]
 		base := ""
@@ -198,12 +222,8 @@ func (s *Service) markSides(ctx context.Context, repos []*repos.Repo, dir string
 		if base == "" {
 			continue
 		}
-		for _, r := range repos {
-			ok, err := s.assets.HasTreeFile(ctx, r.ID, dir, base)
-			if err != nil {
-				return err
-			}
-			if ok {
+		for _, id := range ids {
+			if held[id][base] {
 				n.SideOf = base
 				break
 			}
@@ -212,8 +232,40 @@ func (s *Service) markSides(ctx context.Context, repos []*repos.Repo, dir string
 	return nil
 }
 
+// fill sets the uploader's username and the build record of each file of nodes: one query for
+// the usernames and one for the builds of the page.
+func (s *Service) fill(ctx context.Context, nodes []Node) error {
+	var users, builds []int64
+	for _, n := range nodes {
+		if n.uploader != 0 {
+			users = append(users, n.uploader)
+		}
+		if n.build != 0 {
+			builds = append(builds, n.build)
+		}
+	}
+	names, err := s.auth.Usernames(ctx, users)
+	if err != nil {
+		return err
+	}
+	loader := s.builds.Loader()
+	if err := loader.Load(ctx, builds); err != nil {
+		return err
+	}
+	for i := range nodes {
+		n := &nodes[i]
+		if n.uploader != 0 {
+			n.UploadedBy = names[n.uploader]
+		}
+		if n.Build, err = loader.Get(ctx, n.build); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // page returns up to n children of folder dir of repo after c: the folders, then the files, each
-// in the direction of o.
+// in the direction of o. The files' uploaders and builds are left to fill.
 func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c cursor, o order, n int) ([]Node, error) {
 	var out []Node
 	fileAfter := c.key
@@ -234,26 +286,12 @@ func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c curs
 	if err != nil {
 		return nil, err
 	}
-	users := map[int64]string{}
-	builds := s.builds.Loader()
 	for _, f := range files {
 		a := f.Asset
-		node := Node{Name: a.Path[len(dir):], Type: "file", Path: a.Path, SHA256: a.SHA256, key: f.Key}
+		node := Node{Name: a.Path[len(dir):], Type: "file", Path: a.Path, SHA256: a.SHA256, key: f.Key,
+			uploader: a.UploadedBy, build: a.BuildID}
 		size, at := a.Size, a.UpdatedAt
 		node.Size, node.UpdatedAt = &size, &at
-		if a.UploadedBy != 0 {
-			name, ok := users[a.UploadedBy]
-			if !ok {
-				if name, err = s.auth.Username(ctx, a.UploadedBy); err != nil {
-					return nil, err
-				}
-				users[a.UploadedBy] = name
-			}
-			node.UploadedBy = name
-		}
-		if node.Build, err = builds.Get(ctx, a.BuildID); err != nil {
-			return nil, err
-		}
 		out = append(out, node)
 	}
 	return out, nil
@@ -261,7 +299,7 @@ func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c curs
 
 // GroupTree is Tree for a group: the merged children of folder dir in the members the reader
 // may read, in read order. Each kind comes newest first when the name of every child of that
-// kind in every member starts with a digit (two seeks per member). Each member is read from the
+// kind in every member starts with a digit (two seeks per member, in one query). Each member is read from the
 // same cursor, limit+1 children, and the pages merge in the order of Tree. A folder that several
 // members hold is one entry; a file that several members hold comes from the first of them, the
 // one the group serves, and names it in Repo. A checksum or signature names its file in SideOf
@@ -275,15 +313,20 @@ func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, aft
 		return nil, "", err
 	}
 	anyFolder, foldersDigits, anyFile, filesDigits := false, true, false, true
+	ids := make([]int64, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	names, err := s.assets.VersionNamesIn(ctx, ids, dir)
+	if err != nil {
+		return nil, "", err
+	}
 	for _, m := range members {
-		hasFolders, fd, hasFiles, fi, err := s.versionNames(ctx, m.ID, dir)
-		if err != nil {
-			return nil, "", err
-		}
-		anyFolder = anyFolder || hasFolders
-		foldersDigits = foldersDigits && (!hasFolders || fd)
-		anyFile = anyFile || hasFiles
-		filesDigits = filesDigits && (!hasFiles || fi)
+		k := names[m.ID]
+		anyFolder = anyFolder || k.HasFolders
+		foldersDigits = foldersDigits && (!k.HasFolders || k.FolderDigits)
+		anyFile = anyFile || k.HasFiles
+		filesDigits = filesDigits && (!k.HasFiles || k.FileDigits)
 	}
 	o := order{foldersDesc: anyFolder && foldersDigits, filesDesc: anyFile && filesDigits}
 	var all []Node
@@ -309,6 +352,9 @@ func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, aft
 		next = cursorOf(out[limit-1])
 	}
 	if err := s.markSides(ctx, members, dir, out); err != nil {
+		return nil, "", err
+	}
+	if err := s.fill(ctx, out); err != nil {
 		return nil, "", err
 	}
 	return out, next, nil

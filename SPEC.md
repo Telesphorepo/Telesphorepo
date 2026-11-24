@@ -259,8 +259,9 @@ Kernel tables (`internal/db/migrations`):
   they never publish; `last_used_at` is written at most once per minute), the second-factor tables,
   and `auth_challenges` (short-lived single-use state; a new challenge deletes up to 100 expired
   ones). Sealed values use AAD `<table>:<id>`.
-- Name search: `repo_name_grams`, `user_name_grams` (and `publish_trust_grams`, `ip_list_grams`
-  of their modules) hold the 1- to 3-character grams of each name (see **Name search**).
+- Name search: `repo_name_grams`, `user_name_grams` (and `publish_trust_grams`, `device_grams`,
+  `ip_list_grams`, `signing_key_grams` of their modules) hold the 1- to 3-character grams of each
+  name (see **Name search**).
 - Permissions: `user_permissions` (server permissions) and `repo_permissions` (per repo). No
   CHECK on the ID: writes check it against the permission registry; reads skip an ID no module
   registers. See **Permissions**.
@@ -313,10 +314,13 @@ Module tables (each in `internal/<dir>/migrations`):
 - `network` (`internal/netrules`): `ip_lists`, `repo_networks` (a repo without rows has no allowed
   networks; a list in use is `ON DELETE RESTRICT`), `trusted_proxy_lists`. `list:<name>` entries of
   `TR_TRUSTED_PROXIES` resolve at startup and are not rows. See **Network rules**.
-- `signing`: `signing_keys` (private key sealed, no passphrase) and `repo_signing_keys` (the repo
-  field `signing_key`; `ON DELETE RESTRICT`, so a key in use cannot be deleted).
+- `signing`: `signing_keys` (private key sealed, no passphrase), `repo_signing_keys` (the repo
+  field `signing_key`; `ON DELETE RESTRICT`, so a key in use cannot be deleted) and
+  `signing_key_grams`.
 - `publish`: CLI devices and their enrollments, CI trust policies, publish nonces and sessions.
-  Secrets and nonces are stored as SHA-256. `publish_oidc_seen` keys a CI token by
+  The publish log reads an index of `publish_sessions` per filter: `publish_sessions_repo`,
+  `publish_sessions_user`, or `publish_sessions_user_repo` for both, each in id order after its
+  columns. Secrets and nonces are stored as SHA-256. `publish_oidc_seen` keys a CI token by
   `<issuer>\n<jti>` (the whole token without a `jti`) and repo, so a second insert is a replay.
 - `edge`: `edge_outbox`, `edge_written`, `edge_paths`, `edge_reclass`, `edge_state`. They reference
   no table, so an outbox row outlives a deleted repo and still deletes its pointers. An outbox
@@ -612,11 +616,14 @@ server binary (`-X main.version`), or `dev` for a build without a stamp.
 each change has one route: `PATCH /api/repos` (public or restricted), `POST /api/repos/delete`,
 `POST /api/repos/{name}/files/delete`, `PATCH /api/users` (disable or enable) and
 `PUT /api/grants`. A list holds 1 to 1000 items (400 outside that), and `max_json_size` applies
-too. The server removes repeated items. Each route checks every item before it changes any: an
-unknown name gives 404 with the name, and nothing changes. The row changes apply in one
-transaction, so a failure leaves nothing half done. Each changed item gets its own audit event;
-an item that already had the value gets none. A repo delete and a file delete remove files in
-batches (see **Byte pipeline**), so they are the ones that are not one transaction.
+too. The server removes repeated items. Each route checks every item before it changes any,
+reading the list in a fixed number of queries (its names in one lookup, the caller's grants once):
+an unknown name gives 404 with the name, and nothing changes. The row changes apply in one
+transaction, so a failure leaves nothing half done; `PUT /api/grants` and `PATCH /api/users`
+write the rows and the events of the whole list in one statement each. Each changed item gets
+its own audit event; an item that already had the value gets none. A repo delete and a file
+delete remove files in batches (see **Byte pipeline**), so they are the ones that are not one
+transaction.
 
 **Route groups.** The groups below give the policy and the behaviour that a handler does not explain on its own.
 Shapes and status details are in the handlers.
@@ -675,24 +682,24 @@ Shapes and status details are in the handlers.
   (`settings.general`) takes the type from the bytes, never from a header or a name, and refuses
   SVG; it saves like `PATCH /api/settings`.
 - **Repositories** (`/api/repos...`, `internal/api/api.go`, `repolist.go`, `repokinds.go`,
-  `redirects.go`). Read: any credential or anonymous, each repo filtered by what the caller may
-  see; create, delete, rename and redirects: `repositories.all`; settings, members, proxy test,
-  network rules: `repo.settings`. The list is a keyset page by name of the repos where the caller
-  holds a permission plus the public ones (see **Repository lists**); `?sort=published` is
-  bounded (at most 50) and takes no cursor or filter but `perm`. A list item's `downloads` (last
-  30 UTC days) is one seek of `download_stats` per repo of the page and lags memory by up to a
-  minute (see **Download statistics**). `file_count`, `total_size` and `last_published_at` come
-  from the repo row; a group's counters follow **Group counters** (`counts_pending` until
-  counted). A repo update (`PATCH /api/repos/{name}`, `repos.Service.Update`) checks the whole
-  new state first, then saves it in one transaction with the field values, the format's
-  `OnRepoChange` and one `repo.update` event. A new proxy's remote is checked first (502 unless
-  `force`). A proxy's password is never returned. A group has 1 to 50 members of its own format.
-  `PATCH /api/repos` refuses to make public a repo that has allowed networks. `POST
-  /api/repos/delete` checks every repo and its operation, gives every repo its `delete`
-  operation in one transaction, answers 202, and runs each delete as a task of the core module
-  (see **Repo operations**); the repo shows progress in `operation` until it answers 404.
-  `operation/resume` and `DELETE .../operation` resume or clear a failed operation. Rename
-  (`repos.Service.Rename`) leaves the old name as a redirect (see **Repository redirects**).
+  `redirects.go`). Read: any credential or anonymous, each repo filtered by what the caller may see;
+  create, delete, rename and redirects: `repositories.all`; settings, members, proxy test, network
+  rules: `repo.settings`. The list is a keyset page by name of the repos where the caller holds a
+  permission plus the public ones (see **Repository lists**); `?sort=published` is bounded (at most
+  50) and takes no cursor or filter but `perm`. A list item's `downloads` (last 30 UTC days) comes
+  from one query of the page's repos in `download_window_repos` and lags memory by up to a minute
+  (see **Download statistics**). `file_count`, `total_size` and `last_published_at` come from the
+  repo row; a group's counters follow **Group counters** (`counts_pending` until counted). A repo
+  update (`PATCH /api/repos/{name}`, `repos.Service.Update`) checks the whole new state first, then
+  saves it in one transaction with the field values, the format's `OnRepoChange` and one
+  `repo.update` event. A new proxy's remote is checked first (502 unless `force`). A proxy's
+  password is never returned. A group has 1 to 50 members of its own format. `PATCH /api/repos`
+  refuses to make public a repo that has allowed networks. `POST /api/repos/delete` checks every
+  repo and its operation, gives every repo its `delete` operation in one transaction, answers 202,
+  and runs each delete as a task of the core module (see **Repo operations**); the repo shows
+  progress in `operation` until it answers 404. `operation/resume` and `DELETE .../operation` resume
+  or clear a failed operation. Rename (`repos.Service.Rename`) leaves the old name as a redirect
+  (see **Repository redirects**).
 - **Overview** (`GET /api/overview`; UI session). Every figure is a counter or a bounded query:
   totals from `repo_totals` for a holder of `repositories.all`, else one lookup per grant; the
   largest eight by the `(total_size, id)` index; people counted up to 10,000.
@@ -700,10 +707,15 @@ Shapes and status details are in the handlers.
   `GET /api/repos/{name}/access` (a repository permission that manages the repo: one with a
   second-factor need) is the access report built from the parts of `access.Engine.Decide`, with
   a sentence for each answer and the notes that modules add (`access.Engine.AddDownloadNote`).
+  Its `?q=` keeps the people, CI pipelines, IP lists and address ranges whose name (a list's
+  title, a range's note) holds it, as **Name search** orders them, and leaves the sentences
+  empty: it reads the repo's grants with `instr` on the username, its CI pipelines and its
+  networks from memory, as the report without `q` does, never the server's users or grams.
   `GET /api/users/{username}/access` (`people.manage`) and `/api/me/access` are keyset pages by
   repo name, read as one page of each side (the public repos' index and the person's grants),
   never the repos in between; `?q=` keeps the repos whose name holds it, read as **Repository
-  lists** reads them (the public repos' grams and one lookup per grant). On a proxy or a group nobody holds `repo.publish` or
+  lists** reads them (the public repos' grams and one lookup per grant); `?name=` (at most 200)
+  answers the named repos alone, a lookup each in one query. On a proxy or a group nobody holds `repo.publish` or
   `ci.pipelines`. `PUT /api/grants` (`repo.access` on each repo) sets the permission set of every
   user and repo pair, several groups of pairs in one transaction, at most 1000 pairs; it refuses
   a server permission, a permission without one it needs, and a change to a permission the
@@ -1009,6 +1021,8 @@ The routes are in `internal/publish/api.go`. Their policies:
   `DELETE /api/devices/self` (a device signature).
 - **Password, read token or UI session:** own devices and own publish sessions. The
   pending-enrollment lookup takes a password or a UI session, never a token. A holder of `people.manage` sees every device.
+  `GET /api/devices?q=` keeps the devices whose name or owner's username holds `q` (see **Name
+  search**).
 - **UI session and a fresh factor** (`X-Telesphorepo-Proof`: `totp <code>` or `passkey
   <assertion>`, never a recovery code; an SSO account sends `grant <grant>` of a fresh SSO
   sign-in): device approval, a manual session, and a setup code (which also needs `repo.publish`).
@@ -1018,14 +1032,18 @@ The routes are in `internal/publish/api.go`. Their policies:
   of `people.manage`) and ends its open sessions.
 - **The session's own token:** `DELETE /api/publish/sessions/{id}` and
   `POST /api/publish/sessions/{id}/renew`. Renewal also takes the separate renewal key.
-- **`activity.read`:** `GET /api/publish/log`.
+- **`activity.read`:** `GET /api/publish/log`, newest first; `?repo=` (a repo name) and `?user=`
+  (a username) keep the sessions of one repo and of one person, each combination a range of its
+  own index; an unknown name answers an empty page.
 - **`ci.pipelines` on a repo:** the trust policies (`/api/publish/trusts`). A holder of
   `repositories.all` sees and changes every one. Anyone else sees and changes only the policies
   whose repos all hold `ci.pipelines` for them: the list leaves the others out, such a policy
   answers 404, a `repos` list outside the scope answers 403, and a caller with `ci.pipelines` on
   no repo gets 403. The list is one keyset query of the policies with a repo in the caller's scope
   and none outside it, never a walk of all policies (the set of repos is one JSON array, read with
-  `json_each`); `?q=` searches the names (see **Name search**). The count of a
+  `json_each`), then one query for the repos of every policy of the page; `?q=` searches the
+  names (see **Name search**). The scope is checked by repo id against the route's managed set, and
+  the names of a body in one lookup, never one read per managed repo. The count of a
   `repositories.all` holder stops at 10,000, anyone else's is counted from their repos' pipelines.
 
 The trusted-proxy lists (`/api/network/trusted-proxies`, `network.manage`) live in
@@ -1911,7 +1929,10 @@ is read only through its REST API (`internal/nexus/client.go`). The API types ar
 estimates progress from it.
 
 - **Status.** The server derives a source's `status` and `next_sync_at` (`last_sync_at` plus
-  `nexus.sync_interval`).
+  `nexus.sync_interval`). A page of sources or syncs reads the newest syncs, their repos' sums
+  and merges, the mapped repos and the switch-overs in one query each for the whole page (JSON
+  arrays of ids); a source's page reads its targets, their rehearsals, moving repos, newest merges
+  and group members the same way.
 - **Planning hook.** An `Importer` may have `Plan` (`internal/format/importer.go`): the config
   and field values of the target, the `Questions` the UI asks, the `Facts` it shows, and
   `Prepare`, run before the repo save. The save checks every plan before it creates any repo.
@@ -1998,7 +2019,9 @@ estimates progress from it.
 - **Rehearsal repositories.** `POST .../repos/{repo}/rehearsal` creates `<target>-rehearsal`, a
   private hosted repo like the target, where its publishers try their builds before the
   switch-over. Its repo field `rehearsal_for` is set only by this route (an API create or update
-  that names it is 400). **Empty it** runs the removal of a repo delete without the row delete:
+  that names it is 400). The module keeps the rehearsals and moving repos in memory with the names
+  of the repos they name (`repos.Service.AfterChange` follows a rename), so a repo list reads the
+  fields `rehearsal_for` and `moves_into` without a query. **Empty it** runs the removal of a repo delete without the row delete:
   settings, CI pipelines and grants stay.
 - **Gradual move.** For a repo that many projects publish to: the projects move one at a time to a
   new repo while builds read both, and the new repo then merges into the Nexus copy
@@ -2006,8 +2029,10 @@ estimates progress from it.
   - **Move it project by project** (`POST .../repos/{repo}/move`) creates the moving repo (repo
     field `moves_into`, set only by this route) and optionally the group `<target>-all` that
     reads it first, then the target.
-  - **Plan.** `GET /api/nexus/merges/plan` walks the source's files by path (keyset pages) with a
-    point lookup of the target's file at each path; it writes nothing. Each file is **copy**,
+  - **Plan.** `GET /api/nexus/merges/plan` walks the source's files by path (keyset pages) and
+    reads the target's files at the paths of a page in one query; it writes nothing. The copy
+    of a merge reads the target's file of each source file after it handled the one before, since
+    its writes may change it. Each file is **copy**,
     **skip** (same SHA-256), **conflict** (other bytes that `Admit` refuses; for a `Store`
     format, any other bytes), **rebuild** (a metadata or index file, merged or rebuilt) or
     **blocked**; a blocked file stops the merge from starting. `format.Spec.Carry`
@@ -2254,7 +2279,8 @@ proxy or group is 405 `UNSUPPORTED`). The policies:
   uses".
 - `GET /v2/_catalog` lists the images of the repos the credential downloads from the client
   address; bearer scopes do not limit it. A page reads only rows the caller lists: it walks the
-  caller's repos that hold an image in name order (`ReposWithImages`), one seek per repo, and a
+  caller's repos that hold an image in name order (`ReposWithImages`) and reads their images in
+  one recursive query (`CatalogPage`: a seek per repo it reaches, fewer than 2n rows), and a
   holder of all repositories reads one range of `docker_images_full`.
 
 **Challenge.** A 401 carries `WWW-Authenticate: Bearer realm="<scheme>://<host>/docker/token",
@@ -2487,8 +2513,8 @@ credentials.
 - **Search** (`search.go`) answers hosted packages only (a group: its hosted members, each leaving
   out ids an earlier one has). `q` of 3 or more characters uses the trigram index
   `nuget_packages_search`, so results come in index order; shorter `q` is an id prefix. A page reads
-  at most `skip + take` packages, `totalHits` counts up to 10,000, and version metadata is read only
-  for the answered page.
+  at most `skip + take` packages, `totalHits` counts up to 10,000, and the versions and metadata of
+  the answered page are one query (`SearchItems`).
 - **Push** finishes a resumable upload of the same session when given `?upload=<id>&sha256=<hex>`
   and no body. A version the repo has is 409 even with the same bytes, so `--skip-duplicate`
   skips it.
@@ -2519,8 +2545,9 @@ the capabilities of the repo's `format.Spec` that are set.
 - **Tree.** `GET /api/repos/{name}/tree` lists one folder's children from `tree_entries`: folders,
   then files, names starting with a digit first in version order (`internal/files/files.go`). A
   kind whose every name starts with a digit comes newest first; one seek decides it. A checksum or
-  signature next to its base file has `side_of` (one seek per such file) and the Files views hide
-  it. A page is one range of the primary key per kind, whatever the folder's size.
+  signature next to its base file has `side_of` and the Files views hide it. A page is one range of
+  the primary key per kind, whatever the folder's size, and one query each for its side files,
+  uploaders and builds.
 - **Group tree.** The union of the trees of the members the caller reads
   (`access.Engine.GroupMembers`). Each member reads `limit` + 1 items from the same cursor and the
   pages merge; a file is the first member's, the one a group read serves. The first `limit` of the
@@ -2532,24 +2559,28 @@ the capabilities of the repo's `format.Spec` that are set.
   - `each` (Maven, Docker; a group read serves each path or tag from the first member that has
     it): a k-way merge of the members' pages, the cursor holding each member's. A version comes out
     only while every member with more still holds an unread one, so none sorts before it. Without
-    `VersionsByName` (Docker orders tags by date) a member is asked by a `Builds` lookup. A
-    version with a `folder` held by several members is the union of their builds. A proxy member
-    gives only what it has cached.
+    `VersionsByName` (Docker orders tags by date) a member is asked which of the versions of the
+    pages read so far it has, once per page read (`HasVersions`). A version with a `folder` held
+    by several members is the union of their builds, which each member reads for all such versions
+    of the page at once (`VersionsBuilds`). Each file of a tag's build names the first member that
+    stores it: one lookup per member for the files of the page. A proxy member gives only what it
+    has cached.
   - `owner` (npm, PyPI, Cargo, NuGet; a group read serves a whole package from its owner): the
     owner's versions. A proxy member's `Versions` reads its owner-check document through the read
     path, so it fetches from the remote when a download would; uncached versions have
-    `remote: true`.
+    `remote: true` (one lookup of the stored files of the page).
 - **Repository lists** (`internal/api/repolist.go`, `internal/repos/list.go`). A request reads only
   its answer: a holder of `repositories.all` reads one index range; anyone else gets the public repos
   (partial indexes on `anonymous_read`) merged with one rowid lookup per grant, each list read to
   `limit + 1`. With `q` each list reads the same way through the grams of the names: every repo
   and the public ones from `repo_name_grams` (an index per filter: format, kind, public), a grant
   by its lookup with `instr` on the name.
-- **Name search** (`internal/namesearch`). A `q` of the repo, user, CI pipeline and IP list lists
-  keeps the names that hold it in any case (ASCII letters folded, as SQLite's `lower()`), at any
-  length. Each owner keeps a gram table: one row per distinct 1- to 3-character substring of each
-  folded name, keyed `(gram, name)`, written by the owning service in the transaction of each
-  write of the name (no trigger can split a name), backfilled by the migration that creates it.
+- **Name search** (`internal/namesearch`). A `q` of the repo, user, CI pipeline, IP list, signing
+  key and device lists keeps the names that hold it in any case (ASCII letters folded, as SQLite's
+  `lower()`), at any length. Each owner keeps a gram table: one row per distinct 1- to
+  3-character substring of each folded name, keyed `(gram, name)`, written by the owning service
+  in the transaction of each write of the name (no trigger can split a name), backfilled by the
+  migration that creates it.
   A `q` of up to 3 characters is one gram: its rows are the answer. A longer `q` reads the rows of
   its rarest trigram (a probe counts each trigram up to 1,000 rows, then up to the fewest so far)
   and keeps the names that hold `q` with `instr` on the gram row alone; a trigram with no row
@@ -2558,12 +2589,20 @@ the capabilities of the repo's `format.Spec` that are set.
   (`namesearch.Steps`), so `next` stays the last name and its folded form says which range the
   next page starts in; a merge of lists sorts by `namesearch.Compare`. A page costs its rows plus,
   for a longer `q`, the rows of its rarest trigram that do not hold it.
+  - The IP lists and the signing keys are few and held in memory: a search reads the rows of its
+    gram whole and sorts the answer. A signing key's fingerprint matches only a key ID (8 hex
+    digits or more, spaces aside, as gpg and apt print it), so a fingerprint has trigram rows only
+    and a short `q` never matches one.
+  - The devices list newest first, as without `q`: a device's rows hold the grams of its name and
+    of its owner's username, keyed by the device id (and the owner, for a person's own list), so a
+    page is one range of a gram below the id cursor.
 - **Group counters** (`internal/api/groupcounts.go`). A group's file count, size and last publish
   count each file it serves to the caller once: by path, or by unit (`format.Spec.GroupUnit`, the
   package) from the unit's owner. A merged file counts once with the first member's size, because
   merged bytes exist only for a read. A delete never lowers `last_published_at`.
-  - `group_counts` holds one row per group and member set a reader asked for, read with one lookup;
-    a set without a row answers `counts_pending: true` and asks the job.
+  - `group_counts` holds one row per group and member set a reader asked for; a page of repos reads
+    the members of its groups in one query and their rows in another (a lookup per group). A set
+    without a row answers `counts_pending: true` and asks the job.
   - The job `core.group-counts` never holds SQLite's writer for more than a few small statements:
     1. A write transaction inserts the row and its pending entry; from here triggers add every
        asset write to the row.
@@ -2591,7 +2630,10 @@ the capabilities of the repo's `format.Spec` that are set.
 - **Repo delete.** `POST /api/repos/delete` starts a `delete` operation per repo (202; see **Repo
   operations**); writes get 409 meanwhile. The name can be used again afterwards.
 - **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved` runs in each batch's transaction
-  before the rows go (see **Debian indexing pipeline**, **Versions and builds**). Maven's
+  before the rows go (see **Debian indexing pipeline**, **Versions and builds**). Every format but
+  Docker deletes its rows of the batch's files in one statement (a JSON array of their asset ids
+  or paths); what follows for a package the batch touches (its revision, an index entry) runs once
+  per package. Maven's
   `AfterRemove` rewrites `maven-metadata.xml` without the emptied versions; an artifact without one
   stays without one.
 - **`format.Spec.Upload`** (`internal/format/upload.go`). `Plan` stores nothing; `Store` commits
@@ -2650,7 +2692,8 @@ one gram of `ip_list_grams` (see **Name search**), each list then read from memo
 - **Rename.** 409 when `TR_TRUSTED_PROXIES` names the list, because the next start resolves the
   old name.
 - **Delete.** 409 `{error, used_by}` while in use; `ON DELETE RESTRICT` refuses it too.
-- **Use.** `repo_networks_list_id` finds a list's repos.
+- **Use.** `repo_networks_list_id` finds a list's repos: the `used_by` of every list of
+  `GET /api/ip-lists` in one query.
 
 **Allowed networks.** A repo is **public** (`anonymous_read`) or **restricted**. A caller downloads
 from a restricted repo with a credential that grants `repo.download`, or from an address in the
@@ -2731,7 +2774,7 @@ signature.
   on `download_stats` in the same transaction, so they survive crashes; the flush rolls the
   window, reading only the rows of the days that leave it.
 - **`GET /api/stats`** flushes first, then reads 30 day rows and the top ten repos from an index.
-- **`GET /api/repos`** shows each repo's window downloads with one seek per repo, after the next
+- **`GET /api/repos`** reads the window downloads of a page's repos in one query, after the next
   flush.
 
 ## Web UI
@@ -2785,7 +2828,9 @@ the UI meets the server and the rules that need a reason.
   search hits is of the loaded pages ("350+ files"). Search groups hits in the browser only within
   the loaded pages (a card per repo, a row per artifact folder, checksum and signature files folded
   into their file). A network list's ranges come whole with the list (`GET /api/ip-lists/{name}`),
-  so Find an address on its page filters the ranges the page holds. The grant dialog, the
+  so Find an address on its page filters the ranges the page holds. A Nexus server's
+  repositories (`GET /api/nexus/sources/{id}`) and a merge plan's first 1,000 conflicts come whole
+  too, so their pages search them in place. The grant dialog, the
   `RepoPicker` and the People list search by a text the name holds (**Name search**), a page at
   a time, so they cost the same on any server.
 - **Live data.** A page that follows a server process (a backup, a storage move, a Nexus sync, a
@@ -2845,9 +2890,11 @@ the UI meets the server and the rules that need a reason.
   rename says the old name keeps working (see **Repository redirects**). Creating a repository
   with a new signing key calls `POST /api/signing-keys`, then `POST /api/repos`; if the second
   call fails, the page deletes the key.
-  - *Access* reads `GET /api/repos/{name}/access?admins=1` and applies each change at once. Each
-    network change is one `PUT /api/repos/{name}/ip-rules`, one at a time, each on the networks
-    the last one left. Turning Public on while the list holds networks asks first and removes
+  - *Access* reads `GET /api/repos/{name}/access?admins=1` and applies each change at once. Find
+    who has access reads the same route with `q`, which only chooses what the cards show: every
+    change works on the whole report, so a network change never drops the rules a search hides.
+    Each network change is one `PUT /api/repos/{name}/ip-rules`, one at a time, each on the
+    networks the last one left. Turning Public on while the list holds networks asks first and removes
     them; the grants stay. While nobody can publish (`publish.blocked`: a group, a proxy or an
     operation), the Publish card says why and offers no CI pipeline. **Add my address** adds the
     `cidr` of `GET /api/network/whoami` (an IPv6 address as its `/64`) and, with
@@ -2855,8 +2902,14 @@ the UI meets the server and the rules that need a reason.
     credentials), so both address families of the network go in.
   - **Grant dialog.** Give access (Access tab, person page) is one dialog: it searches people or
     repositories by a text the name holds, a page at a time, groups the added ones by identical
-    permission sets and saves them in one `PUT /api/grants` with `groups`. On the Access tab it also adds IP
-    lists, addresses (each masked through `POST /api/ip-ranges/parse`) and CI pipelines.
+    permission sets and saves them in one `PUT /api/grants` with `groups`, which sets the whole
+    set of each pair. A thing with a grant shows with what it holds (the Access tab from its
+    report, the person page from `GET /api/users/{name}/access?name=` for the page of
+    repositories) and starts from that set, so the dialog changes a grant as well as it gives
+    one; it sends only the pairs that change and never clears one (Remove on the list takes an
+    access away). A holder of All repositories shows and cannot be picked. On the Access tab it
+    also adds IP lists, addresses (each masked through `POST /api/ip-ranges/parse`) and CI
+    pipelines.
   - **Permission picker.** One picker, read from `GET /api/permissions`. Checking a permission
     checks what it needs and clearing one clears what needs it; a permission the caller does not
     hold is turned off. There are no presets: the phrases of a set ("Download, publish",
@@ -2892,9 +2945,10 @@ the UI meets the server and the rules that need a reason.
 **Versions and builds.** A format that sets `format.Spec.Versions` and `Builds` groups an
 artifact's files into versions and a version's files into builds; the UI reads them through
 `/versions` and `/builds`. A format keeps its own index tables in the transaction of every write
-and remove through its hooks, so a page of versions or builds is one seek past its cursor plus a
-range read of the files of each build on it, at any number of versions, builds or files. Each
-format's order is a stored byte key (see the format's `order.go` or index code).
+and remove through its hooks, so a page of versions or builds is one seek past its cursor plus
+one query that range-reads the files of every build on it and one for their CI build records
+(`ci.Loader.Load`), at any number of versions, builds or files. Each format's order is a stored
+byte key (see the format's `order.go` or index code).
 
 - *Maven* (`internal/maven/index.go`, `versions.go`): an artifact folder is
   `<group path>/<artifactId>/`. A file of a version (not a checksum or signature) records its

@@ -54,12 +54,11 @@ SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id, a.upd
 FROM npm_versions v JOIN assets a ON a.repo_id = v.repo_id AND a.path = v.tarball
 WHERE v.repo_id = ? AND v.name = ? AND v.version = ?;
 
--- The version of a tarball, through npm_versions_tarball.
--- name: GetVersionOfTarball :one
-SELECT name, version FROM npm_versions WHERE repo_id = ? AND tarball = ?;
-
--- name: DeleteVersion :exec
-DELETE FROM npm_versions WHERE npm_versions.repo_id = ? AND name = ? AND version = ?;
+-- Removes the versions of the deleted tarballs of a remove batch (a JSON array of paths), through
+-- npm_versions_tarball (the row value keeps the planner off a range of the primary key).
+-- name: DeleteVersionsOfTarballs :many
+DELETE FROM npm_versions WHERE (repo_id, tarball) IN (SELECT CAST(sqlc.arg(repo_id) AS INTEGER), value FROM json_each(sqlc.arg(tarballs)))
+RETURNING name, version, tarball;
 
 -- name: SetDeprecated :exec
 UPDATE npm_versions SET deprecated = ? WHERE repo_id = ? AND name = ? AND version = ?;
@@ -71,11 +70,16 @@ SELECT tag, version FROM npm_tags WHERE repo_id = ? AND name = ? ORDER BY tag;
 -- name: GetTag :one
 SELECT version FROM npm_tags WHERE repo_id = ? AND name = ? AND tag = ?;
 
--- A keyset page of every dist-tag of a repo by package and tag, through the primary key (a merge).
+-- A keyset page of every dist-tag of a repo by package and tag, through the primary key, each with
+-- whether the repo into has the package and the version of into's tag of the same name ('' for
+-- none), through the primary keys (a merge).
 -- name: ListRepoTagsAfter :many
-SELECT name, tag, version FROM npm_tags
-WHERE repo_id = sqlc.arg(repo_id) AND (name, tag) > (sqlc.arg(name), sqlc.arg(tag))
-ORDER BY name, tag LIMIT sqlc.arg(limit);
+SELECT f.name, f.tag, f.version,
+  EXISTS (SELECT 1 FROM npm_packages p WHERE p.repo_id = sqlc.arg(into_id) AND p.name = f.name) AS owned,
+  CAST(coalesce((SELECT t.version FROM npm_tags t WHERE t.repo_id = sqlc.arg(into_id) AND t.name = f.name AND t.tag = f.tag), '') AS TEXT) AS target
+FROM npm_tags f
+WHERE f.repo_id = sqlc.arg(repo_id) AND (f.name, f.tag) > (sqlc.arg(name), sqlc.arg(tag))
+ORDER BY f.name, f.tag LIMIT sqlc.arg(limit);
 
 -- name: UpsertTag :exec
 INSERT INTO npm_tags (repo_id, name, tag, version) VALUES (?, ?, ?, ?)

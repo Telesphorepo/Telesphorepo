@@ -15,12 +15,19 @@ RETURNING id;
 SELECT id, provider, key, repository, revision, ref, ref_name, ref_type, run, workflow, actor, links, created_at
 FROM builds WHERE id = ?;
 
+-- The builds of a set of ids (a JSON array), through the primary key: the build records of a
+-- page in one query.
+-- name: ListBuildsByIDs :many
+SELECT id, provider, key, repository, revision, ref, ref_name, ref_type, run, workflow, actor, links, created_at
+FROM builds WHERE id IN (SELECT value FROM json_each(sqlc.arg(ids)));
+
 -- A page of the builds created before the cutoff, in id order after the id after (the cleanup
 -- walks them with a cursor).
 -- name: ListOldBuilds :many
 SELECT id FROM builds WHERE id > sqlc.arg(after) AND created_at <= sqlc.arg(cutoff) ORDER BY id LIMIT sqlc.arg(limit);
 
--- Deletes a build that no file references, through assets_build. A session that names it keeps
--- its row with build_id NULL.
--- name: DeleteUnusedBuild :execrows
-DELETE FROM builds WHERE builds.id = sqlc.arg(build) AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.build_id = sqlc.arg(build));
+-- Deletes the builds of ids (a JSON array) that no file references, through assets_build: a batch
+-- of the cleanup in one statement. A session that names one keeps its row with build_id NULL.
+-- name: DeleteUnusedBuilds :execrows
+DELETE FROM builds WHERE builds.id IN (SELECT value FROM json_each(sqlc.arg(ids)))
+  AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.build_id = builds.id);

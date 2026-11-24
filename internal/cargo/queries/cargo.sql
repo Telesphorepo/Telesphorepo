@@ -44,9 +44,10 @@ SELECT name FROM cargo_versions WHERE repo_id = ? AND lower_name = ? LIMIT 1;
 UPDATE cargo_versions SET yanked = ?
 WHERE repo_id = ? AND lower_name = ? AND sort_key = ?;
 
--- Removes the version of a deleted .crate file through cargo_versions_asset.
--- name: DeleteVersionsOfAsset :many
-DELETE FROM cargo_versions WHERE asset_id = ?
+-- Removes the versions of the deleted .crate files of a remove batch (the JSON array of their
+-- asset ids) through cargo_versions_asset.
+-- name: DeleteVersionsOfAssets :many
+DELETE FROM cargo_versions WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids)))
 RETURNING repo_id, name, lower_name;
 
 -- A page of the versions of a crate, newest first, below the sort key of the cursor, with the

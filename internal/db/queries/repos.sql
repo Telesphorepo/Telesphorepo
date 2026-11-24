@@ -54,8 +54,11 @@ SELECT member_id FROM repo_group_members WHERE group_id = ? ORDER BY position;
 -- name: DeleteGroupMembers :exec
 DELETE FROM repo_group_members WHERE group_id = ?;
 
--- name: InsertGroupMember :exec
-INSERT INTO repo_group_members (group_id, member_id, position) VALUES (?, ?, ?);
+-- The members of a group in one statement: members is a JSON array of member ids in read order,
+-- each at its index.
+-- name: InsertGroupMembers :exec
+INSERT INTO repo_group_members (group_id, member_id, position)
+SELECT sqlc.arg(group_id), j.value, j.key FROM json_each(CAST(sqlc.arg(members) AS TEXT)) j;
 
 -- Proxy remotes. The repos service keeps them in memory; it reads them in pages of repo ids at
 -- start.
@@ -113,9 +116,11 @@ SELECT count(*) FROM rebuilds WHERE repo_id = ?;
 -- name: ListRebuildUnits :many
 SELECT unit FROM rebuilds WHERE repo_id = ? AND grp = ? ORDER BY unit;
 
--- Deletes a unit unless it was marked again after the rebuild started.
--- name: ClearRebuild :exec
-DELETE FROM rebuilds WHERE repo_id = ? AND grp = ? AND unit = ? AND marked_at <= ?;
+-- Deletes the units of a rebuild (a JSON array) that were not marked again after it started, in
+-- one statement: a seek of the primary key per unit.
+-- name: ClearRebuilds :exec
+DELETE FROM rebuilds WHERE repo_id = sqlc.arg(repo_id) AND grp = sqlc.arg(grp)
+  AND unit IN (SELECT value FROM json_each(sqlc.arg(units))) AND marked_at <= sqlc.arg(marked_at);
 
 -- name: HasRebuild :one
 SELECT EXISTS (SELECT 1 FROM rebuilds WHERE repo_id = ? AND grp = ?);
@@ -131,6 +136,10 @@ SELECT CAST(COALESCE(MAX(marked_at), 0) AS INTEGER) AS max_mark FROM rebuilds;
 -- repos first (GetRepoByName), then this point lookup by the key.
 -- name: GetRepoRedirect :one
 SELECT name, repo_id, created_at, last_used_at FROM repo_redirects WHERE name = ?;
+
+-- The redirects of names, through the primary key (a page of names in one query).
+-- name: ListRepoRedirectsNamed :many
+SELECT name, repo_id FROM repo_redirects WHERE name IN (sqlc.slice(names));
 
 -- The redirects of one repo by name, through repo_redirects_repo.
 -- name: ListRepoRedirectsOf :many

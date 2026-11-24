@@ -10,9 +10,10 @@ ON CONFLICT (repo_id, lower_id, sort_key) DO UPDATE SET package_id = excluded.pa
   prerelease = excluded.prerelease, listed = 1, meta = excluded.meta, nupkg_path = excluded.nupkg_path,
   asset_id = excluded.asset_id, published_at = excluded.published_at;
 
--- Removes the version of a deleted .nupkg, through nuget_versions_asset.
--- name: DeleteVersionsOfAsset :many
-DELETE FROM nuget_versions WHERE asset_id = ?
+-- Removes the versions of the deleted .nupkg files of a remove batch (the JSON array of their
+-- asset ids), through nuget_versions_asset.
+-- name: DeleteVersionsOfAssets :many
+DELETE FROM nuget_versions WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids)))
 RETURNING lower_id;
 
 -- Records a package with a changed version and moves its revision on.
@@ -59,22 +60,6 @@ FROM nuget_packages p
 WHERE p.repo_id = ? AND p.lower_id = ?
 ON CONFLICT (package) DO UPDATE SET release = excluded.release, release2 = excluded.release2,
   pre = excluded.pre, pre2 = excluded.pre2;
-
--- The versions of a package that a search with prereleases shows, oldest first, without their
--- metadata.
--- name: ListVisibleVersions :many
-SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND semver2 <= ?
-ORDER BY sort_key
-LIMIT ?;
-
--- The versions of a package that a search without prereleases shows, oldest first, through the
--- partial index of the listed releases.
--- name: ListVisibleReleases :many
-SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease = 0 AND semver2 <= ?
-ORDER BY sort_key
-LIMIT ?;
 
 -- The versions of one package, newest first: the first page of the version browser.
 -- name: ListVersionsDesc :many

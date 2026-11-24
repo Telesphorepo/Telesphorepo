@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -96,16 +97,17 @@ func (f *Format) admitObject(ctx context.Context, w *assets.Write, existing *ass
 			if err != nil {
 				return 0, err
 			}
-			for _, c := range m.Children() {
-				p := linkPath(op.image, c.hex)
-				if c.kind == "manifest" {
-					p = manifestPath(op.image, c.hex)
-				}
-				ok, err := f.exists(ctx, w.Repo, p, batch)
-				if err != nil {
-					return 0, err
-				}
-				if !ok {
+			cs := m.Children()
+			paths := make([]string, len(cs))
+			for i, c := range cs {
+				paths[i] = childPath(op.image, c)
+			}
+			have, err := f.existing(ctx, w.Repo, paths, batch)
+			if err != nil {
+				return 0, err
+			}
+			for i, c := range cs {
+				if !have[paths[i]] {
 					return 0, blobUnknownIn(c.hex)
 				}
 			}
@@ -144,6 +146,56 @@ func (f *Format) exists(ctx context.Context, repo *repos.Repo, path string, batc
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// existing returns which of paths are writes of the same commit (batch) or assets of repo: one
+// query for the paths that batch does not hold, where exists would cost one per path.
+func (f *Format) existing(ctx context.Context, repo *repos.Repo, paths []string, batch map[string]bool) (map[string]bool, error) {
+	out := make(map[string]bool, len(paths))
+	var ask []string
+	for _, p := range paths {
+		if batch[p] {
+			out[p] = true
+		} else {
+			ask = append(ask, p)
+		}
+	}
+	stored, err := f.h.Assets.GetMany(ctx, repo.ID, ask)
+	if err != nil {
+		return nil, err
+	}
+	for p := range stored {
+		out[p] = true
+	}
+	return out, nil
+}
+
+// repoLinked returns which blobs of digests an image of repo links: one query.
+func (f *Format) repoLinked(ctx context.Context, repo *repos.Repo, digests []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(digests))
+	if len(digests) == 0 {
+		return out, nil
+	}
+	js, err := json.Marshal(digests)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := f.q.RepoLinkedDigests(ctx, dbq.RepoLinkedDigestsParams{Digests: string(js), RepoID: repo.ID})
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range rows {
+		out[d] = true
+	}
+	return out, nil
+}
+
+// childPath is the path of child c of a manifest of image: its link, or its manifest.
+func childPath(image string, c child) string {
+	if c.kind == "manifest" {
+		return manifestPath(image, c.hex)
+	}
+	return linkPath(image, c.hex)
 }
 
 // manifestOf returns the manifest of a manifest write: the parsed one of the handler, else the

@@ -9,16 +9,6 @@ INSERT OR IGNORE INTO maven_builds (repo_id, folder, sort_key, build) VALUES (?,
 INSERT INTO maven_versions (repo_id, folder, sort_key, version, snapshot, builds) VALUES (?, ?, ?, ?, ?, 1)
 ON CONFLICT (repo_id, folder, sort_key) DO UPDATE SET builds = maven_versions.builds + 1;
 
--- Deletes a build that has no file left; 1 when it was there.
--- name: DeleteBuild :execrows
-DELETE FROM maven_builds WHERE repo_id = ? AND folder = ? AND sort_key = ?;
-
--- name: DropVersionBuild :exec
-UPDATE maven_versions SET builds = builds - 1 WHERE repo_id = ? AND folder = ? AND sort_key = ?;
-
--- name: DeleteEmptyVersion :exec
-DELETE FROM maven_versions WHERE repo_id = ? AND folder = ? AND sort_key = ? AND builds <= 0;
-
 -- A page of the versions of an artifact folder, newest first, below the sort key of the cursor,
 -- through the primary key.
 -- name: ListVersionsBelow :many
@@ -50,14 +40,6 @@ LIMIT ?;
 -- One build of a version folder, through the primary key.
 -- name: GetBuild :one
 SELECT build FROM maven_builds WHERE repo_id = ? AND folder = ? AND sort_key = ?;
-
--- The paths of a repo in [lower, upper), in path order, through the assets (repo_id, path) key:
--- the files of a build in the transaction of a remove.
--- name: ListPathsInRange :many
-SELECT path FROM assets
-WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower) AND path < sqlc.arg(upper)
-ORDER BY path
-LIMIT sqlc.arg(limit);
 
 -- The paths of a repo after a path, in path order: the files that the index of the files a repo
 -- holds already reads, batch by batch.

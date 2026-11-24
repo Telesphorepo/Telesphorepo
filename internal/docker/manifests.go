@@ -2,7 +2,6 @@ package docker
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
-	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -205,30 +203,43 @@ func (f *Format) putManifest(w http.ResponseWriter, r *http.Request, c *route.Ca
 	origin := format.OriginOf(c.P.For(c.Repo.ID), assets.SourcePut)
 	mp := manifestPath(t.image, digest)
 	batch := map[string]bool{mp: true}
+	// The links the image has and the blobs other images of the repo link: two queries.
+	cs := m.Children()
+	var lps, missing []string
+	for _, ch := range cs {
+		if ch.kind != "manifest" {
+			lps = append(lps, linkPath(t.image, ch.hex))
+		}
+	}
+	have, err := f.existing(ctx, c.Repo, lps, batch)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	for _, ch := range cs {
+		if ch.kind != "manifest" && !have[linkPath(t.image, ch.hex)] {
+			missing = append(missing, ch.hex)
+		}
+	}
+	linked, err := f.repoLinked(ctx, c.Repo, missing)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
 	var ws []assets.Write
 	var locks []string
-	for _, ch := range m.Children() {
+	for _, ch := range cs {
 		if ch.kind == "manifest" {
 			locks = append(locks, manifestPath(t.image, ch.hex))
 			continue
 		}
 		lp := linkPath(t.image, ch.hex)
 		locks = append(locks, lp)
-		ok, err := f.exists(ctx, c.Repo, lp, batch)
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
-		if ok {
+		if have[lp] || batch[lp] {
 			continue
 		}
-		_, err = f.q.RepoLinkOf(ctx, dbq.RepoLinkOfParams{RepoID: c.Repo.ID, Digest: ch.hex})
-		if errors.Is(err, sql.ErrNoRows) {
+		if !linked[ch.hex] {
 			writeOCI(w, blobUnknownIn(ch.hex))
-			return
-		}
-		if err != nil {
-			fail(w, r, err)
 			return
 		}
 		batch[lp] = true

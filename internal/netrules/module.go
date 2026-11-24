@@ -2,6 +2,7 @@ package netrules
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -116,18 +117,19 @@ func (m *mod) restrictPublic(ctx context.Context) error {
 		ids = append(ids, id)
 	}
 	m.rules.rulesMu.RUnlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	js, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	public, err := m.rules.rq.ListPublicReposIn(ctx, string(js))
+	if err != nil {
+		return err
+	}
 	off := false
-	for _, id := range ids {
-		repo, err := m.h.Repos.ByID(ctx, id)
-		if errors.Is(err, repos.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !repo.AnonymousRead {
-			continue
-		}
+	for _, repo := range public {
 		if _, err := m.h.Repos.Update(audit.System(ctx, "network"), repo.Name, repos.Patch{AnonymousRead: &off}); err != nil {
 			return fmt.Errorf("make %s restricted: %w", repo.Name, err)
 		}
@@ -259,14 +261,18 @@ func (m *mod) listLists(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	} else {
 		lists = m.rules.Lists()
 	}
+	names := make([]string, len(lists))
+	for i, l := range lists {
+		names[i] = l.Name
+	}
+	used, err := m.rules.Usages(r.Context(), names)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
 	out := make([]listJSON, 0, len(lists))
 	for _, l := range lists {
-		u, err := m.rules.Usage(r.Context(), l.Name)
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
-		out = append(out, listJSON{l, u})
+		out = append(out, listJSON{l, used[l.Name]})
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

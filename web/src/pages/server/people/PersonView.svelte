@@ -8,10 +8,12 @@
   their permissions there under its name, and one line under the list counts the public
   repositories they can also download from. Past ten of them a search field keeps the ones whose
   name holds what is typed (GET /api/users/{name}/access?q=, 250 ms after the last key). Give
-  access opens the grant dialog: the repositories the caller manages access of on the left, the
-  ones it gives on the right, each with its own permissions, saved in one request; Change edits one repository and Remove takes its
-  access after a confirm; picked rows get one set of permissions, or lose their access after a
-  confirm. Each change of repository permissions applies at once.
+  access opens the grant dialog: the repositories the caller manages access of on the left, each
+  that the person has a grant on with what they hold there (GET /api/users/{name}/access?name=),
+  the ones it gives or changes on the right, each with its own permissions, saved in one request;
+  Change edits one repository and Remove takes its access after a confirm; picked rows get one
+  set of permissions, or lose their access after a confirm. Each change of repository permissions
+  applies at once.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -42,7 +44,7 @@
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ServerPermissionPicker from "$lib/components/ServerPermissionPicker.svelte";
-  import GrantDialog, { bySet, type GrantItem } from "../../settings/repos/GrantDialog.svelte";
+  import GrantDialog, { bySet, type GrantChoice, type GrantItem } from "../../settings/repos/GrantDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import LockIcon from "@lucide/svelte/icons/lock";
   import DatabaseIcon from "@lucide/svelte/icons/database";
@@ -116,7 +118,7 @@
   const grantsOf = (items: readonly UserRepoAccess[]) =>
     items.filter((r) => r.via === "permission").map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [] }));
   const rows = $derived(grantsOf(found.items));
-  // Of the whole list, whatever the search: what Give access leaves out, the public line, the search field.
+  // Of the whole list, whatever the search: the public line and the search field.
   const allRows = $derived(grantsOf(access.items));
   const publicOnly = $derived(
     Math.max(0, (overview.data?.public_repos ?? 0) - access.items.filter((x) => x.via === "permission" && x.public && x.kind !== "group").length),
@@ -175,22 +177,40 @@
 
   // --- give access and change permissions ---
   let giveOpen = $state(false);
-  const granted = $derived(new Set(allRows.map((r) => r.repo)));
-  // The repositories where the caller holds Manage access whose name holds q (GET /api/repos?perm=repo.access).
+  // The repositories where the caller holds Manage access whose name holds q (GET /api/repos?perm=repo.access),
+  // each with what the person holds there by a grant (GET /api/users/{name}/access?name=): picking one changes it.
   const formatOf = new Map<string, string>();
   async function findRepos(q: string, after?: string) {
     const page = await api.repos.list({ q, perm: ["repo.access"] }, { after, limit: 50 });
     for (const r of page.items) formatOf.set(r.name, r.format);
+    const theirs = new Map(
+      (await api.users.accessTo(person, page.items.map((r) => r.name))).filter((x) => x.via === "permission").map((x) => [x.repo, x.perms]),
+    );
     return {
       next: page.next,
-      items: page.items.map((r) => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined })),
+      items: page.items.map(
+        (r): GrantChoice => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined, has: theirs.get(r.name) }),
+      ),
     };
   }
   async function give(items: GrantItem[]) {
     const groups = bySet(items);
     await api.grants.setGroups(groups.map((g) => ({ users: [person], repos: g.ids, perms: g.perms })));
-    toast.success(`Gave ${person} access to ${repoCount(items.length)}${groups.length === 1 ? `: ${repoPhrase(groups[0].perms)}` : ""}.`);
+    toast.success(gaveText(items));
     await afterChange();
+  }
+  /** "Gave alice access to maven: Download.", "Changed the permissions of alice on 2 repositories.", or both in one sentence. */
+  function gaveText(items: GrantItem[]): string {
+    const fresh = items.filter((i) => !i.had);
+    const changed = items.filter((i) => i.had);
+    const which = (xs: GrantItem[]) => (xs.length === 1 ? xs[0].id : repoCount(xs.length));
+    const set = (xs: GrantItem[]) => {
+      const sets = bySet(xs);
+      return sets.length === 1 ? `: ${repoPhrase(sets[0].perms)}` : "";
+    };
+    if (!changed.length) return `Gave ${person} access to ${which(fresh)}${set(fresh)}.`;
+    if (!fresh.length) return `Changed the permissions of ${person} on ${which(changed)}${set(changed)}.`;
+    return `Gave ${person} access to ${which(fresh)} and changed their permissions on ${which(changed)}.`;
   }
 
   let changeTargets = $state<string[]>([]);
@@ -433,7 +453,6 @@
   title="Give {person} access"
   noun={["repository", "repositories"]}
   search={findRepos}
-  exclude={[...granted]}
   none="You manage the access of no repository."
   {held}
   submitLabel={(n) => (n ? `Give access to ${repoCount(n)}` : "Give access")}

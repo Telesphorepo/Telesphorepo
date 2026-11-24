@@ -42,7 +42,7 @@ func Module() module.Module {
 	return module.Module{
 		ID: "maven", Title: "Maven / Gradle",
 		Register: func(x *module.Extender) {
-			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries"), Extra: dbq.Extra})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.assets, h.host, h.q = host.Assets, host, dbq.New(host.DB.R)
 				host.Repos.OnPurge(purge(dbq.New(host.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
@@ -67,6 +67,7 @@ func Module() module.Module {
 				GroupVersions:  format.GroupEach,
 				VersionOrder:   func(a, b format.Version) int { return -compareVersions(a.Version, b.Version) },
 				VersionsByName: true,
+				VersionsBuilds: h.VersionsBuilds,
 				BuildOrder:     func(a, b format.Build) int { return -compareBuilds(a.Build, b.Build) },
 				Usage:          h.Usage,
 				ArtifactUsage:  h.ArtifactUsage,

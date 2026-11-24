@@ -1,8 +1,10 @@
 package signing
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing/dbq"
 )
@@ -174,6 +177,76 @@ func (k *Keys) List() []Key {
 	return out
 }
 
+// Search returns the keys whose name holds text (folded, namesearch.Text), or whose fingerprint
+// holds it when it is a key ID (keyID), those whose name starts with it first, then by name
+// (namesearch.Compare): the rows of one gram of signing_key_grams for each, the keys then read
+// from memory.
+func (k *Keys) Search(ctx context.Context, text string) ([]Key, error) {
+	count := func(ctx context.Context, g string, limit int64) (int64, error) {
+		return k.rq.CountSigningKeyGram(ctx, dbq.CountSigningKeyGramParams{Gram: g, Limit: limit})
+	}
+	var names []string
+	g, ok, err := namesearch.Gram(ctx, text, count)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		if names, err = k.rq.SearchSigningKeyNames(ctx, dbq.SearchSigningKeyNamesParams{Gram: g, Text: text}); err != nil {
+			return nil, err
+		}
+	}
+	if id := keyID(text); id != "" {
+		g, ok, err := namesearch.Gram(ctx, id, count)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			more, err := k.rq.SearchSigningKeyFingerprints(ctx, dbq.SearchSigningKeyFingerprintsParams{Gram: g, Text: id})
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, more...)
+		}
+	}
+	m := *k.snap.Load()
+	out := make([]Key, 0, len(names))
+	seen := map[string]bool{}
+	for _, name := range names {
+		if e := m[name]; e != nil && !seen[name] {
+			seen[name] = true
+			out = append(out, e.key)
+		}
+	}
+	slices.SortFunc(out, func(a, b Key) int { return namesearch.Compare(text, a.Name, b.Name) })
+	return out, nil
+}
+
+// keyID returns text without its spaces when it is a key ID or a fingerprint (8 hex digits or
+// more, as gpg and apt print them), else "".
+func keyID(text string) string {
+	id := strings.ReplaceAll(text, " ", "")
+	if len(id) < 8 || strings.Trim(id, "0123456789abcdef") != "" {
+		return ""
+	}
+	return id
+}
+
+// writeGrams writes the grams of key id (signing_key_grams) in the transaction q of its create:
+// those of its name, and the trigrams of its fingerprint (a key ID search reads one).
+func writeGrams(ctx context.Context, q *dbq.Queries, id int64, name, fingerprint string) error {
+	n, fp := namesearch.Fold(name), namesearch.Fold(fingerprint)
+	grams := namesearch.Grams(n)
+	for i := 0; i+namesearch.MaxGram <= len(fp); i++ {
+		grams = append(grams, fp[i:i+namesearch.MaxGram])
+	}
+	for _, g := range grams {
+		if err := q.InsertSigningKeyGram(ctx, dbq.InsertSigningKeyGramParams{Gram: g, KeyID: id, Name: n, Fingerprint: fp}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Get returns key name.
 func (k *Keys) Get(name string) (Key, bool) {
 	e := (*k.snap.Load())[name]
@@ -266,6 +339,9 @@ func (k *Keys) insertLocked(ctx context.Context, name string, armored, pass []by
 		if err := q.SetSigningKeyPrivate(ctx, dbq.SetSigningKeyPrivateParams{PrivateKey: k.seal.Encrypt(aad(id), plain), ID: id}); err != nil {
 			return err
 		}
+		if err := writeGrams(ctx, q, id, name, e.key.Fingerprint); err != nil {
+			return err
+		}
 		return k.audit.RecordTx(ctx, tx, audit.Event{Action: ActionKeyCreate, Target: name,
 			Detail: map[string]any{"fingerprint": e.key.Fingerprint, "imported": pass != nil}})
 	})
@@ -290,13 +366,35 @@ func (k *Keys) store(change func(m map[string]*entry)) {
 	k.snap.Store(&m)
 }
 
-// UsedBy returns the names of the repos bound to key name, in id order.
-func (k *Keys) UsedBy(ctx context.Context, name string) ([]string, error) {
-	e := (*k.snap.Load())[name]
-	if e == nil {
-		return []string{}, nil
+// ReposOf returns the names of the repos bound to each of the keys names, each in repo id order
+// ([] for a key without repos or one that does not exist): one query for every key.
+func (k *Keys) ReposOf(ctx context.Context, names []string) (map[string][]string, error) {
+	m := *k.snap.Load()
+	out := make(map[string][]string, len(names))
+	nameOf := make(map[int64]string, len(names))
+	ids := make([]int64, 0, len(names))
+	for _, name := range names {
+		out[name] = []string{}
+		if e := m[name]; e != nil {
+			nameOf[e.id] = name
+			ids = append(ids, e.id)
+		}
 	}
-	return usedBy(ctx, k.rq, e.id)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	js, _ := json.Marshal(ids)
+	rows, err := k.rq.ListReposOfSigningKeys(ctx, string(js))
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(rows, func(a, b dbq.ListReposOfSigningKeysRow) int { return cmp.Compare(a.RepoID, b.RepoID) })
+	for _, r := range rows {
+		if name, ok := nameOf[r.KeyID]; ok {
+			out[name] = append(out[name], r.Name)
+		}
+	}
+	return out, nil
 }
 
 func usedBy(ctx context.Context, q *dbq.Queries, keyID int64) ([]string, error) {

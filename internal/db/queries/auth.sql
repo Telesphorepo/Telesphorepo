@@ -18,6 +18,16 @@ SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
 FROM users WHERE username = ?;
 
+-- The accounts of usernames (a list of a bulk change, at most a page), through the username index.
+-- name: ListUsersNamed :many
+SELECT id, username, disabled, kind, email, created_at,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE username IN (sqlc.slice(names));
+
+-- The usernames of ids (the uploaders of a page of files), through the primary key.
+-- name: ListUsernames :many
+SELECT id, username FROM users WHERE id IN (sqlc.slice(ids));
+
 -- name: GetUserByID :one
 SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
@@ -67,8 +77,8 @@ SELECT id, kind FROM users WHERE username = ?;
 -- name: SetUserPassword :exec
 UPDATE users SET password_hash = ?, password_changed_at = ? WHERE id = ?;
 
--- name: SetUserDisabled :exec
-UPDATE users SET disabled = ? WHERE id = ?;
+-- name: SetUsersDisabled :exec
+UPDATE users SET disabled = sqlc.arg(disabled) WHERE id IN (sqlc.slice(ids));
 
 -- name: GetOIDCUser :one
 SELECT id, disabled FROM users
@@ -81,6 +91,10 @@ UPDATE users SET email = ? WHERE id = ?;
 
 -- name: ListUserPerms :many
 SELECT perm FROM user_permissions WHERE user_id = ?;
+
+-- The server permissions of the users of ids, through the user_permissions primary key.
+-- name: ListUsersPerms :many
+SELECT user_id, perm FROM user_permissions WHERE user_id IN (sqlc.slice(ids));
 
 -- name: AddUserPerm :exec
 INSERT INTO user_permissions (user_id, perm) VALUES (?, ?) ON CONFLICT DO NOTHING;
@@ -97,6 +111,13 @@ WHERE p.perm = ? AND u.disabled = 0;
 -- permission).
 -- name: HasRepoPermIn :one
 SELECT EXISTS (SELECT 1 FROM repo_permissions WHERE user_id = sqlc.arg(user_id) AND perm IN (sqlc.slice(perms)));
+
+-- The users of users (a JSON array of ids) who hold one of perms (a JSON array) on some repo,
+-- through repo_permissions_user: a seek per user and permission.
+-- name: ListUsersWithRepoPermIn :many
+SELECT CAST(u.value AS INTEGER) AS user_id FROM json_each(CAST(sqlc.arg(users) AS TEXT)) u
+WHERE EXISTS (SELECT 1 FROM repo_permissions p WHERE p.user_id = u.value
+  AND p.perm IN (SELECT value FROM json_each(CAST(sqlc.arg(perms) AS TEXT))));
 
 -- name: CreateToken :one
 INSERT INTO api_tokens (user_id, public_id, secret_hash, name, created_at, expires_at)
@@ -150,6 +171,10 @@ DELETE FROM sessions WHERE id_hash = ?;
 -- name: DeleteUserSessions :exec
 DELETE FROM sessions WHERE user_id = ?;
 
+-- The sessions of the users of ids, served by sessions_user.
+-- name: DeleteUsersSessions :exec
+DELETE FROM sessions WHERE user_id IN (sqlc.slice(ids));
+
 -- The sessions of a user but one (a password change keeps the session that made it); served by sessions_user.
 -- name: DeleteOtherUserSessions :exec
 DELETE FROM sessions WHERE user_id = sqlc.arg(user_id) AND id_hash <> sqlc.arg(keep);
@@ -174,11 +199,28 @@ SELECT perm FROM repo_permissions WHERE repo_id = ? AND user_id = ?;
 -- name: ListAnonymousRepoIDs :many
 SELECT id FROM repos WHERE anonymous_read = 1;
 
--- name: AddRepoPerm :exec
-INSERT INTO repo_permissions (repo_id, user_id, perm) VALUES (?, ?, ?) ON CONFLICT DO NOTHING;
+-- A list change of grants (PUT /api/grants) reads and writes every pair of it in one statement
+-- each: pairs is a JSON array of [repo_id, user_id], a seek of the primary key per pair (CROSS
+-- JOIN keeps the grants the inner loop).
+-- name: ListPairPerms :many
+SELECT p.repo_id, p.user_id, p.perm
+FROM json_each(CAST(sqlc.arg(pairs) AS TEXT)) j CROSS JOIN repo_permissions p
+WHERE p.repo_id = json_extract(j.value, '$[0]') AND p.user_id = json_extract(j.value, '$[1]');
 
--- name: DeleteRepoUserPerms :execrows
-DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?;
+-- name: DeletePairPerms :exec
+DELETE FROM repo_permissions WHERE (repo_id, user_id) IN
+  (SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]') FROM json_each(CAST(sqlc.arg(pairs) AS TEXT)) j);
+
+-- rows is a JSON array of [repo_id, user_id, perm].
+-- name: AddPairPerms :exec
+INSERT INTO repo_permissions (repo_id, user_id, perm)
+SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]')
+FROM json_each(CAST(sqlc.arg(rows) AS TEXT)) j WHERE true
+ON CONFLICT DO NOTHING;
+
+-- The grants of the users of ids, one row per permission, through repo_permissions_user.
+-- name: ListUsersGrants :many
+SELECT user_id, repo_id, perm FROM repo_permissions WHERE user_id IN (sqlc.slice(ids));
 
 -- name: ListPermissions :many
 SELECT u.username, p.perm FROM repo_permissions p JOIN users u ON u.id = p.user_id

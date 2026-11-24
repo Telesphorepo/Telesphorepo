@@ -6,14 +6,19 @@
     typed (`search`, a page at a time from the server, with Show more; an empty field shows the first
     page) over the results. A row adds with a click, Enter, its "+" or a drag into the right
     column, and Add all shown adds every row of the results; a row never moves: an added one stays
-    where it is with a check, and a thing in `exclude` (it holds access already) shows "Has
-    access". Right, Giving access: the added things in the order they were added, the newest at
-    the bottom, scrolled into view and briefly tinted (not under reduced motion); the whole column
-    takes a drop. On top, Permissions for new items (`start`, editable) with Apply to all. Each
-    thing is a card: its name and its permissions at a glance (the labels of the registry, or "No
-    access" in the warning color while it has none); a click opens its PermissionPicker (one card
-    open at a time), × removes it. Submit stays off while a thing has no permission, and the
-    column says why. onGive gets every thing with its own set.
+    where it is with a check. A thing with a grant already (`has` of its choice) says what it holds
+    ("Has download and publish") and is added like any other, its card starting from what it
+    holds, so the dialog changes it as well as it gives. A thing in `exclude`, or with `fixed` (a
+    holder of All repositories: its access is no grant), shows "Has access" or that word and
+    cannot be added. Right, Giving access: the added things in the order they were added, the
+    newest at the bottom, scrolled into view and briefly tinted (not under reduced motion); the
+    whole column takes a drop. On top, Permissions for new items (`start`, editable) with Apply to
+    all. Each thing is a card: its name and its permissions at a glance (the labels of the
+    registry, or "No access" in the warning color while it has none), and for a grant what it
+    holds now or "No change"; a click opens its PermissionPicker (one card open at a time), ×
+    removes it. Submit stays off while a thing has no permission (Remove on the page's list takes
+    an access away, never this dialog) and while nothing would change, and the column says why.
+    onGive gets every thing that changes with its own set (and `had`, the set of a grant).
     Besides things with permissions (`kind` "grant", the default), `search` may offer:
     - `kind: "plain"`: a thing without permissions (an IP list, a CI pipeline); its card is its
       name and `detail`, with ×.
@@ -36,12 +41,21 @@
 <script lang="ts" module>
   import type { PermId as Perm } from "$lib/api";
   export type GrantKind = "grant" | "plain" | "address";
-  export type GrantChoice = { id: string; label: string; detail?: string; kind?: GrantKind };
+  /**
+   * One thing the search offers. `has`: the permissions it holds now by a grant (it starts from
+   * them when added). `fixed`: it holds access another way and cannot be added; the word says how
+   * ("All repositories").
+   */
+  export type GrantChoice = { id: string; label: string; detail?: string; kind?: GrantKind; has?: Perm[]; fixed?: string };
   /**
    * One thing of the dialog with the permissions it gets ([] for a plain thing or an address). A
-   * Custom address has the range in `value` and its label in `note`.
+   * Custom address has the range in `value` and its label in `note`. `had`: the set of a grant it
+   * held, so the page can say what changed.
    */
-  export type GrantItem = { id: string; perms: Perm[]; kind?: GrantKind; value?: string; note?: string };
+  export type GrantItem = { id: string; perms: Perm[]; kind?: GrantKind; value?: string; note?: string; had?: Perm[] };
+
+  /** Whether two permission sets hold the same permissions. */
+  export const sameSet = (a: readonly Perm[], b: readonly Perm[]) => a.length === b.length && a.every((p) => b.includes(p));
 
   /** Groups items by identical permission sets, in the order the sets first appear. */
   export function bySet(items: GrantItem[]): { ids: string[]; perms: Perm[] }[] {
@@ -62,7 +76,7 @@
   import type { Page, PermId } from "$lib/api";
   import { api, errorMessage } from "$lib/api";
   import { checkRange } from "$lib/network";
-  import { labelOf, needsOf, pickerGroups, repoPermissions, sortRepoPermissions } from "$lib/permissions";
+  import { labelOf, listPhrase, needsOf, pickerGroups, repoPermissions, sortRepoPermissions } from "$lib/permissions";
   import { count } from "$lib/words";
   import { cn } from "$lib/utils";
   import { Button } from "$lib/components/ui/button";
@@ -229,7 +243,8 @@
 
   const chosenIds = $derived(new Set(chosen.map((c) => c.id)));
   const excluded = $derived(new Set(exclude));
-  const addable = (c: GrantChoice) => c.kind === "address" || (!chosenIds.has(c.id) && !excluded.has(c.id));
+  const locked = (c: GrantChoice) => !!c.fixed || excluded.has(c.id);
+  const addable = (c: GrantChoice) => c.kind === "address" || (!chosenIds.has(c.id) && !locked(c));
   // Add all shown and Enter leave out Custom address: it is one blank card, added on purpose.
   const addableShown = $derived(found.filter((c) => c.kind !== "address" && addable(c)));
 
@@ -247,10 +262,26 @@
       });
   }
 
+  /**
+   * The permissions for new items as thing c may get them: the ones the person can give, and of a
+   * grant also those it holds that the person cannot change (they stay as they are).
+   */
+  function fromDefaults(c: GrantChoice): PermId[] {
+    const h = heldOn([c.id]);
+    const kept = h && c.has ? c.has.filter((p) => !h.includes(p)) : [];
+    return [...new Set([...keepHeld(c.id, defaults), ...kept])];
+  }
+  /** A grant starts from what it holds; a new thing from the permissions for new items. */
+  const startOf = (c: GrantChoice): PermId[] => (!isGrant(c) ? [] : c.has ? [...c.has] : fromDefaults(c));
+  /** Whether saving c changes something: a new thing, or a grant whose set changed. */
+  const changes = (c: Chosen) => !c.has || !sameSet(c.perms, c.has);
+  /** "Has download and publish": what a grant holds now. */
+  const holds = (p: PermId[]) => (p.length === everything ? "Has every permission" : `Has ${listPhrase(sortRepoPermissions(p).map(labelOf))}`);
+
   function add(things: GrantChoice[]) {
     const fresh = things.filter(addable);
     if (!fresh.length) return;
-    const made = fresh.map((c): Chosen => (c.kind === "address" ? newAddress("") : { ...c, perms: isGrant(c) ? keepHeld(c.id, defaults) : [] }));
+    const made = fresh.map((c): Chosen => (c.kind === "address" ? newAddress("") : { ...c, perms: startOf(c) }));
     chosen = [...chosen, ...made];
     said = made.length === 1 ? `Added ${made[0].label}.` : `Added ${count(made.length, noun[0], noun[1])}.`;
     show(made[made.length - 1].id);
@@ -302,7 +333,7 @@
     chosen = chosen.map((c) => (c.id === thing ? { ...c, perms: p } : c));
   }
   function applyAll() {
-    chosen = chosen.map((c) => (isGrant(c) ? { ...c, perms: keepHeld(c.id, defaults) } : c));
+    chosen = chosen.map((c) => (isGrant(c) ? { ...c, perms: fromDefaults(c) } : c));
     said = `Every ${noun[0]} gets the permissions for new items.`;
   }
   const toggle = (key: string) => (expanded = expanded === key ? null : key);
@@ -349,16 +380,22 @@
 
   const everything = $derived(repoPermissions().length);
   const missing = $derived(chosen.filter((c) => isGrant(c) && !c.perms.length));
+  // Grants with every permission cleared: Remove on the page's list takes an access away.
+  const cleared = $derived(missing.filter((c) => c.has));
   const badAddresses = $derived(chosen.filter((c) => c.kind === "address" && checkRange(c.value ?? "")));
+  // What saving sends: every thing but a grant left as it is.
+  const sending = $derived(chosen.filter(changes));
 
-  const ids = $derived(targets ?? chosen.map((c) => c.id));
-  // A change of fixed things can clear every permission (that removes the access); a new grant needs one each.
-  const canSubmit = $derived(targets ? targets.length > 0 : chosen.length > 0 && missing.length === 0 && badAddresses.length === 0);
+  const ids = $derived(targets ?? sending.map((c) => c.id));
+  // A change of fixed things can clear every permission (that removes the access); a thing of the list needs one each.
+  const canSubmit = $derived(
+    targets ? targets.length > 0 : sending.length > 0 && missing.length === 0 && badAddresses.length === 0,
+  );
   const submit = () =>
     onGive(
       targets
         ? targets.map((t) => ({ id: t, perms }))
-        : chosen.map((c) => ({ id: c.id, perms: c.perms, kind: c.kind ?? "grant", value: c.value?.trim(), note: c.note?.trim() })),
+        : sending.map((c) => ({ id: c.id, perms: c.perms, kind: c.kind ?? "grant", value: c.value?.trim(), note: c.note?.trim(), had: c.has })),
     );
 </script>
 
@@ -416,13 +453,14 @@
           <ul class="flex flex-col gap-1" aria-label="Available {noun[1]}">
             {#each found as c (c.id)}
               {@const isAdded = c.kind !== "address" && chosenIds.has(c.id)}
-              {@const has = excluded.has(c.id)}
+              {@const has = locked(c)}
+              {@const detail = [c.has ? holds(c.has) : "", c.detail ?? ""].filter(Boolean).join(" · ")}
               <li>
                 <div
                   role="button"
                   tabindex={has ? -1 : 0}
                   aria-disabled={has}
-                  aria-label={has ? `${c.label}: has access` : isAdded ? `${c.label}: added, show it` : `Add ${c.label}`}
+                  aria-label={has ? `${c.label}: ${c.fixed ?? "has access"}` : isAdded ? `${c.label}: added, show it` : c.has ? `Change ${c.label}: ${holds(c.has).toLowerCase()}` : `Add ${c.label}`}
                   draggable={!isAdded && !has}
                   ondragstart={(e) => dragStart(e, c)}
                   ondragend={dragEnd}
@@ -438,10 +476,10 @@
                   {#if leading}<span class="flex shrink-0 items-center">{@render leading(c)}</span>{/if}
                   <span class="flex min-w-0 flex-1 flex-col">
                     <span class="truncate text-label {isAdded || has ? 'font-normal' : ''}">{c.label}</span>
-                    {#if c.detail}<span class="truncate text-meta text-muted-foreground">{c.detail}</span>{/if}
+                    {#if detail}<span class="truncate text-meta text-muted-foreground" title={detail}>{detail}</span>{/if}
                   </span>
                   {#if has}
-                    <span class="shrink-0 text-meta text-muted-foreground">Has access</span>
+                    <span class="shrink-0 text-meta text-muted-foreground">{c.fixed ?? "Has access"}</span>
                   {:else if isAdded}
                     <span class="flex shrink-0 items-center gap-1 text-meta text-muted-foreground"><CheckIcon class="size-4" aria-hidden="true" />Added</span>
                   {:else}
@@ -595,6 +633,7 @@
                       <span class="flex min-w-0 flex-1 flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
                         <span class="truncate text-label">{c.label}</span>
                         <span class="flex flex-wrap gap-1">{@render summary(c.perms)}</span>
+                        {#if c.has}<span class="text-meta text-muted-foreground">{changes(c) ? `${holds(c.has)} now` : "No change"}</span>{/if}
                       </span>
                     </button>
                     <Button
@@ -630,7 +669,10 @@
           <p class="flex items-center gap-2 border-t px-4 py-2 text-meta text-warning">
             <TriangleAlertIcon class="size-4 shrink-0" aria-hidden="true" />
             {missing.length === 1 ? `${missing[0].label} has` : `${count(missing.length, noun[0], noun[1])} have`} no permission yet: pick one or remove {missing.length === 1 ? "it" : "them"}.
+            {#if cleared.length}To take away an access, use Remove in the list.{/if}
           </p>
+        {:else if chosen.length && !sending.length}
+          <p class="border-t px-4 py-2 text-meta text-muted-foreground">Nothing changes yet: open a card to change its permissions.</p>
         {/if}
         {#if badAddresses.length}
           <p class="flex items-center gap-2 border-t px-4 py-2 text-meta text-warning">

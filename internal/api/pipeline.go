@@ -103,14 +103,16 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 		return
 	}
 	ctx := r.Context()
+	found, err := a.repos.ByNames(ctx, names)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
 	all := make([]*repos.Repo, 0, len(names))
 	for _, name := range names {
-		repo, err := a.repos.ByName(ctx, name)
-		if errors.Is(err, repos.ErrNotFound) {
-			err = &repos.MissingError{Kind: "repository", Name: name}
-		}
-		if err != nil {
-			route.Fail(w, r, err)
+		repo := found[name]
+		if repo == nil {
+			route.Fail(w, r, &repos.MissingError{Kind: "repository", Name: name})
 			return
 		}
 		if repo.Op != nil {
@@ -120,7 +122,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 		all = append(all, repo)
 	}
 	started := make([]*ops.Op, len(all))
-	err := a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	err = a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		for i, repo := range all {
 			op, err := a.ops.Begin(ctx, tx, repo.ID, ops.TypeDelete, "core", "", ops.Running, c.P.UserID)
 			if errors.Is(err, ops.ErrBusy) {
@@ -239,10 +241,18 @@ func (a *API) resumeDeletes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	ids := make([]int64, len(running))
+	for i, op := range running {
+		ids[i] = op.RepoID
+	}
+	byID, err := a.repos.ByIDs(ctx, ids) // the repos of every running delete: one query
+	if err != nil {
+		return err
+	}
 	for _, op := range running {
-		repo, err := a.repos.ByID(ctx, op.RepoID)
-		if err != nil {
-			return err
+		repo, ok := byID[op.RepoID]
+		if !ok {
+			return repos.ErrNotFound
 		}
 		a.startDelete(repo, op)
 	}

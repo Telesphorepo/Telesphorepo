@@ -3,7 +3,6 @@ package assets
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"slices"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -128,15 +127,14 @@ func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hoo
 	err := p.db.Tx(ctx, func(tx *sql.Tx) error {
 		removed, follow = removed[:0], follow[:0]
 		q := dbq.New(tx)
+		have, err := getAll(ctx, q, repo.ID, paths) // the rows of the batch: one query
+		if err != nil {
+			return err
+		}
 		for _, x := range paths {
-			a, err := get(ctx, q, repo.ID, x)
-			if errors.Is(err, ErrNotFound) {
-				continue
+			if a := have[x]; a != nil {
+				removed = append(removed, a)
 			}
-			if err != nil {
-				return err
-			}
-			removed = append(removed, a)
 		}
 		if len(removed) == 0 {
 			return nil

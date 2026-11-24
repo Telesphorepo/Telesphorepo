@@ -168,34 +168,46 @@ func (a *API) published(ctx context.Context, v visible, limit int) ([]*repos.Rep
 
 // repoItems is the JSON of the repos of one page that p sees (a repo without a permission is left
 // out): the caller's permissions, the downloads of the window, and a group's counters. The config
-// is left out: GET /api/repos/{name} has it.
+// is left out: GET /api/repos/{name} has it. ctx of r holds p's grants (visibleTo), so the
+// permissions read no row; the downloads are one query, and the groups' members and counters two,
+// whatever the size of the page.
 func (a *API) repoItems(r *http.Request, p *auth.Principal, page []*repos.Repo) ([]repoJSON, error) {
 	ctx := r.Context()
-	ids := make([]int64, len(page))
+	ids := make([]int64, 0, len(page))
+	perms := make([]perm.Set, len(page))
+	var groups []*repos.Repo
 	for i, repo := range page {
-		ids[i] = repo.ID
+		set, err := a.access.RepoPerms(ctx, p, repo)
+		if err != nil {
+			return nil, err
+		}
+		if perms[i] = set; set.Empty() {
+			continue
+		}
+		ids = append(ids, repo.ID)
+		if repo.Kind == repos.KindGroup {
+			groups = append(groups, repo)
+		}
 	}
 	recent, err := a.recentDownloads(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]repoJSON, 0, len(page))
-	for _, repo := range page {
-		perms, err := a.access.RepoPerms(ctx, p, repo)
-		if err != nil {
-			return nil, err
-		}
-		if perms.Empty() {
+	counts, err := a.groupCounters(r, p, groups)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]repoJSON, 0, len(ids))
+	for i, repo := range page {
+		if perms[i].Empty() {
 			continue
 		}
-		j := a.toRepoJSON(repo, perms)
+		j := a.toRepoJSON(repo, perms[i])
 		j.Config = nil
 		n := recent[repo.ID]
 		j.Downloads = &n
 		if repo.Kind == repos.KindGroup {
-			if err := a.groupCounters(r, p, repo, &j); err != nil {
-				return nil, err
-			}
+			setCounters(&j, counts[repo.ID])
 		}
 		out = append(out, j)
 	}
@@ -203,8 +215,8 @@ func (a *API) repoItems(r *http.Request, p *auth.Principal, page []*repos.Repo) 
 }
 
 // recentDownloads returns the downloads of the repos of ids in the window of the download counters
-// (the last 30 days), as the last flush wrote them: one seek of download_window_repos per repo. A
-// repo without downloads has no entry.
+// (the last 30 days), as the last flush wrote them: one query of download_window_repos for the
+// page. A repo without downloads has no entry.
 func (a *API) recentDownloads(ctx context.Context, ids []int64) (map[int64]int64, error) {
 	return a.h.Downloads.Recent(ctx, ids)
 }

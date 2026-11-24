@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
-	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
@@ -183,26 +182,21 @@ func (m *mod) create(w http.ResponseWriter, r *http.Request, c *route.Call) {
 }
 
 // exists reports whether file p is in the repo of c: in a group, in a member that the caller
-// reads through the group.
+// reads through the group (one query of every member).
 func (m *mod) exists(r *http.Request, c *route.Call, p string) (bool, error) {
-	in := []*repos.Repo{c.Repo}
+	ids := []int64{c.Repo.ID}
 	if c.Repo.Kind == repos.KindGroup {
 		members, err := m.h.Access.GroupMembers(r.Context(), r, c.P, c.Repo)
 		if err != nil {
 			return false, err
 		}
-		in = members
-	}
-	for _, repo := range in {
-		_, err := m.h.Assets.Get(r.Context(), repo.ID, p)
-		if err == nil {
-			return true, nil
-		}
-		if !errors.Is(err, assets.ErrNotFound) {
-			return false, err
+		ids = ids[:0]
+		for _, mb := range members {
+			ids = append(ids, mb.ID)
 		}
 	}
-	return false, nil
+	stored, err := m.h.Assets.GetAt(r.Context(), ids, p)
+	return len(stored) > 0, err
 }
 
 // errNoKey: links.secret is set empty by the environment.

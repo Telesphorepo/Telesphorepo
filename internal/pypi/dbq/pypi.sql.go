@@ -44,18 +44,19 @@ func (q *Queries) BumpProject(ctx context.Context, arg BumpProjectParams) error 
 }
 
 const clearMetadata = `-- name: ClearMetadata :many
-UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ? AND filename = ?
+UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ?1 AND filename IN (SELECT value FROM json_each(?2))
 RETURNING project
 `
 
 type ClearMetadataParams struct {
-	RepoID   int64
-	Filename string
+	RepoID    int64
+	Filenames interface{}
 }
 
-// A deleted .metadata sibling: the file no longer advertises it.
+// The deleted .metadata siblings of a remove batch (a JSON array of the filenames of their
+// files): the files no longer advertise them. Through the UNIQUE (repo_id, filename) index.
 func (q *Queries) ClearMetadata(ctx context.Context, arg ClearMetadataParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, clearMetadata, arg.RepoID, arg.Filename)
+	rows, err := q.db.QueryContext(ctx, clearMetadata, arg.RepoID, arg.Filenames)
 	if err != nil {
 		return nil, err
 	}
@@ -77,24 +78,30 @@ func (q *Queries) ClearMetadata(ctx context.Context, arg ClearMetadataParams) ([
 	return items, nil
 }
 
-const deleteFilesOfAsset = `-- name: DeleteFilesOfAsset :many
-DELETE FROM pypi_files WHERE asset_id = ? RETURNING project
+const deleteFilesOfAssets = `-- name: DeleteFilesOfAssets :many
+DELETE FROM pypi_files WHERE asset_id IN (SELECT value FROM json_each(?1)) RETURNING asset_id, project
 `
 
-// Removes the file rows of a deleted asset, through pypi_files_asset.
-func (q *Queries) DeleteFilesOfAsset(ctx context.Context, assetID int64) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, deleteFilesOfAsset, assetID)
+type DeleteFilesOfAssetsRow struct {
+	AssetID int64
+	Project string
+}
+
+// Removes the file rows of the deleted assets of a remove batch (a JSON array of ids), through
+// pypi_files_asset.
+func (q *Queries) DeleteFilesOfAssets(ctx context.Context, assetIds interface{}) ([]DeleteFilesOfAssetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, deleteFilesOfAssets, assetIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []string
+	var items []DeleteFilesOfAssetsRow
 	for rows.Next() {
-		var project string
-		if err := rows.Scan(&project); err != nil {
+		var i DeleteFilesOfAssetsRow
+		if err := rows.Scan(&i.AssetID, &i.Project); err != nil {
 			return nil, err
 		}
-		items = append(items, project)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -317,18 +324,20 @@ func (q *Queries) ListProjects(ctx context.Context, repoID int64) ([]ListProject
 }
 
 const listVersionFiles = `-- name: ListVersionFiles :many
-SELECT f.version, f.filename, f.path, f.sha256, f.size, a.updated_at, a.build_id
+SELECT f.sort_key, f.version, f.filename, f.path, f.sha256, f.size, a.updated_at, a.build_id
 FROM pypi_files f JOIN assets a ON a.id = f.asset_id
-WHERE f.repo_id = ? AND f.project = ? AND f.sort_key = ?
+WHERE f.repo_id = ?1 AND f.project = ?2 AND f.sort_key >= ?3 AND f.sort_key <= ?4
 `
 
 type ListVersionFilesParams struct {
 	RepoID  int64
 	Project string
-	SortKey string
+	Lower   string
+	Upper   string
 }
 
 type ListVersionFilesRow struct {
+	SortKey   string
 	Version   string
 	Filename  string
 	Path      string
@@ -338,9 +347,15 @@ type ListVersionFilesRow struct {
 	BuildID   sql.NullInt64
 }
 
-// The files of one version with the time and the publish session of each.
+// The files of the versions of a project from one sort key through another (one version, or a
+// page of them), with the time and the publish session of each, through pypi_files_project.
 func (q *Queries) ListVersionFiles(ctx context.Context, arg ListVersionFilesParams) ([]ListVersionFilesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listVersionFiles, arg.RepoID, arg.Project, arg.SortKey)
+	rows, err := q.db.QueryContext(ctx, listVersionFiles,
+		arg.RepoID,
+		arg.Project,
+		arg.Lower,
+		arg.Upper,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +364,7 @@ func (q *Queries) ListVersionFiles(ctx context.Context, arg ListVersionFilesPara
 	for rows.Next() {
 		var i ListVersionFilesRow
 		if err := rows.Scan(
+			&i.SortKey,
 			&i.Version,
 			&i.Filename,
 			&i.Path,

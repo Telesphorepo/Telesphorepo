@@ -3,6 +3,7 @@ package nexus
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -429,39 +430,22 @@ func syncRow(row dbq.GetNexusSyncRow, err error) (dbq.GetNexusSyncRow, error) {
 
 // Sync returns sync id with its repos.
 func (s *Service) Sync(ctx context.Context, id int64) (*Sync, error) {
-	row, err := syncRow(dbq.New(s.db.R).GetNexusSync(ctx, id))
+	q := dbq.New(s.db.R)
+	row, err := syncRow(q.GetNexusSync(ctx, id))
 	if err != nil {
 		return nil, err
 	}
-	return s.toSync(ctx, row, true)
-}
-
-// toSync converts a row and sums its repos' counters; withRepos also lists them with the
-// checked count of each one's previous walk.
-func (s *Service) toSync(ctx context.Context, row dbq.GetNexusSyncRow, withRepos bool) (*Sync, error) {
-	sy := &Sync{ID: row.ID, SourceID: row.SourceID, State: row.State, Trigger: row.Trigger,
-		StartedBy: row.StartedByName, StartedAt: time.Unix(row.StartedAt, 0).UTC(), Error: row.Error}
-	if row.FinishedAt.Valid {
-		t := time.Unix(row.FinishedAt.Int64, 0).UTC()
-		sy.FinishedAt = &t
+	out, err := s.toSyncs(ctx, []dbq.GetNexusSyncRow{row}, false)
+	if err != nil {
+		return nil, err
 	}
-	q := dbq.New(s.db.R)
-	if row.Trigger == TriggerCutover {
-		switch m, err := q.GetNexusMergeBySync(ctx, row.ID); {
-		case err == nil:
-			sy.MergeID, sy.MergeFrom, sy.MergeInto = m.ID, m.SourceName, m.TargetName
-		case !errors.Is(err, sql.ErrNoRows):
-			return nil, err
-		}
-	}
-	rs, err := q.ListNexusSyncRepos(ctx, row.ID)
+	sy := &out[0]
+	rs, err := q.ListNexusSyncReposDetail(ctx, dbq.ListNexusSyncReposDetailParams{SourceID: row.SourceID, SyncID: row.ID})
 	if err != nil {
 		return nil, err
 	}
 	sy.RepoCount = len(rs)
-	if withRepos {
-		sy.Repos = make([]SyncRepo, 0, len(rs))
-	}
+	sy.Repos = make([]SyncRepo, 0, len(rs))
 	for _, r := range rs {
 		sy.Checked += r.Checked
 		sy.Imported += r.Imported
@@ -475,33 +459,78 @@ func (s *Service) toSync(ctx context.Context, row dbq.GetNexusSyncRow, withRepos
 		case SyncDone, SyncFailed, SyncCancelled:
 			sy.ReposDone++
 		}
-		if !withRepos {
-			continue
-		}
-		target := ""
-		if t, err := s.repos.ByID(ctx, r.TargetRepoID); err == nil {
-			target = t.Name
-		} else if !errors.Is(err, repos.ErrNotFound) {
-			return nil, err
-		}
-		out := SyncRepo{SourceRepo: r.SourceRepo, SourceFormat: r.SourceFormat, Target: target,
+		sr := SyncRepo{SourceRepo: r.SourceRepo, SourceFormat: r.SourceFormat, Target: r.Target,
 			State: r.State, Error: r.Error, Checked: r.Checked, Imported: r.Imported, Skipped: r.Skipped,
-			Ignored: r.Ignored, Failed: r.Failed, Bytes: r.Bytes}
+			Ignored: r.Ignored, Failed: r.Failed, Bytes: r.Bytes, PreviousChecked: r.PreviousChecked}
 		if r.ActiveAt > 0 {
 			t := time.Unix(r.ActiveAt, 0).UTC()
-			out.ActiveAt = &t
+			sr.ActiveAt = &t
 		}
-		prev, err := q.PreviousNexusChecked(ctx, dbq.PreviousNexusCheckedParams{SourceRepo: r.SourceRepo,
-			SourceID: row.SourceID, Before: row.ID})
-		switch {
-		case err == nil:
-			out.PreviousChecked = prev
-		case !errors.Is(err, sql.ErrNoRows):
-			return nil, err
-		}
-		sy.Repos = append(sy.Repos, out)
+		sy.Repos = append(sy.Repos, sr)
 	}
 	return sy, nil
+}
+
+// toSyncs converts rows, without the repos, and with sums their repos' counters: one query for
+// the sums of every row and one for the merges of the cut-over syncs.
+func (s *Service) toSyncs(ctx context.Context, rows []dbq.GetNexusSyncRow, sums bool) ([]Sync, error) {
+	out := make([]Sync, 0, len(rows))
+	if len(rows) == 0 {
+		return out, nil
+	}
+	q := dbq.New(s.db.R)
+	ids := make([]int64, len(rows))
+	var cutovers []int64
+	for i, row := range rows {
+		ids[i] = row.ID
+		if row.Trigger == TriggerCutover {
+			cutovers = append(cutovers, row.ID)
+		}
+	}
+	sumOf := map[int64]dbq.SumNexusSyncReposRow{}
+	if sums {
+		rs, err := q.SumNexusSyncRepos(ctx, idsJSON(ids))
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rs {
+			sumOf[r.SyncID] = r
+		}
+	}
+	mergeOf := map[int64]dbq.ListNexusMergesBySyncsRow{}
+	if len(cutovers) > 0 {
+		ms, err := q.ListNexusMergesBySyncs(ctx, idsJSON(cutovers))
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range ms {
+			if m.ID > mergeOf[m.SyncID].ID { // the newest merge of the sync
+				mergeOf[m.SyncID] = m
+			}
+		}
+	}
+	for _, row := range rows {
+		sy := Sync{ID: row.ID, SourceID: row.SourceID, State: row.State, Trigger: row.Trigger,
+			StartedBy: row.StartedByName, StartedAt: time.Unix(row.StartedAt, 0).UTC(), Error: row.Error}
+		if row.FinishedAt.Valid {
+			t := time.Unix(row.FinishedAt.Int64, 0).UTC()
+			sy.FinishedAt = &t
+		}
+		if m, ok := mergeOf[row.ID]; ok {
+			sy.MergeID, sy.MergeFrom, sy.MergeInto = m.ID, m.SourceName, m.TargetName
+		}
+		r := sumOf[row.ID]
+		sy.Checked, sy.Imported, sy.Skipped, sy.Ignored, sy.Failed, sy.Bytes = r.Checked, r.Imported, r.Skipped, r.Ignored, r.Failed, r.Bytes
+		sy.RepoCount, sy.ReposDone, sy.CurrentRepo = int(r.Repos), int(r.Done), r.CurrentRepo
+		out = append(out, sy)
+	}
+	return out, nil
+}
+
+// idsJSON is ids as a JSON array, for a query that reads it with json_each.
+func idsJSON(ids []int64) string {
+	b, _ := json.Marshal(ids)
+	return string(b)
 }
 
 // Syncs returns a keyset page of a source's syncs, newest first, with ids below before (0:
@@ -518,13 +547,12 @@ func (s *Service) Syncs(ctx context.Context, sourceID, before int64, limit int) 
 	if err != nil {
 		return nil, 0, err
 	}
-	out = make([]Sync, 0, len(rows))
-	for _, row := range rows {
-		sy, err := s.toSync(ctx, dbq.GetNexusSyncRow(row), false)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, *sy)
+	conv := make([]dbq.GetNexusSyncRow, len(rows))
+	for i, row := range rows {
+		conv[i] = dbq.GetNexusSyncRow(row)
+	}
+	if out, err = s.toSyncs(ctx, conv, true); err != nil {
+		return nil, 0, err
 	}
 	if len(rows) == limit && limit > 0 {
 		next = rows[len(rows)-1].ID
@@ -661,25 +689,12 @@ func (s *Service) finish(ctx context.Context, id, sourceID int64, state, msg, li
 	})
 }
 
-// endRepos ends every repo of sync id that has not ended.
+// endRepos ends every repo of sync id that has not ended, in one statement.
 func endRepos(ctx context.Context, q *dbq.Queries, id int64, state, msg string) error {
-	rs, err := q.ListNexusSyncRepos(ctx, id)
-	if err != nil {
-		return err
+	if state == SyncDone {
+		state = SyncFailed // a repo the runner never ended
 	}
-	for _, r := range rs {
-		if r.State == SyncPending || r.State == SyncRunning {
-			rstate := state
-			if rstate == SyncDone {
-				rstate = SyncFailed // a repo the runner never ended
-			}
-			if err := q.SetNexusSyncRepoState(ctx, dbq.SetNexusSyncRepoStateParams{
-				State: rstate, Error: msg, SyncID: id, SourceRepo: r.SourceRepo}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return q.EndNexusSyncRepos(ctx, dbq.EndNexusSyncReposParams{State: state, Error: msg, SyncID: id})
 }
 
 // switchOver ends the final sync id of a switch-over as done and switches its repos over in one
@@ -704,12 +719,12 @@ func (s *Service) switchOver(ctx context.Context, id, sourceID, failedFiles int6
 		if err != nil {
 			return err
 		}
+		if err := q.InsertNexusSwitchOversOfSync(ctx, dbq.InsertNexusSwitchOversOfSyncParams{SourceID: sourceID,
+			SwitchedAt: now, SyncID: id}); err != nil {
+			return err
+		}
 		var names []string
 		for _, r := range rs {
-			if err := q.InsertNexusSwitchOver(ctx, dbq.InsertNexusSwitchOverParams{SourceID: sourceID, SourceRepo: r.SourceRepo,
-				SyncID: id, Failed: r.Failed, SwitchedAt: now}); err != nil {
-				return err
-			}
 			if err := s.release(ctx, tx, r.TargetRepoID, sourceID); err != nil {
 				return err
 			}
@@ -1041,7 +1056,11 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 			return counts, pr.err.Error()
 		}
 		page := pr.page
-		var fails []dbq.InsertNexusSyncFailureParams
+		type failure struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		}
+		var fails []failure
 		var pageImported, pageBytes int64
 		for i, a := range page.Items {
 			var res itemResult
@@ -1055,8 +1074,7 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 					return counts, ""
 				}
 				counts.Failed++
-				fails = append(fails, dbq.InsertNexusSyncFailureParams{
-					SyncID: r.SyncID, SourceRepo: r.SourceRepo, Path: a.Path, Reason: truncate(res.err.Error(), 1000)})
+				fails = append(fails, failure{Path: a.Path, Reason: truncate(res.err.Error(), 1000)})
 				continue
 			}
 			switch res.out {
@@ -1077,8 +1095,13 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 		wctx := context.WithoutCancel(ctx)
 		err = s.db.Tx(wctx, func(tx *sql.Tx) error {
 			q := dbq.New(tx)
-			for _, f := range fails {
-				if err := q.InsertNexusSyncFailure(wctx, f); err != nil {
+			if len(fails) > 0 {
+				js, err := json.Marshal(fails)
+				if err != nil {
+					return err
+				}
+				if err := q.InsertNexusSyncFailures(wctx, dbq.InsertNexusSyncFailuresParams{SyncID: r.SyncID,
+					SourceRepo: r.SourceRepo, Failures: string(js)}); err != nil {
 					return err
 				}
 			}

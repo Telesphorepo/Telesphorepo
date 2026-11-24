@@ -76,6 +76,11 @@ export const api = {
     /** People: the repositories one person can use, by repository name; with q, the ones whose name holds q. */
     access: (username: string, p?: T.PageParams, q?: string) =>
       request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: { q: q || undefined, ...page(p) } }),
+    /** People: what one person holds on the named repositories (at most 200) that they can use; no next page. */
+    accessTo: async (username: string, names: string[]): Promise<T.UserRepoAccess[]> =>
+      names.length === 0
+        ? []
+        : (await request<T.UserAccess>("GET", `/api/users/${enc(username)}/access?` + names.map((n) => "name=" + enc(n)).join("&"))).items,
     /** people.manage: a new local account with server permissions that the caller holds. */
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
     /** Changes a password: your own, or with People that of a person whose permissions you all hold. */
@@ -285,10 +290,12 @@ export const api = {
     grants: (name: string) => request<T.Permission[]>("GET", repo(name) + "/grants"),
     /**
      * Manage access, Edit settings or CI pipelines: who can download from and publish to the repo,
-     * and from where. admins lists the holders of All repositories too.
+     * and from where. admins lists the holders of All repositories too. q keeps the people, CI
+     * pipelines, network lists and addresses that hold it (names that start with it first); the
+     * sentences are then empty.
      */
-    access: (name: string, opts: { admins?: boolean } = {}) =>
-      request<T.RepoAccess>("GET", repo(name) + "/access", { query: { admins: opts.admins ? "1" : undefined } }),
+    access: (name: string, opts: { admins?: boolean; q?: string } = {}) =>
+      request<T.RepoAccess>("GET", repo(name) + "/access", { query: { admins: opts.admins ? "1" : undefined, q: opts.q || undefined } }),
     /**
      * A signed download link to file path of the repo: its format URL with an expiry and a
      * signature, which reads without a credential until expires_at (ttl seconds, else the server's
@@ -346,7 +353,8 @@ export const api = {
 
   /** Signing keys: keys that sign the indexes of repositories. */
   signingKeys: {
-    list: () => request<T.SigningKey[]>("GET", "/api/signing-keys"),
+    /** Every key by name; with q, the keys whose name holds q (names that start with it first), or whose fingerprint holds it when it is a key ID (8 hex digits or more, spaces aside). */
+    list: (q?: string) => request<T.SigningKey[]>("GET", "/api/signing-keys", { query: { q: q || undefined } }),
     get: (name: string) => request<T.SigningKey>("GET", `/api/signing-keys/${enc(name)}`),
     /** {name} creates a new key; {name, armored, passphrase?} imports one. */
     create: (k: T.NewSigningKey) => request<T.SigningKey>("POST", "/api/signing-keys", { body: k }),
@@ -469,8 +477,8 @@ export const api = {
       request<T.Device>("POST", "/api/devices/approve", { body: { user_code }, proof: proofHeader(proof) }),
     /** Full-page navigation: a new single sign-on that returns to /device?code= with a grant, or with an error. */
     ssoApproveURL: (user_code: string) => `/api/auth/oidc/device?code=${enc(user_code)}`,
-    /** The caller's devices, or every device (with username) for a holder of People; newest first. */
-    list: (p?: T.PageParams) => request<T.Page<T.Device>>("GET", "/api/devices", { query: page(p) }),
+    /** The caller's devices, or every device (with username) for a holder of People; newest first. With q, the devices whose name or owner's username holds q. */
+    list: (p?: T.PageParams, q?: string) => request<T.Page<T.Device>>("GET", "/api/devices", { query: { q: q || undefined, ...page(p) } }),
     revoke: (id: number) => request("DELETE", `/api/devices/${id}`),
   },
 
@@ -512,8 +520,9 @@ export const api = {
     sessions: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/sessions", { query: page(p) }),
     /** Ends a session; authenticates with its own token. */
     closeSession: (id: number, token: string) => request("DELETE", `/api/publish/sessions/${id}`, { token }),
-    /** Activity: every session, newest first. */
-    log: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: page(p) }),
+    /** Activity: every session, newest first; repo keeps one repository's, user one person's (by name). */
+    log: (f: T.PublishLogFilter & T.PageParams = {}) =>
+      request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: { repo: f.repo, user: f.user, ...page(f) } }),
     trusts: {
       /** The CI pipelines the caller manages, or the ones whose name holds q. */
       list: (p?: T.PageParams, q?: string) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: { q, ...page(p) } }),

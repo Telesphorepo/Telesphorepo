@@ -6,7 +6,9 @@
   its rehearsal and moving repositories after its name and its actions at the end: Switch over, Rehearse
   publishing, Move it project by project, Empty it and Delete for a rehearsal, Merge into… for a
   moving repository; a group: waits for its members that still copy, then switched over; a proxy:
-  switched over), saved with one button that also starts a sync; the
+  switched over), saved with one button that also starts a sync; past ten rows a search over it
+  (a name that holds the text; a group also when one of its members' names does) that hides rows
+  but keeps their picks; the
   running or chosen sync with its progress and log; the history of syncs, ten a page; the connection, saved
   from the SaveBar. The parent keys it by id.
 -->
@@ -33,6 +35,7 @@
   import * as Select from "$lib/components/ui/select";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
+  import Toolbar from "$lib/components/Toolbar.svelte";
   import Section from "$lib/components/Section.svelte";
   import { Separator } from "$lib/components/ui/separator";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
@@ -60,6 +63,7 @@
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
   import HistoryIcon from "@lucide/svelte/icons/history";
   import SearchIcon from "@lucide/svelte/icons/search";
+  import SearchXIcon from "@lucide/svelte/icons/search-x";
   import LockIcon from "@lucide/svelte/icons/lock";
   import EllipsisIcon from "@lucide/svelte/icons/ellipsis";
 
@@ -128,10 +132,26 @@
     ...all.filter((r) => !r.supported),
   ]);
   const groupRows = $derived(all.filter((r) => r.supported && isGroup(r)));
-  const shownRows = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    return q ? ordered.filter((r) => r.name.toLowerCase().includes(q)) : ordered;
-  });
+  // The search keeps the rows whose Nexus name or name here holds the text, in the same order, and
+  // a group whose members' names hold it too. The page has every Nexus repository (one response of
+  // GET /api/nexus/sources/{id}), so it filters what it holds and asks nobody.
+  const searching = $derived(query.trim().toLowerCase());
+  const holds = (name: string) => name.toLowerCase().includes(searching);
+  const nexusMembers = (g: NexusSourceRepo) => (g.members_known ? g.members : (opts[g.name]?.members ?? []));
+  const shownRows = $derived(
+    searching ? ordered.filter((r) => holds(r.name) || (!!r.target && holds(r.target)) || (isGroup(r) && nexusMembers(r).some(holds))) : ordered,
+  );
+  const shownNames = $derived(new Set(shownRows.map((r) => r.name)));
+  /**
+   * The pick of the table. While a search hides rows, every pick control (a row, the head checkbox,
+   * Select all, Clear, Esc) changes the rows shown only: a hidden row keeps its pick, since the pick
+   * is what a save copies.
+   */
+  function setPicked(v: Set<string>) {
+    const next = new Set(v);
+    if (searching) for (const n of picked) if (!shownNames.has(n)) next.add(n);
+    picked = next;
+  }
 
   // The pick last seen by the effect below, so it knows which groups were just picked.
   let seenPick = new Set<string>();
@@ -813,23 +833,37 @@
     description="Repositories and proxies are set up first, then the groups that read them. Picking a group picks its members."
     footer={mirroring ? repoFooter : undefined}
   >
-    {#snippet actions()}
-      {#if ordered.length > 10}
-        <InputGroup.Root class="sm:w-64">
-          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-          <InputGroup.Input bind:value={query} type="search" placeholder="Filter by name" aria-label="Filter the Nexus repositories" />
-        </InputGroup.Root>
-      {/if}
-    {/snippet}
     {#if d.nexus_error}
       <div class="mb-4"><ErrorState inline error="Nexus did not list its repositories, so this shows only the copied ones: {d.nexus_error}" /></div>
+    {/if}
+    {#if ordered.length > 10 || query}
+      <Toolbar>
+        <InputGroup.Root class="sm:w-72">
+          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+          <!-- Enter does nothing more: the rows follow every key. -->
+          <InputGroup.Input
+            bind:value={query}
+            type="search"
+            autocomplete="off"
+            spellcheck={false}
+            placeholder="Search by name"
+            aria-label="Search the Nexus repositories by name"
+            onkeydown={(e: KeyboardEvent) => e.key === "Enter" && e.preventDefault()}
+          />
+        </InputGroup.Root>
+        {#snippet end()}
+          {#if searching}
+            <p class="text-meta text-muted-foreground tabular-nums" aria-live="polite">{formatCount(shownRows.length)} of {count(ordered.length, "repository", "repositories")}</p>
+          {/if}
+        {/snippet}
+      </Toolbar>
     {/if}
     <DataTable
       source={repoSource}
       caption="Nexus repositories, proxies and groups, in the order a save sets them up"
       key={(r) => r.name}
       columns={repoColumns}
-      bind:picked
+      bind:picked={() => picked, setPicked}
       {pickable}
       pickLabel={(r) => r.name}
       bulk={mirroring ? bulk : undefined}
@@ -839,7 +873,11 @@
     >
       {#snippet row(r)}{@render repoRow(r)}{/snippet}
       {#snippet empty()}
-        <CompactEmpty icon={ArrowRightLeftIcon} text={query.trim() ? "No Nexus repository has this name." : "Nexus lists no repositories. Check the permissions of the account on the Nexus server."} />
+        {#if searching}
+          <CompactEmpty icon={SearchXIcon} text="No Nexus repository's name holds “{query.trim()}”." />
+        {:else}
+          <CompactEmpty icon={ArrowRightLeftIcon} text="Nexus lists no repositories. Check the permissions of the account on the Nexus server." />
+        {/if}
       {/snippet}
     </DataTable>
 

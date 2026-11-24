@@ -3,6 +3,7 @@ package netrules
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -204,8 +205,12 @@ func (s *Service) SetTrustedLists(ctx context.Context, ids []int64) (Trusted, er
 		if err := q.DeleteTrustedProxyLists(ctx); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if err := q.InsertTrustedProxyList(ctx, id); err != nil {
+		if len(ids) > 0 {
+			js, err := json.Marshal(ids)
+			if err != nil {
+				return err
+			}
+			if err := q.InsertTrustedProxyLists(ctx, string(js)); err != nil {
 				return err
 			}
 		}

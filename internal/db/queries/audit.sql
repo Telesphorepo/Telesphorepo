@@ -4,6 +4,15 @@
 INSERT INTO audit_events (at, actor_user_id, actor, action, repo_id, target, detail, ip)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
+-- The events of one change of a list, in one statement and in their order: events is a JSON array
+-- of objects with the columns (detail as a JSON string).
+-- name: InsertAuditEvents :exec
+INSERT INTO audit_events (at, actor_user_id, actor, action, repo_id, target, detail, ip)
+SELECT json_extract(j.value, '$.at'), json_extract(j.value, '$.actor_user_id'), json_extract(j.value, '$.actor'),
+  json_extract(j.value, '$.action'), json_extract(j.value, '$.repo_id'), json_extract(j.value, '$.target'),
+  json_extract(j.value, '$.detail'), json_extract(j.value, '$.ip')
+FROM json_each(CAST(sqlc.arg(events) AS TEXT)) j;
+
 -- Keyset pages newest first: ids in [since, before). A time range of the Activity filter is an id
 -- range (FirstAuditAt), so every filter keeps its keyset order. Each filter has its own index;
 -- audit_events_actor (actor_user_id) holds the id as its rowid, so it serves (actor_user_id, id).

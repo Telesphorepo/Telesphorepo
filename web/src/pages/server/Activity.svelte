@@ -12,7 +12,9 @@
   got (the publish log), newest first: an icon of where it came from (a CI pipeline, a device, the
   person), who in words, the repository and, for a CI job, its run in short ("acme/app · branch
   main", the whole token subject in the tooltip), and at the end its state ("Active until 14:05",
-  "Expired 2 hours ago", "Closed 5 minutes ago") over when it was issued.
+  "Expired 2 hours ago", "Closed 5 minutes ago") over when it was issued. It filters by repository
+  and by person (?repo=&actor=, GET /api/publish/log?repo=&user=), the filters both views share and
+  keep from one to the other.
 -->
 <script lang="ts">
   import { untrack, type Component } from "svelte";
@@ -80,11 +82,13 @@
   const areaOfAction = (a: string) => areas.find((x) => x.actions.some((y) => y.id === a));
 
   const view = $derived(query.get("view") === "publishing" ? "publishing" : "events");
-  const action = $derived(query.get("action") ?? "");
+  // The repository and the person filter both views; the others only the events.
+  const onEvents = $derived(view === "events");
+  const action = $derived(onEvents ? (query.get("action") ?? "") : "");
   const repo = $derived(query.get("repo") ?? "");
-  const area = $derived(areas.find((a) => a.id === query.get("area")) ?? (action ? areaOfAction(action) : undefined));
+  const area = $derived(onEvents ? (areas.find((a) => a.id === query.get("area")) ?? (action ? areaOfAction(action) : undefined)) : undefined);
   const actor = $derived(query.get("actor") ?? "");
-  const when = $derived(parseWhen(query.get("when")));
+  const when = $derived(onEvents ? parseWhen(query.get("when")) : "");
   const from = $derived(when === "custom" ? (query.get("from") ?? "") : "");
   const to = $derived(when === "custom" ? (query.get("to") ?? "") : "");
   const filtered = $derived(action !== "" || repo !== "" || actor !== "" || when !== "");
@@ -96,7 +100,7 @@
   const events = new Keyset((p) =>
     api.audit({ action: action || undefined, repo: repo || undefined, actor: actor || undefined, ...bounds(when, from, to), ...p }),
   );
-  const sessions = new Keyset((p) => api.publish.log(p));
+  const sessions = new Keyset((p) => api.publish.log({ repo: repo || undefined, user: actor || undefined, ...p }));
   $effect(() => repoFormats.want([repo, ...events.items.map((e) => e.repo ?? ""), ...sessions.items.map((s) => s.repo)]));
 
   // A filter change loads the first page again; the first run is the page's own load.
@@ -114,6 +118,16 @@
     }
     untrack(() => events.reload());
   });
+  let firstSessions = true;
+  $effect(() => {
+    void repo;
+    void actor;
+    if (firstSessions) {
+      firstSessions = false;
+      return;
+    }
+    untrack(() => sessions.reload());
+  });
 
   type Filters = { area?: string; action?: string; repo?: string; actor?: string; when?: When; from?: string; to?: string };
   function setFilter(next: Filters) {
@@ -126,6 +140,7 @@
     const t = w === "custom" ? (next.to ?? to) : "";
     navigate(router.path, {
       query: {
+        view: onEvents ? undefined : view,
         area: ar || undefined,
         action: a || undefined,
         repo: r || undefined,
@@ -145,7 +160,7 @@
       setFilter({ when: w, from: dayValue(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6)), to: dayValue(today) });
     } else setFilter({ when: w });
   }
-  const clear = () => navigate(router.path, { replace: true });
+  const clear = () => navigate(router.path, { query: { view: onEvents ? undefined : view }, replace: true });
   // A quick filter of an open event; a kind of event also picks its area.
   function quickFilter(f: { actor?: string; repo?: string; action?: string }) {
     setFilter(f.action ? { ...f, area: areaOfAction(f.action)?.id ?? "" } : f);
@@ -191,8 +206,8 @@
 <TabNav
   label="Activity"
   items={[
-    { label: "Events", href: href("/settings/activity"), active: view === "events", icon: HistoryIcon },
-    { label: "Publish tokens", href: href("/settings/activity", { view: "publishing" }), active: view === "publishing", icon: UploadIcon },
+    { label: "Events", href: href("/settings/activity", { repo, actor }), active: view === "events", icon: HistoryIcon },
+    { label: "Publish tokens", href: href("/settings/activity", { view: "publishing", repo, actor }), active: view === "publishing", icon: UploadIcon },
   ]}
 />
 
@@ -203,54 +218,57 @@
 {#snippet calendarIcon()}<CalendarIcon class="size-4" />{/snippet}
 
 <Section>
-{#if view === "events"}
   <Toolbar>
-    <Select.Root type="single" value={area?.id ?? "all"} onValueChange={(v) => setFilter({ area: v === "all" ? "" : v, action: "" })}>
-      <Select.Trigger class="w-full sm:w-52" aria-label="Area" icon={area?.icon ? chosenArea : undefined}>
-        <span class="truncate">{area?.label ?? "All areas"}</span>
-      </Select.Trigger>
-      <Select.Content>
-        <Select.Item value="all" label="All areas" inset />
-        {#each areas as a (a.id)}
-          <Select.Item value={a.id} label={a.label}>
-            {#snippet icon()}{@render areaIcon(a)}{/snippet}
-          </Select.Item>
-        {/each}
-      </Select.Content>
-    </Select.Root>
-    {#if area}
-      <Select.Root type="single" value={action || "any"} onValueChange={(v) => setFilter({ action: v === "any" ? "" : v })}>
-        <Select.Trigger class="w-full sm:w-64" aria-label="What happened">
-          <span class={["truncate", !action && "text-muted-foreground"]}>{action ? actionText(action) : "Choose what happened"}</span>
+    {#if onEvents}
+      <Select.Root type="single" value={area?.id ?? "all"} onValueChange={(v) => setFilter({ area: v === "all" ? "" : v, action: "" })}>
+        <Select.Trigger class="w-full sm:w-52" aria-label="Area" icon={area?.icon ? chosenArea : undefined}>
+          <span class="truncate">{area?.label ?? "All areas"}</span>
         </Select.Trigger>
         <Select.Content>
-          {#each area.actions as a (a.id)}
-            <Select.Item value={a.id} label={a.label} />
+          <Select.Item value="all" label="All areas" inset />
+          {#each areas as a (a.id)}
+            <Select.Item value={a.id} label={a.label}>
+              {#snippet icon()}{@render areaIcon(a)}{/snippet}
+            </Select.Item>
           {/each}
         </Select.Content>
       </Select.Root>
+      {#if area}
+        <Select.Root type="single" value={action || "any"} onValueChange={(v) => setFilter({ action: v === "any" ? "" : v })}>
+          <Select.Trigger class="w-full sm:w-64" aria-label="What happened">
+            <span class={["truncate", !action && "text-muted-foreground"]}>{action ? actionText(action) : "Choose what happened"}</span>
+          </Select.Trigger>
+          <Select.Content>
+            {#each area.actions as a (a.id)}
+              <Select.Item value={a.id} label={a.label} />
+            {/each}
+          </Select.Content>
+        </Select.Root>
+      {/if}
     {/if}
     <RepoPicker value={repo} format={formatOf(repo) || undefined} onchange={(r) => setFilter({ repo: r })} />
     <PersonPicker search={(q) => api.auditPeople(q)} value={actor} onchange={(a) => setFilter({ actor: a })} />
-    <Select.Root type="single" value={when || "any"} onValueChange={pickWhen}>
-      <Select.Trigger class="w-full sm:w-44" aria-label="When">
-        <span class="truncate">{when ? (ranges.find((r) => r.value === when)?.label ?? "") : "Any time"}</span>
-      </Select.Trigger>
-      <Select.Content>
-        <Select.Item value="any" label="Any time" />
-        {#each ranges as r (r.value)}
-          <Select.Item value={r.value} label={r.label} />
-        {/each}
-      </Select.Content>
-    </Select.Root>
-    {#if when === "custom"}
-      <div class="flex items-center gap-2">
-        <Input type="date" class="w-full sm:w-40" aria-label="From" value={from} max={to || undefined}
-          onchange={(e) => setFilter({ from: e.currentTarget.value })} />
-        <span class="text-meta" aria-hidden="true">to</span>
-        <Input type="date" class="w-full sm:w-40" aria-label="To" value={to} min={from || undefined}
-          onchange={(e) => setFilter({ to: e.currentTarget.value })} />
-      </div>
+    {#if onEvents}
+      <Select.Root type="single" value={when || "any"} onValueChange={pickWhen}>
+        <Select.Trigger class="w-full sm:w-44" aria-label="When">
+          <span class="truncate">{when ? (ranges.find((r) => r.value === when)?.label ?? "") : "Any time"}</span>
+        </Select.Trigger>
+        <Select.Content>
+          <Select.Item value="any" label="Any time" />
+          {#each ranges as r (r.value)}
+            <Select.Item value={r.value} label={r.label} />
+          {/each}
+        </Select.Content>
+      </Select.Root>
+      {#if when === "custom"}
+        <div class="flex items-center gap-2">
+          <Input type="date" class="w-full sm:w-40" aria-label="From" value={from} max={to || undefined}
+            onchange={(e) => setFilter({ from: e.currentTarget.value })} />
+          <span class="text-meta" aria-hidden="true">to</span>
+          <Input type="date" class="w-full sm:w-40" aria-label="To" value={to} min={from || undefined}
+            onchange={(e) => setFilter({ to: e.currentTarget.value })} />
+        </div>
+      {/if}
     {/if}
   </Toolbar>
 
@@ -274,6 +292,7 @@
     </div>
   {/if}
 
+{#if view === "events"}
   {#if area && !action}
     <!-- The log filters by one action, so an area alone asks which one. -->
     <div class="flex flex-col gap-3">
@@ -351,7 +370,11 @@
       </div>
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={UploadIcon} text="None yet." />
+      {#if filtered}
+        <CompactEmpty icon={FunnelXIcon} text="No publish token matches. Change or clear the filters to see more." />
+      {:else}
+        <CompactEmpty icon={UploadIcon} text="None yet." />
+      {/if}
     {/snippet}
   </ItemList>
 {/if}

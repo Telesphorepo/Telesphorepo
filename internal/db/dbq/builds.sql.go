@@ -9,14 +9,15 @@ import (
 	"context"
 )
 
-const deleteUnusedBuild = `-- name: DeleteUnusedBuild :execrows
-DELETE FROM builds WHERE builds.id = ?1 AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.build_id = ?1)
+const deleteUnusedBuilds = `-- name: DeleteUnusedBuilds :execrows
+DELETE FROM builds WHERE builds.id IN (SELECT value FROM json_each(?1))
+  AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.build_id = builds.id)
 `
 
-// Deletes a build that no file references, through assets_build. A session that names it keeps
-// its row with build_id NULL.
-func (q *Queries) DeleteUnusedBuild(ctx context.Context, build int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteUnusedBuild, build)
+// Deletes the builds of ids (a JSON array) that no file references, through assets_build: a batch
+// of the cleanup in one statement. A session that names one keeps its row with build_id NULL.
+func (q *Queries) DeleteUnusedBuilds(ctx context.Context, ids interface{}) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnusedBuilds, ids)
 	if err != nil {
 		return 0, err
 	}
@@ -47,6 +48,50 @@ func (q *Queries) GetBuild(ctx context.Context, id int64) (Build, error) {
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listBuildsByIDs = `-- name: ListBuildsByIDs :many
+SELECT id, provider, key, repository, revision, ref, ref_name, ref_type, run, workflow, actor, links, created_at
+FROM builds WHERE id IN (SELECT value FROM json_each(?1))
+`
+
+// The builds of a set of ids (a JSON array), through the primary key: the build records of a
+// page in one query.
+func (q *Queries) ListBuildsByIDs(ctx context.Context, ids interface{}) ([]Build, error) {
+	rows, err := q.db.QueryContext(ctx, listBuildsByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Build
+	for rows.Next() {
+		var i Build
+		if err := rows.Scan(
+			&i.ID,
+			&i.Provider,
+			&i.Key,
+			&i.Repository,
+			&i.Revision,
+			&i.Ref,
+			&i.RefName,
+			&i.RefType,
+			&i.Run,
+			&i.Workflow,
+			&i.Actor,
+			&i.Links,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listOldBuilds = `-- name: ListOldBuilds :many

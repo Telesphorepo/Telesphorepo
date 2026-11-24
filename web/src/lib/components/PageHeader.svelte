@@ -75,9 +75,9 @@
         <h1 class="text-title break-words">{title}</h1>
         {#if meta}<div class="flex flex-wrap items-center gap-2">{@render meta()}</div>{/if}
       </div>
-      {#if description}<p class="mt-1.5 max-w-prose text-body text-muted-foreground">{description}</p>{/if}
+      {#if description}<p class="mt-1.5 text-body text-pretty text-muted-foreground">{description}</p>{/if}
       {#if status}
-        <p class="mt-2 flex max-w-prose items-start gap-2 text-meta text-pretty text-muted-foreground [&_svg]:mt-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0">
+        <p class="mt-2 flex items-start gap-2 text-meta text-pretty text-muted-foreground [&_svg]:mt-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0">
           {@render status()}
         </p>
       {/if}

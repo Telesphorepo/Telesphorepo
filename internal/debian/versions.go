@@ -146,6 +146,13 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		return &art, nil, "", nil
 	}
 	prov := h.host.Builds.Loader()
+	ids := make([]int64, len(versions))
+	for i, v := range versions {
+		ids[i] = v.build
+	}
+	if err := prov.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	var out []format.Version
 	for _, v := range versions {
 		if len(out) == limit {
@@ -173,11 +180,11 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 		return nil, nil, nil, "", err
 	}
 	prov := h.host.Builds.Loader()
-	ver, err := v.summary(ctx, prov)
-	if err != nil {
-		return nil, nil, nil, "", err
-	}
 	if limit < 1 {
+		ver, err := v.summary(ctx, prov)
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
 		return &art, ver, nil, "", nil
 	}
 	below := top
@@ -192,19 +199,10 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 		}
 	}
 	var out []format.Build
+	var buildIDs []int64      // the CI build record of each build of out
 	var key []byte            // the build key of the last build of out
-	var buildID int64         // its CI build record
 	seen := map[string]bool{} // its files: a file in several distributions counts once
-	finish := func() error {
-		if len(out) == 0 {
-			return nil
-		}
-		b := &out[len(out)-1]
-		slices.SortFunc(b.Files, func(x, y format.BuildFile) int { return strings.Compare(x.Classifier, y.Classifier) })
-		var err error
-		b.CI, err = prov.Get(ctx, buildID)
-		return err
-	}
+	next := ""
 	for r, err := range h.q.StreamBuilds(ctx, dbq.StreamBuildsParams{RepoID: ref.repoID, Folder: ref.folder, Component: component,
 		Package: pkg, NameKey: v.key, Below: below}) {
 		if err != nil {
@@ -215,16 +213,12 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 				break
 			}
 			if len(out) == limit {
-				if err := finish(); err != nil {
-					return nil, nil, nil, "", err
-				}
-				return &art, ver, out, out[len(out)-1].Build, nil
-			}
-			if err := finish(); err != nil {
-				return nil, nil, nil, "", err
+				next = out[len(out)-1].Build
+				break
 			}
 			out = append(out, format.Build{Build: r.Version})
-			key, buildID, seen = r.BuildKey, 0, map[string]bool{}
+			buildIDs = append(buildIDs, 0)
+			key, seen = r.BuildKey, map[string]bool{}
 		}
 		if seen[r.Filename] {
 			continue
@@ -237,12 +231,24 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 		if at := time.Unix(r.UpdatedAt, 0).UTC(); at.After(b.PublishedAt) {
 			b.PublishedAt = at
 		}
-		if r.BuildID.Valid && buildID == 0 {
-			buildID = r.BuildID.Int64
+		if r.BuildID.Valid && buildIDs[len(out)-1] == 0 {
+			buildIDs[len(out)-1] = r.BuildID.Int64
 		}
 	}
-	if err := finish(); err != nil {
+	// The CI build records of the version and of the builds of the page: one query.
+	if err := prov.Load(ctx, append(buildIDs, v.build)); err != nil {
 		return nil, nil, nil, "", err
 	}
-	return &art, ver, out, "", nil
+	ver, err := v.summary(ctx, prov)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	for i := range out {
+		b := &out[i]
+		slices.SortFunc(b.Files, func(x, y format.BuildFile) int { return strings.Compare(x.Classifier, y.Classifier) })
+		if b.CI, err = prov.Get(ctx, buildIDs[i]); err != nil {
+			return nil, nil, nil, "", err
+		}
+	}
+	return &art, ver, out, next, nil
 }

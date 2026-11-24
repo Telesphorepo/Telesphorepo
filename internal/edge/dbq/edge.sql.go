@@ -176,18 +176,20 @@ func (q *Queries) DeleteWritten(ctx context.Context, key string) error {
 }
 
 const dropRemoved = `-- name: DropRemoved :exec
-DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND timed_out_at = 0
+DELETE FROM edge_outbox WHERE repo_id = ?1 AND path IN (SELECT value FROM json_each(?2))
+  AND timed_out_at = 0
 `
 
 type DropRemovedParams struct {
 	RepoID int64
-	Path   string
+	Paths  interface{}
 }
 
-// The row of a removed path whose pointers Removing deleted in every bucket of the current view.
-// A row with a put of unknown outcome stays, for its second application.
+// The rows of the removed paths of a repo (a JSON array) whose pointers Removing deleted in every
+// bucket of the current view, in one statement. A row with a put of unknown outcome stays, for
+// its second application.
 func (q *Queries) DropRemoved(ctx context.Context, arg DropRemovedParams) error {
-	_, err := q.db.ExecContext(ctx, dropRemoved, arg.RepoID, arg.Path)
+	_, err := q.db.ExecContext(ctx, dropRemoved, arg.RepoID, arg.Paths)
 	return err
 }
 
@@ -410,26 +412,24 @@ func (q *Queries) GetWritten(ctx context.Context, key string) (string, error) {
 	return hash, err
 }
 
-const insertOutbox = `-- name: InsertOutbox :exec
-INSERT INTO edge_outbox (repo_id, path, sha256, due_at, backfill) VALUES (?, ?, ?, ?, 1)
+const insertOutboxes = `-- name: InsertOutboxes :exec
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at, backfill)
+SELECT json_extract(r.value, '$.repo_id'), json_extract(r.value, '$.path'), json_extract(r.value, '$.sha256'),
+  CAST(?1 AS INTEGER), 1
+FROM json_each(?2) r WHERE true
 ON CONFLICT (repo_id, path) DO UPDATE SET backfill = 1
 `
 
-type InsertOutboxParams struct {
-	RepoID int64
-	Path   string
-	Sha256 string
-	DueAt  int64
+type InsertOutboxesParams struct {
+	DueAt int64
+	Rows  interface{}
 }
 
-// A backfill row: a key that is dirty already keeps its row, which the backfill marks.
-func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) error {
-	_, err := q.db.ExecContext(ctx, insertOutbox,
-		arg.RepoID,
-		arg.Path,
-		arg.Sha256,
-		arg.DueAt,
-	)
+// The backfill rows of a page of assets in one statement: rows is a JSON array of
+// {"repo_id", "path", "sha256"}. A key that is dirty already keeps its row, which the backfill
+// marks.
+func (q *Queries) InsertOutboxes(ctx context.Context, arg InsertOutboxesParams) error {
+	_, err := q.db.ExecContext(ctx, insertOutboxes, arg.DueAt, arg.Rows)
 	return err
 }
 
@@ -970,19 +970,20 @@ func (q *Queries) UpsertEdgePaths(ctx context.Context, arg UpsertEdgePathsParams
 	return err
 }
 
-const upsertOutbox = `-- name: UpsertOutbox :exec
+const upsertOutboxes = `-- name: UpsertOutboxes :exec
 
 
-INSERT INTO edge_outbox (repo_id, path, sha256, due_at) VALUES (?, ?, ?, ?)
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at)
+SELECT json_extract(r.value, '$.repo_id'), json_extract(r.value, '$.path'), json_extract(r.value, '$.sha256'),
+  CAST(?1 AS INTEGER)
+FROM json_each(?2) r WHERE true
 ON CONFLICT (repo_id, path) DO UPDATE SET sha256 = excluded.sha256, due_at = excluded.due_at,
   attempts = 0, seq = edge_outbox.seq + 1, error = ''
 `
 
-type UpsertOutboxParams struct {
-	RepoID int64
-	Path   string
-	Sha256 string
-	DueAt  int64
+type UpsertOutboxesParams struct {
+	DueAt int64
+	Rows  interface{}
 }
 
 // The edge module (internal/edge). The outbox, the written access objects and the state are the
@@ -990,14 +991,10 @@ type UpsertOutboxParams struct {
 // objects and the backfill. None of them runs on a request path, except the status route that
 // reads edge_state by key.
 // The outbox ------------------------------------------------------------------------------------
-// A new dirty row, or the replacement of the row of the key. A put that timed out stays known.
-func (q *Queries) UpsertOutbox(ctx context.Context, arg UpsertOutboxParams) error {
-	_, err := q.db.ExecContext(ctx, upsertOutbox,
-		arg.RepoID,
-		arg.Path,
-		arg.Sha256,
-		arg.DueAt,
-	)
+// New dirty rows, or the replacement of the row of each key, in one statement: rows is a JSON
+// array of {"repo_id", "path", "sha256"}. A put that timed out stays known.
+func (q *Queries) UpsertOutboxes(ctx context.Context, arg UpsertOutboxesParams) error {
+	_, err := q.db.ExecContext(ctx, upsertOutboxes, arg.DueAt, arg.Rows)
 	return err
 }
 

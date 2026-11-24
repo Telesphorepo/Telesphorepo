@@ -20,12 +20,12 @@ import (
 // <artifactId>-<version>[-<classifier>].<ext>. A -SNAPSHOT version folder holds timestamped
 // builds, <artifactId>-<base>-<yyyyMMdd.HHmmss>-<n>[-<classifier>].<ext>, and maybe a
 // non-unique build named like a release. The index (index.go) lists the versions and builds; a
-// page of either is one seek past its cursor, and each build on it one range read of its files.
+// page of either is one seek past its cursor, and one query range-reads the files of every
+// build on it.
 
 const (
 	pluginSuffix  = ".gradle.plugin"
 	nonUniqueName = "SNAPSHOT" // the build id of a snapshot file without a timestamp
-	filesPage     = 500        // files of a build that one read takes
 )
 
 // buildRE matches the timestamp and build number at the start of a snapshot file's tail.
@@ -76,35 +76,59 @@ type buildFiles struct {
 	build   int64 // the CI build record of the build's main file, else of any file
 }
 
-// readBuild reads the files of build b of version v (artifactId id) in version folder dir: one
-// range read of the names that start like the build's, page by page.
-func (h *Handler) readBuild(ctx context.Context, repoID int64, dir, id, v, b string) (*buildFiles, error) {
-	out := &buildFiles{id: b}
-	prefix := dir + buildStem(id, v, b)
-	for after := ""; ; {
-		items, next, err := h.assets.List(ctx, repoID, prefix, after, filesPage)
-		if err != nil {
-			return nil, err
+// buildRef names build b of version v (artifactId id) in version folder dir.
+type buildRef struct{ dir, id, v, b string }
+
+func (r buildRef) key() string { return r.dir + "\x00" + r.b }
+
+// readBuilds reads the files of the builds refs, by buildRef.key: one query that range-reads the
+// names that start like each build's, for every build of a page at once. Every ref has an entry,
+// without files when its build has none.
+func (h *Handler) readBuilds(ctx context.Context, repoID int64, refs []buildRef) (map[string]*buildFiles, error) {
+	out := make(map[string]*buildFiles, len(refs))
+	prefixes := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if out[r.key()] != nil {
+			continue
 		}
-		for _, a := range items {
-			f, ok := parseBuildFile(a.Path)
-			if !ok || f.dir != dir || f.build != b {
-				continue
-			}
-			out.classes = append(out.classes, format.BuildFile{Name: a.Path[len(dir):], Path: a.Path, Size: a.Size, SHA256: a.SHA256,
-				Classifier: f.classifier, Extension: f.ext, UpdatedAt: a.UpdatedAt})
-			if a.UpdatedAt.After(out.at) {
-				out.at = a.UpdatedAt
-			}
-			if a.BuildID != 0 && (out.build == 0 || (f.classifier == "" && f.ext == "pom")) {
-				out.build = a.BuildID
-			}
-		}
-		if next == "" {
-			return out, nil
-		}
-		after = next
+		out[r.key()] = &buildFiles{id: r.b}
+		prefixes = append(prefixes, r.dir+buildStem(r.id, r.v, r.b))
 	}
+	return out, h.readFiles(ctx, repoID, prefixes, out)
+}
+
+// readFiles reads the files under prefixes (one query) into the builds of out (by buildRef.key)
+// that they belong to; a file of no build of out is left out.
+func (h *Handler) readFiles(ctx context.Context, repoID int64, prefixes []string, out map[string]*buildFiles) error {
+	rows, err := h.q.ListFilesUnder(ctx, repoID, prefixes)
+	if err != nil {
+		return err
+	}
+	// Path order, as a build lists its files; a path that two prefixes hold comes once.
+	slices.SortStableFunc(rows, func(x, y dbq.RangeFile) int { return strings.Compare(x.Path, y.Path) })
+	for i, a := range rows {
+		if i > 0 && rows[i-1].Path == a.Path {
+			continue
+		}
+		f, ok := parseBuildFile(a.Path)
+		if !ok {
+			continue
+		}
+		bf := out[f.dir+"\x00"+f.build]
+		if bf == nil {
+			continue
+		}
+		at := time.Unix(a.UpdatedAt, 0).UTC()
+		bf.classes = append(bf.classes, format.BuildFile{Name: a.Path[len(f.dir):], Path: a.Path, Size: a.Size, SHA256: a.Sha256,
+			Classifier: f.classifier, Extension: f.ext, UpdatedAt: at})
+		if at.After(bf.at) {
+			bf.at = at
+		}
+		if a.BuildID != 0 && (bf.build == 0 || (f.classifier == "" && f.ext == "pom")) {
+			bf.build = a.BuildID
+		}
+	}
+	return nil
 }
 
 // buildLabel is the name of snapshot build id for people: "Build 3" for "20261003.101010-3",
@@ -120,29 +144,32 @@ func buildLabel(id string) string {
 	return ""
 }
 
-// version summarises version v of artifact folder art (artifactId id), which has count builds,
-// from its newest build. It returns the newest build too; nil when the version has none.
-func (h *Handler) version(ctx context.Context, repoID int64, art, id, v string, count int64, prov *ci.Loader) (*format.Version, *buildFiles, error) {
-	dir := art + v + "/"
-	ids, err := h.q.ListBuildsBelow(ctx, dbq.ListBuildsBelowParams{RepoID: repoID, Folder: dir, SortKey: keyTop, Limit: 1})
-	if err != nil || len(ids) == 0 {
-		return nil, nil, err
+// version summarises version v of artifact folder art, which has count builds, from its newest
+// build; nil when that build has no file. Its CI build record is the Loader's (loaded first).
+func version(ctx context.Context, art, v string, count int64, newest *buildFiles, prov *ci.Loader) (*format.Version, error) {
+	if newest == nil || len(newest.classes) == 0 {
+		return nil, nil
 	}
-	newest, err := h.readBuild(ctx, repoID, dir, id, v, ids[0])
-	if err != nil || len(newest.classes) == 0 {
-		return nil, nil, err
-	}
-	out := &format.Version{Version: v, Kind: format.VersionRelease, Folder: dir, BuildsCount: int(count), PublishedAt: newest.at}
+	out := &format.Version{Version: v, Kind: format.VersionRelease, Folder: art + v + "/", BuildsCount: int(count), PublishedAt: newest.at}
 	if strings.HasSuffix(v, "-SNAPSHOT") {
 		out.Kind, out.LatestBuild, out.LatestLabel = format.VersionSnapshot, newest.id, buildLabel(newest.id)
 	}
-	if out.CI, err = prov.Get(ctx, newest.build); err != nil {
-		return nil, nil, err
-	}
-	return out, newest, nil
+	var err error
+	out.CI, err = prov.Get(ctx, newest.build)
+	return out, err
 }
 
-// Versions lists the versions of an artifact folder: a page of maven_versions below the cursor.
+// loadCI reads the CI build records of the builds of files into prov, in one query.
+func loadCI(ctx context.Context, prov *ci.Loader, files map[string]*buildFiles) error {
+	ids := make([]int64, 0, len(files))
+	for _, bf := range files {
+		ids = append(ids, bf.build)
+	}
+	return prov.Load(ctx, ids)
+}
+
+// Versions lists the versions of an artifact folder: a page of maven_versions below the cursor,
+// the newest build of each (one query) and the files of those builds (one query).
 func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok {
@@ -159,13 +186,39 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 	if len(rows) == 0 && after == "" {
 		return nil, nil, "", nil // no version: not an artifact folder
 	}
+	page := rows[:min(len(rows), max(limit, 0))]
+	dirs := make([]string, len(page))
+	for i, r := range page {
+		dirs[i] = art.Path + r.Version + "/"
+	}
+	newest, err := h.q.NewestBuilds(ctx, from.ID, dirs)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	var refs []buildRef
+	for i, r := range page {
+		if b, ok := newest[dirs[i]]; ok {
+			refs = append(refs, buildRef{dirs[i], id, r.Version, b})
+		}
+	}
+	files, err := h.readBuilds(ctx, from.ID, refs)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	prov := h.host.Builds.Loader()
+	if err := loadCI(ctx, prov, files); err != nil {
+		return nil, nil, "", err
+	}
 	var out []format.Version
 	for i, r := range rows {
 		if i == limit {
 			return &art, out, rows[i-1].Version, nil
 		}
-		ver, _, err := h.version(ctx, from.ID, art.Path, id, r.Version, r.Builds, prov)
+		var bf *buildFiles
+		if b, ok := newest[dirs[i]]; ok {
+			bf = files[buildRef{dirs[i], id, r.Version, b}.key()]
+		}
+		ver, err := version(ctx, art.Path, r.Version, r.Builds, bf, prov)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -177,8 +230,9 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 }
 
 // Builds lists the builds of version v of an artifact folder: a page of maven_builds below the
-// cursor, each with the files of the version folder <artifact folder>/<v>/ that it names. A
-// non-empty build keeps only that build.
+// cursor, each with the files of the version folder <artifact folder>/<v>/ that it names (one
+// query for the builds of the page and the newest build). A non-empty build keeps only that
+// build.
 func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
@@ -191,12 +245,11 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, 
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	prov := h.host.Builds.Loader()
-	ver, newest, err := h.version(ctx, from.ID, art.Path, id, v, row.Builds, prov)
-	if err != nil || ver == nil {
+	dir := art.Path + v + "/"
+	top, err := h.q.ListBuildsBelow(ctx, dbq.ListBuildsBelowParams{RepoID: from.ID, Folder: dir, SortKey: keyTop, Limit: 1})
+	if err != nil || len(top) == 0 {
 		return nil, nil, nil, "", err
 	}
-	dir := ver.Folder
 	var ids []string
 	switch {
 	case build != "":
@@ -215,29 +268,120 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, 
 			return nil, nil, nil, "", err
 		}
 	}
-	var out []format.Build
+	refs := []buildRef{{dir, id, v, top[0]}}
 	for i, b := range ids {
-		if i == limit {
-			return &art, ver, out, ids[i-1], nil
+		if i < limit {
+			refs = append(refs, buildRef{dir, id, v, b})
 		}
-		bf := newest
-		if b != newest.id {
-			if bf, err = h.readBuild(ctx, from.ID, dir, id, v, b); err != nil {
-				return nil, nil, nil, "", err
-			}
-		}
-		if len(bf.classes) == 0 {
+	}
+	files, err := h.readBuilds(ctx, from.ID, refs)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	prov := h.host.Builds.Loader()
+	if err := loadCI(ctx, prov, files); err != nil {
+		return nil, nil, nil, "", err
+	}
+	ver, err := version(ctx, art.Path, v, row.Builds, files[refs[0].key()], prov)
+	if err != nil || ver == nil {
+		return nil, nil, nil, "", err
+	}
+	next := ""
+	if len(ids) > limit {
+		ids, next = ids[:limit], ids[limit-1]
+	}
+	out, err := buildsOf(ctx, dir, id, v, ids, files, prov)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	return &art, ver, out, next, nil
+}
+
+// buildsOf is the format.Build of each build of ids (of version v of artifactId id in version
+// folder dir) that has files in files (by buildRef.key), in the order of ids, with its CI build
+// record from prov (loaded first).
+func buildsOf(ctx context.Context, dir, id, v string, ids []string, files map[string]*buildFiles, prov *ci.Loader) ([]format.Build, error) {
+	var out []format.Build
+	for _, b := range ids {
+		bf := files[buildRef{dir, id, v, b}.key()]
+		if bf == nil || len(bf.classes) == 0 {
 			continue
 		}
 		pv, err := prov.Get(ctx, bf.build)
 		if err != nil {
-			return nil, nil, nil, "", err
+			return nil, err
 		}
 		files := slices.Clone(bf.classes)
 		slices.SortStableFunc(files, func(x, y format.BuildFile) int { return fileRank(x) - fileRank(y) })
 		out = append(out, format.Build{Build: b, Label: buildLabel(b), Files: files, PublishedAt: bf.at, CI: pv})
 	}
-	return &art, ver, out, "", nil
+	return out, nil
+}
+
+// VersionsBuilds returns versions of an artifact folder, each with all its builds, as Builds
+// answers them on one page (format.Spec VersionsBuilds): the version rows, the builds of their
+// folders and the files of those folders, one query each, and their CI build records.
+func (h *Handler) VersionsBuilds(ctx context.Context, _, from *repos.Repo, p string, versions []string) (map[string]format.VersionBuilds, error) {
+	out := map[string]format.VersionBuilds{}
+	art, _, id, ok := artifactOf(p)
+	if !ok {
+		return out, nil
+	}
+	keys := make([][]byte, 0, len(versions))
+	for _, v := range versions {
+		if v != "" && v != "." && v != ".." && !strings.Contains(v, "/") {
+			keys = append(keys, versionKey(v))
+		}
+	}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	rows, err := h.q.ListVersionsIn(ctx, from.ID, art.Path, keys)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make([]string, len(rows))
+	for i, r := range rows {
+		dirs[i] = art.Path + r.Version + "/"
+	}
+	builds, err := h.q.ListBuildsOfAll(ctx, from.ID, dirs)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]*buildFiles{}
+	for i, r := range rows {
+		for _, b := range builds[dirs[i]] {
+			files[buildRef{dirs[i], id, r.Version, b}.key()] = &buildFiles{id: b}
+		}
+	}
+	if err := h.readFiles(ctx, from.ID, dirs, files); err != nil {
+		return nil, err
+	}
+	prov := h.host.Builds.Loader()
+	if err := loadCI(ctx, prov, files); err != nil {
+		return nil, err
+	}
+	for i, r := range rows {
+		ids := builds[dirs[i]]
+		if len(ids) == 0 {
+			continue
+		}
+		slices.SortFunc(ids, func(a, b string) int { return -compareBuilds(a, b) }) // newest first
+		ver, err := version(ctx, art.Path, r.Version, r.Builds, files[buildRef{dirs[i], id, r.Version, ids[0]}.key()], prov)
+		if err != nil {
+			return nil, err
+		}
+		if ver == nil {
+			continue
+		}
+		bs, err := buildsOf(ctx, dirs[i], id, r.Version, ids, files, prov)
+		if err != nil {
+			return nil, err
+		}
+		a := art
+		out[r.Version] = format.VersionBuilds{Artifact: &a, Version: ver, Builds: bs}
+	}
+	return out, nil
 }
 
 // fileRank orders the files of a build: the pom, the main file, the module metadata, then the

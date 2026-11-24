@@ -77,10 +77,10 @@ DELETE FROM deb_index_files WHERE deb_index_files.repo_id = ? AND distribution =
 -- name: GetIndexFileSHA256 :one
 SELECT sha256 FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?;
 
--- Removes the packages of a deleted pool file (one row per dist and component that holds it)
--- through deb_packages_asset.
--- name: DeletePackagesOfAsset :many
-DELETE FROM deb_packages WHERE asset_id = ?
+-- Removes the packages of the deleted pool files of a remove batch (the JSON array of their
+-- asset ids; one row per dist and component that holds a file) through deb_packages_asset.
+-- name: DeletePackagesOfAssets :many
+DELETE FROM deb_packages WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids)))
 RETURNING distribution, component, architecture;
 
 

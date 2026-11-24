@@ -45,34 +45,56 @@ func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error 
 	return err
 }
 
-const deletePackage = `-- name: DeletePackage :exec
-DELETE FROM arch_packages WHERE id = ?
+const deletePackagesOfAssets = `-- name: DeletePackagesOfAssets :many
+DELETE FROM arch_packages WHERE asset_id IN (SELECT value FROM json_each(?1)) RETURNING asset_id
 `
 
-func (q *Queries) DeletePackage(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, deletePackage, id)
-	return err
-}
-
-const entriesOfPackage = `-- name: EntriesOfPackage :many
-SELECT arch, name FROM arch_db_entries WHERE package_id = ?
-`
-
-type EntriesOfPackageRow struct {
-	Arch string
-	Name string
-}
-
-// The index entries that name a package, through arch_db_entries_package.
-func (q *Queries) EntriesOfPackage(ctx context.Context, packageID int64) ([]EntriesOfPackageRow, error) {
-	rows, err := q.db.QueryContext(ctx, entriesOfPackage, packageID)
+// Removes the packages of the deleted files of a remove batch (a JSON array of asset ids), their
+// file lists and entries with them, through arch_packages_asset.
+func (q *Queries) DeletePackagesOfAssets(ctx context.Context, assetIds interface{}) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, deletePackagesOfAssets, assetIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []EntriesOfPackageRow
+	var items []int64
 	for rows.Next() {
-		var i EntriesOfPackageRow
+		var asset_id int64
+		if err := rows.Scan(&asset_id); err != nil {
+			return nil, err
+		}
+		items = append(items, asset_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const entriesOfAssets = `-- name: EntriesOfAssets :many
+SELECT arch, name FROM arch_db_entries
+WHERE package_id IN (SELECT p.id FROM arch_packages p WHERE p.asset_id IN (SELECT value FROM json_each(?1)))
+`
+
+type EntriesOfAssetsRow struct {
+	Arch string
+	Name string
+}
+
+// The index entries that name the packages of the deleted files of a remove batch (a JSON array
+// of asset ids), through arch_packages_asset and arch_db_entries_package.
+func (q *Queries) EntriesOfAssets(ctx context.Context, assetIds interface{}) ([]EntriesOfAssetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, entriesOfAssets, assetIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []EntriesOfAssetsRow
+	for rows.Next() {
+		var i EntriesOfAssetsRow
 		if err := rows.Scan(&i.Arch, &i.Name); err != nil {
 			return nil, err
 		}

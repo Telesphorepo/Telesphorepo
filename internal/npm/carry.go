@@ -22,39 +22,22 @@ func (h *Handler) carry() *format.Carry {
 }
 
 // mergeLabels lists every dist-tag of from with the version that into's tag of the same package
-// names, through the primary keys.
+// names, through the primary keys: one query per page of carryPage tags.
 func (h *Handler) mergeLabels(ctx context.Context, from, into *repos.Repo) ([]format.Label, error) {
 	var out []format.Label
-	owned := map[string]bool{}
-	tags := map[string]map[string]string{}
 	afterName, afterTag := "", ""
 	for {
-		rows, err := h.q.ListRepoTagsAfter(ctx, dbq.ListRepoTagsAfterParams{RepoID: from.ID, Name: afterName, Tag: afterTag, Limit: carryPage})
+		rows, err := h.q.ListRepoTagsAfter(ctx, dbq.ListRepoTagsAfterParams{IntoID: into.ID, RepoID: from.ID, Name: afterName, Tag: afterTag, Limit: carryPage})
 		if err != nil {
 			return nil, err
 		}
 		for _, r := range rows {
-			if _, ok := owned[r.Name]; !ok {
-				_, err := h.q.GetPackage(ctx, dbq.GetPackageParams{RepoID: into.ID, Name: r.Name})
-				switch {
-				case err == nil:
-					owned[r.Name] = true
-					cur, err := h.q.ListTags(ctx, dbq.ListTagsParams{RepoID: into.ID, Name: r.Name})
-					if err != nil {
-						return nil, err
-					}
-					tags[r.Name] = map[string]string{}
-					for _, t := range cur {
-						tags[r.Name][t.Tag] = t.Version
-					}
-				case errors.Is(err, sql.ErrNoRows):
-					owned[r.Name] = false
-				default:
-					return nil, err
-				}
+			target := ""
+			if r.Owned {
+				target = r.Target
 			}
 			out = append(out, format.Label{Key: r.Name + " " + r.Tag, Title: r.Name + ": dist-tag " + r.Tag, Value: r.Version,
-				Target: tags[r.Name][r.Tag], Owned: owned[r.Name]})
+				Target: target, Owned: r.Owned})
 			afterName, afterTag = r.Name, r.Tag
 		}
 		if len(rows) < carryPage {

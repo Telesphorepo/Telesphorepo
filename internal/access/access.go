@@ -19,6 +19,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -124,16 +125,27 @@ func (e *Engine) admins(ctx context.Context) ([]string, error) {
 
 // Report returns the effective access of repo. With listAdmins the holders of the All
 // repositories permission appear in the people of Download and Publish too (via "all_repos").
-func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) (*Repo, error) {
+//
+// A text (folded, namesearch.Text) keeps what holds it in any case: the people by username (the
+// grants of this repo, matched by the query), the holders of All repositories by username, the CI
+// pipelines by name, the IP lists by name or title and the address ranges by range or note; the
+// names that start with it come first. The counts of admins stay those of the whole repo; the
+// sentences and the networks' summary, which describe the whole access, are empty. A search reads
+// this repo's grants, CI pipelines and allowed networks, as a report without a text does.
+func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool, text string) (*Repo, error) {
 	adm, err := e.admins(ctx)
 	if err != nil {
 		return nil, err
 	}
-	grants, err := e.q.ListRepoGrants(ctx, repo.ID)
+	grants, err := e.q.ListRepoGrants(ctx, dbq.ListRepoGrantsParams{RepoID: repo.ID, Text: text})
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(grants, func(a, b dbq.ListRepoGrantsRow) int { return strings.Compare(a.Username, b.Username) })
+	byName := func(a, b string) int { return strings.Compare(a, b) }
+	if text != "" {
+		byName = func(a, b string) int { return namesearch.Compare(text, a, b) }
+	}
+	slices.SortFunc(grants, func(a, b dbq.ListRepoGrantsRow) int { return byName(a.Username, b.Username) })
 	out := &Repo{Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, People: []Person{}}
 	d, p := &out.Download, &out.Publish
 	d.Public, d.People, p.People, p.CI = repo.AnonymousRead, []Person{}, []Person{}, []Pipeline{}
@@ -174,7 +186,13 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 	}
 	if listAdmins {
 		all := g.AllRepo().Strings()
-		for _, u := range adm {
+		listed := adm
+		if text != "" {
+			// The admins are read whole for their count; a search lists the ones it finds.
+			listed = slices.DeleteFunc(slices.Clone(adm), func(u string) bool { return !holds(text, u) })
+			slices.SortFunc(listed, byName)
+		}
+		for _, u := range listed {
 			d.People = append(d.People, Person{u, all, ViaAllRepos})
 			if writable {
 				p.People = append(p.People, Person{u, all, ViaAllRepos})
@@ -187,13 +205,20 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 			return nil, err
 		}
 		p.CI = append(p.CI, ps...)
-		slices.SortFunc(p.CI, func(a, b Pipeline) int { return strings.Compare(a.Rule, b.Rule) })
+		if text != "" {
+			p.CI = slices.DeleteFunc(p.CI, func(c Pipeline) bool { return !holds(text, c.Rule) })
+		}
+		slices.SortFunc(p.CI, func(a, b Pipeline) int { return byName(a.Rule, b.Rule) })
 	}
 	d.Networks = NetworkReport{Lists: []NetworkList{}, CIDRs: []NetworkCIDR{}}
 	if e.networks != nil {
 		d.Networks = e.networks.Describe(repo.ID)
 	}
-	d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
+	if text != "" {
+		d.Networks = matchNetworks(d.Networks, text)
+	} else {
+		d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
+	}
 	d.Notes = []string{}
 	for _, fn := range e.notes {
 		n, err := fn(ctx, repo)
@@ -205,6 +230,37 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 		}
 	}
 	return out, nil
+}
+
+// holds reports whether the folded form of s holds the folded text.
+func holds(text, s string) bool { return strings.Contains(namesearch.Fold(s), text) }
+
+// matchNetworks keeps of n the IP lists whose name or title holds text and the ranges whose range
+// or note holds it, those that start with it first, each part in the order of the rules. The
+// summary is left out: it says all the networks.
+func matchNetworks(n NetworkReport, text string) NetworkReport {
+	out := NetworkReport{Lists: []NetworkList{}, CIDRs: []NetworkCIDR{}}
+	starts := func(s ...string) int {
+		for _, x := range s {
+			if strings.HasPrefix(namesearch.Fold(x), text) {
+				return 0
+			}
+		}
+		return 1
+	}
+	for _, l := range n.Lists {
+		if holds(text, l.Name) || holds(text, l.Title) {
+			out.Lists = append(out.Lists, l)
+		}
+	}
+	for _, c := range n.CIDRs {
+		if holds(text, c.CIDR) || holds(text, c.Note) {
+			out.CIDRs = append(out.CIDRs, c)
+		}
+	}
+	slices.SortStableFunc(out.Lists, func(a, b NetworkList) int { return starts(a.Title, a.Name) - starts(b.Title, b.Name) })
+	slices.SortStableFunc(out.CIDRs, func(a, b NetworkCIDR) int { return starts(a.CIDR, a.Note) - starts(b.CIDR, b.Note) })
+	return out
 }
 
 // --- sentences ---
@@ -351,6 +407,62 @@ type User struct {
 	Repos       []UserRepo `json:"repos"`
 }
 
+// userRepo is the access to r of a user who holds All repositories (allRepos) or the grants sets
+// (by repo id); ok is false when the user cannot use r.
+func userRepo(r *repos.Repo, allRepos bool, sets map[int64]perm.Set) (ur UserRepo, ok bool) {
+	g := perm.Current()
+	ur = UserRepo{Repo: r.Name, Format: r.Format, Kind: r.Kind, Public: r.AnonymousRead}
+	var set perm.Set
+	switch {
+	case allRepos:
+		set, ur.Via = g.AllRepo(), ViaAllRepos
+	case !sets[r.ID].Empty():
+		set, ur.Via = sets[r.ID], ViaPermission
+		if r.AnonymousRead {
+			set = set.Union(perm.SetOf(perm.RepoDownload))
+		}
+	case r.AnonymousRead:
+		set, ur.Via = perm.SetOf(perm.RepoDownload), ViaPublic
+	default:
+		return ur, false
+	}
+	if readOnly(r, Write) {
+		set = set.Minus(g.Dependents(perm.RepoPublish))
+	}
+	ur.Perms = set.Strings()
+	return ur, true
+}
+
+// UserNamed returns u's access to the repos of names (at most a page) that exist and that u can
+// use, by name: one lookup per name and u's grants, as a page of User reads. A disabled user can
+// use none. The grant dialog reads it to show what a person holds on the repos it lists.
+func (e *Engine) UserNamed(ctx context.Context, u *auth.User, names []string) (*User, error) {
+	out := &User{Username: u.Username, Permissions: u.Permissions, Disabled: u.Disabled, Kind: u.Kind,
+		CanPublish: !u.Disabled, Repos: []UserRepo{}}
+	if u.Disabled {
+		return out, nil
+	}
+	allRepos := perm.Current().AllRepos(u.Perms)
+	sets := map[int64]perm.Set{}
+	if !allRepos {
+		var err error
+		if sets, err = e.auth.UserRepoPerms(ctx, u.ID); err != nil {
+			return nil, err
+		}
+	}
+	page, err := e.repos.Named(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(page, func(x, y *repos.Repo) int { return strings.Compare(x.Name, y.Name) })
+	for _, r := range page {
+		if ur, ok := userRepo(r, allRepos, sets); ok {
+			out.Repos = append(out.Repos, ur)
+		}
+	}
+	return out, nil
+}
+
 // User returns a keyset page (by repo name, after the name after) of the repos u can use; with a
 // text (folded, namesearch.Text), the repos whose name holds it, those that start with it first.
 // A disabled user can use none. On a proxy or a group a user holds no publish. next is "" at the
@@ -398,25 +510,10 @@ func (e *Engine) User(ctx context.Context, u *auth.User, text, after string, lim
 			return nil, "", err
 		}
 		for i, r := range page {
-			ur := UserRepo{Repo: r.Name, Format: r.Format, Kind: r.Kind, Public: r.AnonymousRead}
-			var set perm.Set
-			switch {
-			case allRepos:
-				set, ur.Via = g.AllRepo(), ViaAllRepos
-			case !sets[r.ID].Empty():
-				set, ur.Via = sets[r.ID], ViaPermission
-				if r.AnonymousRead {
-					set = set.Union(perm.SetOf(perm.RepoDownload))
-				}
-			case r.AnonymousRead:
-				set, ur.Via = perm.SetOf(perm.RepoDownload), ViaPublic
-			default:
+			ur, ok := userRepo(r, allRepos, sets)
+			if !ok {
 				continue
 			}
-			if readOnly(r, Write) {
-				set = set.Minus(g.Dependents(perm.RepoPublish))
-			}
-			ur.Perms = set.Strings()
 			out.Repos = append(out.Repos, ur)
 			if len(out.Repos) == limit {
 				if i == len(page)-1 && next == "" {

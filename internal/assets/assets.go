@@ -631,27 +631,19 @@ func (p *Pipeline) Seek(ctx context.Context, repoID int64, lower string, inclusi
 }
 
 // Children returns up to limit direct sub-folders of folder dir ("" or ending in "/") of repo, in
-// path order, each with a trailing "/". Each costs one indexed seek.
+// path order, each with a trailing "/": one range of the folder's rows in tree_entries
+// (TreeFolders), whatever the number of sub-folders. With more than limit, they are the first
+// limit in the order of the tree (repopath.NameKey).
 func (p *Pipeline) Children(ctx context.Context, repoID int64, dir string, limit int) ([]string, error) {
-	upper, _ := PrefixEnd(dir)
-	lower, inclusive := dir, true
-	var out []string
-	for len(out) < limit {
-		a, err := p.Seek(ctx, repoID, lower, inclusive, upper)
-		if err != nil || a == nil {
-			return out, err
-		}
-		rest := a.Path[len(dir):]
-		i := strings.IndexByte(rest, '/')
-		if i < 0 {
-			lower, inclusive = a.Path, false
-			continue
-		}
-		sub := dir + rest[:i+1]
-		out = append(out, sub)
-		lower, _ = PrefixEnd(sub)
-		inclusive = true
+	folders, err := p.TreeFolders(ctx, repoID, dir, nil, false, limit)
+	if err != nil {
+		return nil, err
 	}
+	out := make([]string, len(folders))
+	for i, f := range folders {
+		out[i] = dir + f.Name + "/"
+	}
+	slices.Sort(out)
 	return out, nil
 }
 

@@ -4,8 +4,11 @@
 -- read); the text '' keeps every name. The repos of a caller's grants are in dbq/extra.go
 -- (ListReposIn), one lookup per grant.
 
--- name: InsertRepoGram :exec
-INSERT OR REPLACE INTO repo_name_grams (gram, name, format, kind, anonymous) VALUES (?, ?, ?, ?, ?);
+-- The rows of a name in one statement: grams is a JSON array of its grams.
+-- name: InsertRepoGrams :exec
+INSERT OR REPLACE INTO repo_name_grams (gram, name, format, kind, anonymous)
+SELECT j.value, sqlc.arg(name), sqlc.arg(format), sqlc.arg(kind), sqlc.arg(anonymous)
+FROM json_each(CAST(sqlc.arg(grams) AS TEXT)) j;
 
 -- The rows of a name: a seek of the primary key per gram of the name.
 -- name: DeleteRepoGrams :exec
@@ -78,8 +81,10 @@ WHERE g.anonymous = 1 AND g.gram = sqlc.arg(gram) AND g.format = sqlc.arg(format
   AND instr(g.name, sqlc.arg(text)) > 0 AND (CAST(sqlc.arg(kind) AS TEXT) = '' OR r.kind = sqlc.arg(kind))
 ORDER BY g.name LIMIT sqlc.arg(limit);
 
--- name: InsertUserGram :exec
-INSERT OR REPLACE INTO user_name_grams (gram, name, user_id) VALUES (?, ?, ?);
+-- The rows of a username in one statement: grams is a JSON array of its grams.
+-- name: InsertUserGrams :exec
+INSERT OR REPLACE INTO user_name_grams (gram, name, user_id)
+SELECT j.value, sqlc.arg(name), sqlc.arg(user_id) FROM json_each(CAST(sqlc.arg(grams) AS TEXT)) j;
 
 -- name: CountUserGram :one
 SELECT count(*) FROM (SELECT 1 FROM user_name_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));

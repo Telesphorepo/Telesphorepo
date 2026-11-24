@@ -1,6 +1,7 @@
 <!--
-  The Files tab: one panel (a card) whose toolbar holds the folder path and the choice of view, and
-  under it the open folder in that view; on the right the details column. The folder path is a
+  The Files tab: one panel (a card) whose toolbar holds the folder path, Search this repository
+  (Enter opens /search?q=&repo=; not in a group, which has no files of its own) and the choice of
+  view, and under it the open folder in that view; on the right the details column. The folder path is a
   path (slashes, body text) in the panel, so it never reads as the page's breadcrumbs. The column
   shows the selected file, else the open folder: the repository at the top folder, what a plain
   folder holds, or the artifact and its snippets at an artifact or a version folder. It stays while the reader moves between files and folders, so the
@@ -35,6 +36,7 @@
   import type { Crumb } from "$lib/crumbs";
   import { Button } from "$lib/components/ui/button";
   import * as Card from "$lib/components/ui/card";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import Breadcrumbs from "$lib/components/Breadcrumbs.svelte";
   import ViewSwitcher from "$lib/components/ViewSwitcher.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -53,6 +55,7 @@
   import { baseName, parentOf } from "./browse";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
   import XIcon from "@lucide/svelte/icons/x";
+  import SearchIcon from "@lucide/svelte/icons/search";
 
   let {
     repo,
@@ -164,6 +167,17 @@
     const p = place.data ?? (known && known.kind !== "folder" && folder.startsWith(known.artifact.path) ? known : undefined);
     return p && p.kind !== "folder" ? p : null;
   });
+
+  // --- search this repository ---
+  // Enter opens the Search page in this repository. A group has no files of its own to search, so
+  // it has no field (the Search page does not offer a group either).
+  const searchable = $derived(repo.kind !== "group");
+  let searchText = $state("");
+  function searchHere(e: SubmitEvent) {
+    e.preventDefault();
+    const q = searchText.trim();
+    if (q) navigate("/search", { query: { q, repo: repo.name } });
+  }
 
   // --- the pick of the List view ---
   let picked = $state(new Set<string>());
@@ -315,6 +329,22 @@
     <!-- The panel's toolbar: where in the repository, then how to show it. -->
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-2 sm:px-6">
       <div class="min-w-0 flex-1 basis-48 py-1.5"><Breadcrumbs label="Folder" items={crumbs} /></div>
+      {#if searchable}
+        <!-- Its own line under the path on a phone; beside the view from 640px. -->
+        <form role="search" aria-label="Search {repo.name}" class="order-last w-full sm:order-none sm:ml-auto sm:w-56" onsubmit={searchHere}>
+          <InputGroup.Root>
+            <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+            <InputGroup.Input
+              bind:value={searchText}
+              type="search"
+              autocomplete="off"
+              spellcheck={false}
+              placeholder="Search this repository"
+              aria-label="Search the files of {repo.name} by path"
+            />
+          </InputGroup.Root>
+        </form>
+      {/if}
       <div class="ml-auto flex items-center gap-2">
         <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
       </div>

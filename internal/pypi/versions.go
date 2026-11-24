@@ -51,32 +51,45 @@ func sortFiles(files []format.BuildFile) {
 	})
 }
 
-// versionFiles returns the build of version key of project: its files, its time and its CI build
-// record (of the newest file).
-func (h *Handler) versionFiles(ctx context.Context, repo *repos.Repo, project, key string) ([]format.BuildFile, time.Time, int64, error) {
-	rows, err := h.q.ListVersionFiles(ctx, dbq.ListVersionFilesParams{RepoID: repo.ID, Project: project, SortKey: key})
+// versionBuild is the one build of a version: its files, its time and its CI build record (of the
+// newest file).
+type versionBuild struct {
+	files []format.BuildFile
+	at    time.Time
+	build int64
+}
+
+// versionFiles returns the builds of the versions of project from sort key lower through upper,
+// by sort key: one range read of pypi_files_project, for one version or a page of them.
+func (h *Handler) versionFiles(ctx context.Context, repo *repos.Repo, project, lower, upper string) (map[string]*versionBuild, error) {
+	rows, err := h.q.ListVersionFiles(ctx, dbq.ListVersionFilesParams{RepoID: repo.ID, Project: project, Lower: lower, Upper: upper})
 	if err != nil {
-		return nil, time.Time{}, 0, err
+		return nil, err
 	}
-	var files []format.BuildFile
-	var at time.Time
-	var build int64
+	out := map[string]*versionBuild{}
 	for _, x := range rows {
+		vb := out[x.SortKey]
+		if vb == nil {
+			vb = &versionBuild{}
+			out[x.SortKey] = vb
+		}
 		t := time.Unix(x.UpdatedAt, 0).UTC()
 		f := format.BuildFile{Name: x.Filename, Path: x.Path, Size: x.Size, SHA256: x.Sha256, Extension: extOf(x.Filename), UpdatedAt: t}
 		if d, err := parseFilename(x.Filename); err == nil {
 			f.Classifier = d.tags
 		}
-		files = append(files, f)
-		if !t.Before(at) {
-			at = t
+		vb.files = append(vb.files, f)
+		if !t.Before(vb.at) {
+			vb.at = t
 			if x.BuildID.Valid {
-				build = x.BuildID.Int64
+				vb.build = x.BuildID.Int64
 			}
 		}
 	}
-	sortFiles(files)
-	return files, at, build, nil
+	for _, vb := range out {
+		sortFiles(vb.files)
+	}
+	return out, nil
 }
 
 // proxyVersion is a version of a proxy's project page: its sort key, its name (the least of the
@@ -130,27 +143,15 @@ func (h *Handler) proxyProject(ctx context.Context, repo *repos.Repo, dir string
 	return &format.Artifact{Path: "packages/" + n + "/", Title: display, Name: display, Kind: "project"}, out, nil
 }
 
-// stored returns the asset that proxy repo stores at path, or nil.
-func (h *Handler) stored(ctx context.Context, repo *repos.Repo, path string) (*assets.Asset, error) {
-	a, err := h.assets.Get(ctx, repo.ID, path)
-	if errors.Is(err, assets.ErrNotFound) {
-		return nil, nil
-	}
-	return a, err
-}
-
-// proxyRemote reports whether proxy repo stores none of the files of pv.
-func (h *Handler) proxyRemote(ctx context.Context, repo *repos.Repo, pv *proxyVersion) (bool, error) {
-	for _, f := range pv.files {
-		a, err := h.stored(ctx, repo, f.local)
-		if err != nil {
-			return false, err
-		}
-		if a != nil {
-			return false, nil
+// stored returns the assets that proxy repo stores of the files of versions, by path: one query.
+func (h *Handler) stored(ctx context.Context, repo *repos.Repo, versions []*proxyVersion) (map[string]*assets.Asset, error) {
+	var paths []string
+	for _, pv := range versions {
+		for _, f := range pv.files {
+			paths = append(paths, f.local)
 		}
 	}
-	return true, nil
+	return h.assets.GetMany(ctx, repo.ID, paths)
 }
 
 // Versions lists the versions of a project folder, newest first.
@@ -192,15 +193,31 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		rows = rows[:limit]
 		next = rows[limit-1].version
 	}
-	prov := h.host.Builds.Loader()
 	out := make([]format.Version, 0, len(rows))
+	if len(rows) == 0 {
+		return art, out, next, nil
+	}
+	// The files of the page (newest first: its keys run from the last row's through the first's)
+	// and their CI build records: two queries.
+	builds, err := h.versionFiles(ctx, from, project, rows[len(rows)-1].key, rows[0].key)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	prov := h.host.Builds.Loader()
+	ids := make([]int64, 0, len(builds))
+	for _, vb := range builds {
+		ids = append(ids, vb.build)
+	}
+	if err := prov.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	for _, r := range rows {
-		_, at, build, err := h.versionFiles(ctx, from, project, r.key)
-		if err != nil {
-			return nil, nil, "", err
+		vb := builds[r.key]
+		if vb == nil {
+			vb = &versionBuild{}
 		}
-		v := format.Version{Version: r.version, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: at}
-		if v.CI, err = prov.Get(ctx, build); err != nil {
+		v := format.Version{Version: r.version, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: vb.at}
+		if v.CI, err = prov.Get(ctx, vb.build); err != nil {
 			return nil, nil, "", err
 		}
 		out = append(out, v)
@@ -234,12 +251,13 @@ func (h *Handler) proxyVersions(ctx context.Context, repo *repos.Repo, p, after 
 			next = vs[limit-1].version
 		}
 	}
+	stored, err := h.stored(ctx, repo, vs)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	out := make([]format.Version, 0, len(vs))
 	for _, pv := range vs {
-		remote, err := h.proxyRemote(ctx, repo, pv)
-		if err != nil {
-			return nil, nil, "", err
-		}
+		remote := !slices.ContainsFunc(pv.files, func(f mfile) bool { return stored[f.local] != nil })
 		out = append(out, format.Version{Version: pv.version, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: pv.at, Remote: remote})
 	}
 	return art, out, next, nil
@@ -258,10 +276,12 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, id, aft
 	if err != nil {
 		return nil, nil, nil, "", nil
 	}
-	files, at, build, err := h.versionFiles(ctx, from, project, pv.SortKey())
-	if err != nil || len(files) == 0 {
+	builds, err := h.versionFiles(ctx, from, project, pv.SortKey(), pv.SortKey())
+	if err != nil || builds[pv.SortKey()] == nil {
 		return nil, nil, nil, "", err
 	}
+	vb := builds[pv.SortKey()]
+	files, at, build := vb.files, vb.at, vb.build
 	ci, err := h.host.Builds.Loader().Get(ctx, build)
 	if err != nil {
 		return nil, nil, nil, "", err
@@ -291,6 +311,10 @@ func (h *Handler) proxyBuilds(ctx context.Context, repo *repos.Repo, p, v, id, a
 		return nil, nil, nil, "", nil
 	}
 	pv := vs[i]
+	stored, err := h.stored(ctx, repo, []*proxyVersion{pv})
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
 	files := make([]format.BuildFile, 0, len(pv.files))
 	remote := true
 	for _, x := range pv.files {
@@ -298,11 +322,7 @@ func (h *Handler) proxyBuilds(ctx context.Context, repo *repos.Repo, p, v, id, a
 		if d, err := parseFilename(x.filename); err == nil {
 			f.Classifier = d.tags
 		}
-		a, err := h.stored(ctx, repo, x.local)
-		if err != nil {
-			return nil, nil, nil, "", err
-		}
-		if a != nil {
+		if a := stored[x.local]; a != nil {
 			f.Size, f.SHA256, f.UpdatedAt = a.Size, a.SHA256, a.UpdatedAt.UTC()
 			remote = false
 		} else {

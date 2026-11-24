@@ -114,13 +114,14 @@ func (q *Queries) DeleteTreeFolder(ctx context.Context, arg DeleteTreeFolderPara
 	return err
 }
 
-const deleteUnreferencedBlob = `-- name: DeleteUnreferencedBlob :execrows
-DELETE FROM blobs WHERE id = ? AND refs = 0
+const deleteUnreferencedBlobs = `-- name: DeleteUnreferencedBlobs :execrows
+DELETE FROM blobs WHERE id IN (SELECT value FROM json_each(?1)) AND refs = 0
 `
 
-// Deletes a blob row only while no asset points to it.
-func (q *Queries) DeleteUnreferencedBlob(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteUnreferencedBlob, id)
+// Deletes the blob rows of ids (a JSON array) that no asset points to, through the primary key:
+// a round of the GC in one statement.
+func (q *Queries) DeleteUnreferencedBlobs(ctx context.Context, ids interface{}) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnreferencedBlobs, ids)
 	if err != nil {
 		return 0, err
 	}
@@ -243,23 +244,6 @@ func (q *Queries) GetUploadSession(ctx context.Context, id string) (UploadSessio
 		&i.ExpiresAt,
 	)
 	return i, err
-}
-
-const hasTreeFile = `-- name: HasTreeFile :one
-SELECT EXISTS (SELECT 1 FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 1 AND sort_key = ?)
-`
-
-type HasTreeFileParams struct {
-	RepoID  int64
-	Parent  string
-	SortKey []byte
-}
-
-func (q *Queries) HasTreeFile(ctx context.Context, arg HasTreeFileParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, hasTreeFile, arg.RepoID, arg.Parent, arg.SortKey)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
 }
 
 const insertBlob = `-- name: InsertBlob :one
@@ -419,6 +403,63 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 		arg.Upper,
 		arg.Limit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Asset
+	for rows.Next() {
+		var i Asset
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.Path,
+			&i.BlobID,
+			&i.Size,
+			&i.Sha256,
+			&i.ContentType,
+			&i.Kind,
+			&i.UploadedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BuildID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
+			&i.Unit,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAssetsAt = `-- name: ListAssetsAt :many
+SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind, a.uploaded_by, a.created_at,
+  a.updated_at, a.build_id, a.checked_at, a.remote_etag, a.md5, a.sha1, a.unit
+FROM json_each(CAST(?1 AS TEXT)) r CROSS JOIN json_each(CAST(?2 AS TEXT)) p
+CROSS JOIN assets a
+WHERE a.repo_id = r.value AND a.path = p.value
+`
+
+type ListAssetsAtParams struct {
+	Repos string
+	Paths string
+}
+
+// The assets at paths in repos (JSON arrays; the members of a group, the files of a batch), a
+// point lookup of UNIQUE (repo_id, path) per pair in one query. CROSS JOIN keeps assets the inner
+// loop: the planner would otherwise read every asset of a repo and match the paths to them.
+func (q *Queries) ListAssetsAt(ctx context.Context, arg ListAssetsAtParams) ([]Asset, error) {
+	rows, err := q.db.QueryContext(ctx, listAssetsAt, arg.Repos, arg.Paths)
 	if err != nil {
 		return nil, err
 	}
@@ -635,6 +676,51 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 	return items, nil
 }
 
+const listBlobsBySha256 = `-- name: ListBlobsBySha256 :many
+SELECT id, sha256, size, refs, md5, sha1 FROM blobs WHERE sha256 IN (SELECT value FROM json_each(?1))
+`
+
+type ListBlobsBySha256Row struct {
+	ID     int64
+	Sha256 string
+	Size   int64
+	Refs   int64
+	Md5    string
+	Sha1   string
+}
+
+// The blobs of digests (a JSON array), through the UNIQUE sha256: the bodies of a batch commit
+// in one query (blobs.Store.EnsureAll).
+func (q *Queries) ListBlobsBySha256(ctx context.Context, digests interface{}) ([]ListBlobsBySha256Row, error) {
+	rows, err := q.db.QueryContext(ctx, listBlobsBySha256, digests)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBlobsBySha256Row
+	for rows.Next() {
+		var i ListBlobsBySha256Row
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sha256,
+			&i.Size,
+			&i.Refs,
+			&i.Md5,
+			&i.Sha1,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCollectableBlobs = `-- name: ListCollectableBlobs :many
 SELECT id FROM blobs WHERE refs = 0 AND unreferenced_at < ?1 AND id IN (/*SLICE:ids*/?)
 `
@@ -704,6 +790,93 @@ func (q *Queries) ListExpiredUploads(ctx context.Context, arg ListExpiredUploads
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFoldersHeld = `-- name: ListFoldersHeld :many
+SELECT CAST(r.value AS INTEGER) AS repo_id, CAST(json_extract(f.value, '$[0]') AS TEXT) AS folder
+FROM json_each(CAST(?1 AS TEXT)) r JOIN json_each(CAST(?2 AS TEXT)) f
+WHERE EXISTS (SELECT 1 FROM assets a WHERE a.repo_id = r.value
+  AND a.path >= json_extract(f.value, '$[0]') AND a.path < json_extract(f.value, '$[1]'))
+`
+
+type ListFoldersHeldParams struct {
+	Repos   string
+	Folders string
+}
+
+type ListFoldersHeldRow struct {
+	RepoID int64
+	Folder string
+}
+
+// The pairs of repos and folders (JSON arrays; a folder is [lower, upper), its PrefixEnd) where the
+// repo holds a file of the folder: one seek of UNIQUE (repo_id, path) per pair.
+func (q *Queries) ListFoldersHeld(ctx context.Context, arg ListFoldersHeldParams) ([]ListFoldersHeldRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFoldersHeld, arg.Repos, arg.Folders)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFoldersHeldRow
+	for rows.Next() {
+		var i ListFoldersHeldRow
+		if err := rows.Scan(&i.RepoID, &i.Folder); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLastTreeKeys = `-- name: ListLastTreeKeys :many
+SELECT CAST(r.value AS INTEGER) AS repo_id,
+  (SELECT t.sort_key FROM tree_entries t WHERE t.repo_id = r.value AND t.parent = ?1 AND t.kind = 0
+   ORDER BY t.sort_key DESC LIMIT 1) AS last_folder,
+  (SELECT t.sort_key FROM tree_entries t WHERE t.repo_id = r.value AND t.parent = ?1 AND t.kind = 1
+   ORDER BY t.sort_key DESC LIMIT 1) AS last_file
+FROM json_each(CAST(?2 AS TEXT)) r
+`
+
+type ListLastTreeKeysParams struct {
+	Parent string
+	Repos  string
+}
+
+type ListLastTreeKeysRow struct {
+	RepoID     int64
+	LastFolder []byte
+	LastFile   []byte
+}
+
+// The last key of the sub-folders and of the files of folder parent in each repo of repos (a JSON
+// array; the members of a group): two seeks per repo, in one query. NULL for a kind it lacks.
+func (q *Queries) ListLastTreeKeys(ctx context.Context, arg ListLastTreeKeysParams) ([]ListLastTreeKeysRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLastTreeKeys, arg.Parent, arg.Repos)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLastTreeKeysRow
+	for rows.Next() {
+		var i ListLastTreeKeysRow
+		if err := rows.Scan(&i.RepoID, &i.LastFolder, &i.LastFile); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -825,6 +998,50 @@ func (q *Queries) ListTreeFilesDesc(ctx context.Context, arg ListTreeFilesDescPa
 			&i.UpdatedAt,
 			&i.BuildID,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTreeFilesKeyed = `-- name: ListTreeFilesKeyed :many
+SELECT t.repo_id, t.name
+FROM json_each(CAST(?1 AS TEXT)) r CROSS JOIN json_each(CAST(?2 AS TEXT)) k
+CROSS JOIN tree_entries t
+WHERE t.repo_id = r.value AND t.parent = ?3 AND t.kind = 1 AND t.sort_key = unhex(k.value)
+`
+
+type ListTreeFilesKeyedParams struct {
+	Repos  string
+	Keys   string
+	Parent string
+}
+
+type ListTreeFilesKeyedRow struct {
+	RepoID int64
+	Name   string
+}
+
+// The files of folder parent in repos (a JSON array) whose keys (a JSON array of the hex of
+// repopath.NameKey) are in keys: a seek of the primary key per repo and key. CROSS JOIN keeps
+// tree_entries the inner loop, so the folder's other files are never read.
+func (q *Queries) ListTreeFilesKeyed(ctx context.Context, arg ListTreeFilesKeyedParams) ([]ListTreeFilesKeyedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTreeFilesKeyed, arg.Repos, arg.Keys, arg.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTreeFilesKeyedRow
+	for rows.Next() {
+		var i ListTreeFilesKeyedRow
+		if err := rows.Scan(&i.RepoID, &i.Name); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -192,20 +192,34 @@ func (h *Handler) proxyVersions(ctx context.Context, repo *repos.Repo, art forma
 		return &art, nil, "", nil
 	}
 	i, _ := slices.BinarySearchFunc(l.versions, upper, func(rv remoteVersion, k string) int { return strings.Compare(k, rv.key) })
-	var out []format.Version
+	var page []remoteVersion
+	more := false
 	for _, rv := range l.versions[i:] {
 		if rv.key >= upper {
 			continue
 		}
-		if len(out) == limit {
-			return &art, out, out[len(out)-1].Version, nil
+		if len(page) == limit {
+			more = true
+			break
 		}
-		a, err := h.remoteTarball(ctx, repo, pkg, rv)
-		if err != nil {
-			return nil, nil, "", err
-		}
+		page = append(page, rv)
+	}
+	// The tarballs of the page that the proxy stores: one query.
+	paths := make([]string, len(page))
+	for j, rv := range page {
+		paths[j] = pkg + "/-/" + rv.file
+	}
+	stored, err := h.assets.GetMany(ctx, repo.ID, paths)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	var out []format.Version
+	for j, rv := range page {
 		out = append(out, format.Version{Version: rv.version, Kind: format.VersionRelease, BuildsCount: 1,
-			PublishedAt: rv.published, Remote: a == nil})
+			PublishedAt: rv.published, Remote: stored[paths[j]] == nil})
+	}
+	if more {
+		return &art, out, out[len(out)-1].Version, nil
 	}
 	return &art, out, "", nil
 }

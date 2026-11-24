@@ -165,15 +165,21 @@ func (h *Handler) writeMetadata(ctx context.Context, repo *repos.Repo, mdPath st
 	p := repopath.Path(mdPath)
 	sp := blobs.Bytes(append([]byte(xml.Header), append(body, '\n')...))
 	ws := []assets.Write{{Repo: repo, Path: p, Body: assets.Body{Spool: sp}, Origin: o}}
-	for _, w := range checksumWrites(repo, p, sp, o) {
-		if !sums {
-			if _, err := h.assets.Get(ctx, repo.ID, string(w.Path)); errors.Is(err, assets.ErrNotFound) {
-				continue
-			} else if err != nil {
-				return nil, err
-			}
+	sumWs := checksumWrites(repo, p, sp, o)
+	var have map[string]*assets.Asset // the checksum files that exist: one query
+	if !sums {
+		paths := make([]string, len(sumWs))
+		for i, w := range sumWs {
+			paths[i] = string(w.Path)
 		}
-		ws = append(ws, w)
+		if have, err = h.assets.GetMany(ctx, repo.ID, paths); err != nil {
+			return nil, err
+		}
+	}
+	for _, w := range sumWs {
+		if sums || have[string(w.Path)] != nil {
+			ws = append(ws, w)
+		}
 	}
 	return h.assets.CommitAll(ctx, ws)
 }

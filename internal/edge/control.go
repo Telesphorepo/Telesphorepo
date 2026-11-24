@@ -911,24 +911,28 @@ func (m *mod) backfillHome(ctx context.Context, v *view) (bool, error) {
 			return false, err
 		}
 		now := nowMS()
-		n := int64(0)
-		err = m.h.DB.Tx(ctx, func(tx *sql.Tx) error {
-			n = 0
-			q := dbq.New(tx)
-			for _, a := range rows {
-				repo := cache.get(ctx, m.h.Repos, a.RepoID)
-				if repo == nil || m.edgeOf(repo) == nil || !m.eligible(repo, a.Path) {
-					continue
-				}
-				if err := q.InsertOutbox(ctx, dbq.InsertOutboxParams{RepoID: a.RepoID, Path: a.Path, Sha256: a.Sha256, DueAt: now}); err != nil {
-					return err
-				}
-				n++
+		type row struct {
+			RepoID int64  `json:"repo_id"`
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		}
+		var queue []row
+		for _, a := range rows {
+			repo := cache.get(ctx, m.h.Repos, a.RepoID)
+			if repo == nil || m.edgeOf(repo) == nil || !m.eligible(repo, a.Path) {
+				continue
 			}
-			return nil
-		})
-		if err != nil {
-			return false, err
+			queue = append(queue, row{a.RepoID, a.Path, a.Sha256})
+		}
+		n := int64(len(queue))
+		if n > 0 {
+			js, err := json.Marshal(queue)
+			if err != nil {
+				return false, err
+			}
+			if err := m.q.InsertOutboxes(ctx, dbq.InsertOutboxesParams{DueAt: now, Rows: string(js)}); err != nil {
+				return false, err
+			}
 		}
 		if len(rows) > 0 {
 			m.home.Cursor = rows[len(rows)-1].ID

@@ -63,7 +63,8 @@ func (h *Handler) dropArch(ctx context.Context, repo *repos.Repo, arch string) e
 
 // fill writes the entries of an architecture again from its packages and the any packages: the
 // newest package of each name (the architecture's own on a tie). It merges the two runs of
-// arch_packages_arch in name order, one name at a time, and writes the entries in batches.
+// arch_packages_arch in name order, one name at a time, and writes the entries in batches, one
+// statement each.
 func (h *Handler) fill(ctx context.Context, repo *repos.Repo, arch string) error {
 	type pick struct {
 		id   int64
@@ -86,18 +87,14 @@ func (h *Handler) fill(ctx context.Context, repo *repos.Repo, arch string) error
 		names = append(names, n)
 	}
 	slices.Sort(names)
+	q := dbq.New(h.db.W)
 	for len(names) > 0 {
 		k := min(len(names), entryBatch)
-		err := h.db.Tx(ctx, func(tx *sql.Tx) error {
-			q := dbq.New(tx)
-			for _, n := range names[:k] {
-				if err := q.UpsertEntry(ctx, dbq.UpsertEntryParams{RepoID: repo.ID, Arch: arch, Name: n, PackageID: best[n].id}); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
+		batch := make([]dbq.Entry, k)
+		for i, n := range names[:k] {
+			batch[i] = dbq.Entry{Name: n, PackageID: best[n].id}
+		}
+		if err := q.UpsertEntries(ctx, repo.ID, arch, batch); err != nil {
 			return err
 		}
 		names = names[k:]

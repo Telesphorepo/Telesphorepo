@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 // Op is an operation on one repo. Package access gives the names that callers use
@@ -282,15 +281,19 @@ func (s *Service) verifyBearer(ctx context.Context, tok, upload string) (*Princi
 		return nil, err
 	}
 	p.Scopes = []Scope{}
+	// The scopes name the repos as they were named at issue: a redirect of one now resolves to it.
+	// The repos of every scope are read in one lookup of the list.
+	names := make([]string, len(pl.Scopes))
+	for i, sc := range pl.Scopes {
+		names[i] = sc.Repo
+	}
+	found, err := s.repos.ByNames(ctx, names)
+	if err != nil {
+		return nil, err
+	}
 	for _, sc := range pl.Scopes {
 		x := Scope{Repo: sc.Repo, Ops: sc.Ops, Session: sc.Session}
-		// The scope names the repo as it was named at issue: a redirect of it now resolves to it.
-		repo, err := s.repos.ByName(ctx, sc.Repo)
-		switch {
-		case errors.Is(err, repos.ErrNotFound):
-		case err != nil:
-			return nil, err
-		default:
+		if repo := found[sc.Repo]; repo != nil {
 			x.RepoID = repo.ID
 		}
 		if sc.Session != 0 {

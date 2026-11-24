@@ -1,20 +1,23 @@
 <!--
   Signing keys (Signing keys permission): the keys that sign the indexes of repositories, and
   which repositories use each one (links to their Signing tab), each key a card with the end of its
-  fingerprint. With two keys or more, a select over the cards keeps the keys of one repository
-  that uses a key. Download a public key; delete a key that no repository uses. New signing key opens
-  a page that creates or imports one.
+  fingerprint. With two keys or more, a search field over the cards keeps the keys whose name holds
+  what is typed, or whose fingerprint holds a key ID (GET /api/signing-keys?q=, 250 ms after the
+  last key), and a select keeps the keys of one repository that uses a key. Download a public key;
+  delete a key that no repository uses. New signing key opens a page that creates or imports one.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, type SigningKey } from "$lib/api";
-  import { RepoFormats, Resource, listOf } from "$lib/load.svelte";
+  import { RepoFormats, Resource, type TableSource } from "$lib/load.svelte";
   import { groupFingerprint } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
   import * as Select from "$lib/components/ui/select";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -30,18 +33,60 @@
   import FileKeyIcon from "@lucide/svelte/icons/file-key";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import DownloadIcon from "@lucide/svelte/icons/download";
+  import SearchIcon from "@lucide/svelte/icons/search";
+  import SearchXIcon from "@lucide/svelte/icons/search-x";
 
   let {}: PageProps = $props();
 
-  const keys = new Resource(() => api.signingKeys.list());
+  // The search asks the server 250 ms after the last key.
+  let filter = $state("");
+  let query = $state("");
+  $effect(() => {
+    const f = filter.trim();
+    const t = setTimeout(() => (query = f), 250);
+    return () => clearTimeout(t);
+  });
+  // The answer keeps the search it answers, so the empty state names that search.
+  const keys = new Resource(async () => {
+    const q = query;
+    return { q, keys: await api.signingKeys.list(q) };
+  });
+  let first = true;
+  $effect(() => {
+    void query;
+    if (first) {
+      first = false;
+      return;
+    }
+    untrack(() => keys.reload());
+  });
+  const searched = $derived(keys.data?.q ?? "");
+  // Every key (the answer without a search): whether there are two or more, and the repositories
+  // that use one.
+  let every = $state<SigningKey[]>([]);
+  $effect(() => {
+    if (keys.data?.q === "") every = keys.data.keys;
+  });
   // The repositories that use a key, for the filter; their formats are read for those names only.
   const repoFormats = new RepoFormats();
   const formatOf = (name: string) => repoFormats.format(name);
   const ALL = "*";
   let repoFilter = $state(ALL);
-  const used = $derived([...new Set((keys.data ?? []).flatMap((k) => k.repos))].sort((a, b) => a.localeCompare(b)));
+  const used = $derived([...new Set(every.flatMap((k) => k.repos))].sort((a, b) => a.localeCompare(b)));
   $effect(() => repoFormats.want(used));
-  const source = listOf(keys, (list) => (repoFilter === ALL ? list : list.filter((k) => k.repos.includes(repoFilter))));
+  const source: TableSource<SigningKey> = {
+    get items() {
+      const list = keys.data?.keys ?? [];
+      return repoFilter === ALL ? list : list.filter((k) => k.repos.includes(repoFilter));
+    },
+    get loading() {
+      return keys.loading && !keys.data;
+    },
+    get error() {
+      return keys.error;
+    },
+    reload: keys.reload,
+  };
   const newKey = href("/settings/signing-keys/new");
   const signingTab = (r: string) => href(auth.canRepo(r, "repo.settings") ? repoSettingsPath(r, "signing") : repoPath(r));
 
@@ -51,35 +96,43 @@
 
   async function remove() {
     if (!target) return;
-    await api.signingKeys.delete(target.name);
-    toast.success(`Deleted the signing key ${target.name}`);
+    const name = target.name;
+    await api.signingKeys.delete(name);
+    toast.success(`Deleted the signing key ${name}`);
+    every = every.filter((k) => k.name !== name);
     await keys.reload();
   }
   const quietDanger = "hover:bg-destructive/10 hover:text-destructive";
 </script>
 
 <PageHeader title="Signing keys" description="Keys that sign the indexes of repositories, so clients can check them.">
-  {#snippet actions()}{#if keys.data?.length}<Button href={newKey}><PlusIcon />New signing key</Button>{/if}{/snippet}
+  {#snippet actions()}{#if every.length}<Button href={newKey}><PlusIcon />New signing key</Button>{/if}{/snippet}
 </PageHeader>
 
 {#snippet repoIcon()}<FormatIcon format={formatOf(repoFilter)} />{/snippet}
 
 <Section plain>
-  {#if (keys.data?.length ?? 0) > 1 && used.length > 1}
+  {#if every.length > 1 || filter || searched}
     <Toolbar>
-      <Select.Root type="single" bind:value={repoFilter}>
-        <Select.Trigger class="w-full sm:w-56" aria-label="Repository" icon={repoFilter === ALL ? undefined : repoIcon}>
-          <span class="truncate">{repoFilter === ALL ? "All repositories" : repoFilter}</span>
-        </Select.Trigger>
-        <Select.Content>
-          <Select.Item value={ALL} label="All repositories" inset />
-          {#each used as r (r)}
-            <Select.Item value={r} label={r}>
-              {#snippet icon()}<FormatIcon format={formatOf(r)} />{/snippet}
-            </Select.Item>
-          {/each}
-        </Select.Content>
-      </Select.Root>
+      <InputGroup.Root class="sm:w-72">
+        <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+        <InputGroup.Input bind:value={filter} type="search" placeholder="Search by name or key ID" aria-label="Search signing keys by name or key ID" />
+      </InputGroup.Root>
+      {#if used.length > 1}
+        <Select.Root type="single" bind:value={repoFilter}>
+          <Select.Trigger class="w-full sm:w-56" aria-label="Repository" icon={repoFilter === ALL ? undefined : repoIcon}>
+            <span class="truncate">{repoFilter === ALL ? "All repositories" : repoFilter}</span>
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Item value={ALL} label="All repositories" inset />
+            {#each used as r (r)}
+              <Select.Item value={r} label={r}>
+                {#snippet icon()}<FormatIcon format={formatOf(r)} />{/snippet}
+              </Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
+      {/if}
     </Toolbar>
   {/if}
   <SourceGrid {source} label="Signing keys" key={(k) => k.name}>
@@ -115,9 +168,13 @@
       </ItemCard>
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={FileKeyIcon} text="None yet.">
-        <Button variant="outline" href={newKey}><PlusIcon />New signing key</Button>
-      </CompactEmpty>
+      {#if searched}
+        <CompactEmpty icon={SearchXIcon} text="No signing key {repoFilter === ALL ? '' : `of ${repoFilter} `}has “{searched}” in its name or key ID." />
+      {:else}
+        <CompactEmpty icon={FileKeyIcon} text="None yet.">
+          <Button variant="outline" href={newKey}><PlusIcon />New signing key</Button>
+        </CompactEmpty>
+      {/if}
     {/snippet}
   </SourceGrid>
 </Section>

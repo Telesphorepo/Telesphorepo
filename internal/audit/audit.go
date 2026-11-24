@@ -438,6 +438,47 @@ func (l *Log) RecordTx(ctx context.Context, tx *sql.Tx, e Event) error {
 	return l.wq.WithTx(tx).InsertAuditEvent(ctx, p)
 }
 
+// auditRow is an event of RecordAllTx in the JSON of InsertAuditEvents.
+type auditRow struct {
+	At          int64  `json:"at"`
+	ActorUserID *int64 `json:"actor_user_id"`
+	Actor       string `json:"actor"`
+	Action      string `json:"action"`
+	RepoID      *int64 `json:"repo_id"`
+	Target      string `json:"target"`
+	Detail      string `json:"detail"`
+	IP          string `json:"ip"`
+}
+
+// RecordAllTx writes es, in their order, with the actor of ctx in tx, the transaction of the
+// change of a list they record: one statement whatever their number. The texts travel as JSON,
+// so a byte that is not UTF-8 is written as U+FFFD.
+func (l *Log) RecordAllTx(ctx context.Context, tx *sql.Tx, es []Event) error {
+	if len(es) == 0 {
+		return nil
+	}
+	rows := make([]auditRow, len(es))
+	for i, e := range es {
+		p, err := l.row(ctx, e)
+		if err != nil {
+			return err
+		}
+		x := auditRow{At: p.At, Actor: p.Actor, Action: p.Action, Target: p.Target, Detail: p.Detail, IP: p.Ip}
+		if p.ActorUserID.Valid {
+			x.ActorUserID = &p.ActorUserID.Int64
+		}
+		if p.RepoID.Valid {
+			x.RepoID = &p.RepoID.Int64
+		}
+		rows[i] = x
+	}
+	js, err := json.Marshal(rows)
+	if err != nil {
+		return err
+	}
+	return l.wq.WithTx(tx).InsertAuditEvents(ctx, string(js))
+}
+
 // Filter narrows List. RepoID 0, ActorUserID 0, Action "" and a zero Since or Until match
 // everything. ActorUserID is the person who acted (a CI subject or a failed sign-in name has
 // none). Since and Until bound the time: the events at or after Since and before Until.

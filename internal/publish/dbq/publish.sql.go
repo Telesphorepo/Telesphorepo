@@ -127,6 +127,23 @@ func (q *Queries) CopyTrustRepos(ctx context.Context, arg CopyTrustReposParams) 
 	return result.RowsAffected()
 }
 
+const countDeviceGram = `-- name: CountDeviceGram :one
+SELECT count(*) FROM (SELECT 1 FROM device_grams WHERE gram = ?1 LIMIT ?2)
+`
+
+type CountDeviceGramParams struct {
+	Gram  string
+	Limit int64
+}
+
+// The probe of a gram: its rows, up to limit.
+func (q *Queries) CountDeviceGram(ctx context.Context, arg CountDeviceGramParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countDeviceGram, arg.Gram, arg.Limit)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countTrustGram = `-- name: CountTrustGram :one
 SELECT count(*) FROM (SELECT 1 FROM publish_trust_grams WHERE gram = ?1 LIMIT ?2)
 `
@@ -739,6 +756,27 @@ func (q *Queries) GetTrust(ctx context.Context, id int64) (PublishTrust, error) 
 	return i, err
 }
 
+const insertDeviceGram = `-- name: InsertDeviceGram :exec
+INSERT OR IGNORE INTO device_grams (gram, device_id, user_id, text) VALUES (?, ?, ?, ?)
+`
+
+type InsertDeviceGramParams struct {
+	Gram     string
+	DeviceID int64
+	UserID   int64
+	Text     string
+}
+
+func (q *Queries) InsertDeviceGram(ctx context.Context, arg InsertDeviceGramParams) error {
+	_, err := q.db.ExecContext(ctx, insertDeviceGram,
+		arg.Gram,
+		arg.DeviceID,
+		arg.UserID,
+		arg.Text,
+	)
+	return err
+}
+
 const insertExchangeSession = `-- name: InsertExchangeSession :exec
 INSERT INTO publish_exchange_sessions (nonce_hash, repo_id, session_id) VALUES (?, ?, ?)
 `
@@ -780,38 +818,43 @@ func (q *Queries) InsertSeenOIDCToken(ctx context.Context, arg InsertSeenOIDCTok
 	return result.RowsAffected()
 }
 
-const insertTrustGram = `-- name: InsertTrustGram :exec
-INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id) VALUES (?, ?, ?, ?)
+const insertTrustGrams = `-- name: InsertTrustGrams :exec
+INSERT OR REPLACE INTO publish_trust_grams (gram, folded, name, trust_id)
+SELECT g.value, CAST(?1 AS TEXT), CAST(?2 AS TEXT), CAST(?3 AS INTEGER)
+FROM json_each(?4) g
 `
 
-type InsertTrustGramParams struct {
-	Gram    string
+type InsertTrustGramsParams struct {
 	Folded  string
 	Name    string
 	TrustID int64
+	Grams   interface{}
 }
 
-func (q *Queries) InsertTrustGram(ctx context.Context, arg InsertTrustGramParams) error {
-	_, err := q.db.ExecContext(ctx, insertTrustGram,
-		arg.Gram,
+// The grams of a policy's name in one statement: grams is a JSON array of the grams.
+func (q *Queries) InsertTrustGrams(ctx context.Context, arg InsertTrustGramsParams) error {
+	_, err := q.db.ExecContext(ctx, insertTrustGrams,
 		arg.Folded,
 		arg.Name,
 		arg.TrustID,
+		arg.Grams,
 	)
 	return err
 }
 
-const insertTrustRepo = `-- name: InsertTrustRepo :exec
-INSERT INTO publish_trust_repos (trust_id, repo_id) VALUES (?, ?)
+const insertTrustRepos = `-- name: InsertTrustRepos :exec
+INSERT INTO publish_trust_repos (trust_id, repo_id)
+SELECT CAST(?1 AS INTEGER), r.value FROM json_each(?2) r
 `
 
-type InsertTrustRepoParams struct {
+type InsertTrustReposParams struct {
 	TrustID int64
-	RepoID  int64
+	RepoIds interface{}
 }
 
-func (q *Queries) InsertTrustRepo(ctx context.Context, arg InsertTrustRepoParams) error {
-	_, err := q.db.ExecContext(ctx, insertTrustRepo, arg.TrustID, arg.RepoID)
+// The repos of a policy in one statement: repo_ids is a JSON array of repo ids.
+func (q *Queries) InsertTrustRepos(ctx context.Context, arg InsertTrustReposParams) error {
+	_, err := q.db.ExecContext(ctx, insertTrustRepos, arg.TrustID, arg.RepoIds)
 	return err
 }
 
@@ -1044,6 +1087,244 @@ func (q *Queries) ListPublishLog(ctx context.Context, arg ListPublishLogParams) 
 	return items, nil
 }
 
+const listPublishLogOfRepo = `-- name: ListPublishLogOfRepo :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.repo_id = ?1 AND s.id < ?2
+ORDER BY s.id DESC LIMIT ?3
+`
+
+type ListPublishLogOfRepoParams struct {
+	RepoID int64
+	Before int64
+	Limit  int64
+}
+
+type ListPublishLogOfRepoRow struct {
+	ID         int64
+	PublicID   string
+	RepoID     int64
+	Repo       string
+	Via        string
+	Subject    string
+	UserID     sql.NullInt64
+	Username   sql.NullString
+	DeviceID   sql.NullInt64
+	DeviceName sql.NullString
+	TrustID    sql.NullInt64
+	TrustName  sql.NullString
+	CreatedAt  int64
+	ExpiresAt  int64
+	ClosedAt   sql.NullInt64
+}
+
+// The publish log of one repo, as ListPublishLog, through publish_sessions_repo.
+func (q *Queries) ListPublishLogOfRepo(ctx context.Context, arg ListPublishLogOfRepoParams) ([]ListPublishLogOfRepoRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPublishLogOfRepo, arg.RepoID, arg.Before, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPublishLogOfRepoRow
+	for rows.Next() {
+		var i ListPublishLogOfRepoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.RepoID,
+			&i.Repo,
+			&i.Via,
+			&i.Subject,
+			&i.UserID,
+			&i.Username,
+			&i.DeviceID,
+			&i.DeviceName,
+			&i.TrustID,
+			&i.TrustName,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.ClosedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPublishLogOfUser = `-- name: ListPublishLogOfUser :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.user_id = ?1 AND s.id < ?2
+ORDER BY s.id DESC LIMIT ?3
+`
+
+type ListPublishLogOfUserParams struct {
+	UserID sql.NullInt64
+	Before int64
+	Limit  int64
+}
+
+type ListPublishLogOfUserRow struct {
+	ID         int64
+	PublicID   string
+	RepoID     int64
+	Repo       string
+	Via        string
+	Subject    string
+	UserID     sql.NullInt64
+	Username   sql.NullString
+	DeviceID   sql.NullInt64
+	DeviceName sql.NullString
+	TrustID    sql.NullInt64
+	TrustName  sql.NullString
+	CreatedAt  int64
+	ExpiresAt  int64
+	ClosedAt   sql.NullInt64
+}
+
+// The publish log of one person, as ListPublishLog, through publish_sessions_user.
+func (q *Queries) ListPublishLogOfUser(ctx context.Context, arg ListPublishLogOfUserParams) ([]ListPublishLogOfUserRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPublishLogOfUser, arg.UserID, arg.Before, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPublishLogOfUserRow
+	for rows.Next() {
+		var i ListPublishLogOfUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.RepoID,
+			&i.Repo,
+			&i.Via,
+			&i.Subject,
+			&i.UserID,
+			&i.Username,
+			&i.DeviceID,
+			&i.DeviceName,
+			&i.TrustID,
+			&i.TrustName,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.ClosedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPublishLogOfUserRepo = `-- name: ListPublishLogOfUserRepo :many
+SELECT s.id, s.public_id, s.repo_id, r.name AS repo, s.via, s.subject,
+       s.user_id, u.username, s.device_id, d.name AS device_name, s.trust_id, t.name AS trust_name,
+       s.created_at, s.expires_at, s.closed_at
+FROM publish_sessions s
+JOIN repos r ON r.id = s.repo_id
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN devices d ON d.id = s.device_id
+LEFT JOIN publish_trusts t ON t.id = s.trust_id
+WHERE s.user_id = ?1 AND s.repo_id = ?2 AND s.id < ?3
+ORDER BY s.id DESC LIMIT ?4
+`
+
+type ListPublishLogOfUserRepoParams struct {
+	UserID sql.NullInt64
+	RepoID int64
+	Before int64
+	Limit  int64
+}
+
+type ListPublishLogOfUserRepoRow struct {
+	ID         int64
+	PublicID   string
+	RepoID     int64
+	Repo       string
+	Via        string
+	Subject    string
+	UserID     sql.NullInt64
+	Username   sql.NullString
+	DeviceID   sql.NullInt64
+	DeviceName sql.NullString
+	TrustID    sql.NullInt64
+	TrustName  sql.NullString
+	CreatedAt  int64
+	ExpiresAt  int64
+	ClosedAt   sql.NullInt64
+}
+
+// The publish log of one person in one repo, as ListPublishLog, through
+// publish_sessions_user_repo.
+func (q *Queries) ListPublishLogOfUserRepo(ctx context.Context, arg ListPublishLogOfUserRepoParams) ([]ListPublishLogOfUserRepoRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPublishLogOfUserRepo,
+		arg.UserID,
+		arg.RepoID,
+		arg.Before,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPublishLogOfUserRepoRow
+	for rows.Next() {
+		var i ListPublishLogOfUserRepoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.RepoID,
+			&i.Repo,
+			&i.Via,
+			&i.Subject,
+			&i.UserID,
+			&i.Username,
+			&i.DeviceID,
+			&i.DeviceName,
+			&i.TrustID,
+			&i.TrustName,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.ClosedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRepoTrusts = `-- name: ListRepoTrusts :many
 SELECT t.id, t.name, t.issuer, t.claims, t.disabled
 FROM publish_trust_repos tr JOIN publish_trusts t ON t.id = tr.trust_id
@@ -1089,27 +1370,29 @@ func (q *Queries) ListRepoTrusts(ctx context.Context, repoID int64) ([]ListRepoT
 	return items, nil
 }
 
-const listTrustRepos = `-- name: ListTrustRepos :many
-SELECT r.id, r.name FROM publish_trust_repos tr JOIN repos r ON r.id = tr.repo_id
-WHERE tr.trust_id = ? ORDER BY tr.repo_id
+const listTrustReposOf = `-- name: ListTrustReposOf :many
+SELECT tr.trust_id, r.id, r.name FROM publish_trust_repos tr JOIN repos r ON r.id = tr.repo_id
+WHERE tr.trust_id IN (SELECT value FROM json_each(?1))
 `
 
-type ListTrustReposRow struct {
-	ID   int64
-	Name string
+type ListTrustReposOfRow struct {
+	TrustID int64
+	ID      int64
+	Name    string
 }
 
-// The repos of a policy in repo id order (the primary key order).
-func (q *Queries) ListTrustRepos(ctx context.Context, trustID int64) ([]ListTrustReposRow, error) {
-	rows, err := q.db.QueryContext(ctx, listTrustRepos, trustID)
+// The repos of the policies of a page (a JSON array of policy ids), in no order: one range of
+// the primary key per policy. The caller sorts them.
+func (q *Queries) ListTrustReposOf(ctx context.Context, trustIds interface{}) ([]ListTrustReposOfRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTrustReposOf, trustIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListTrustReposRow
+	var items []ListTrustReposOfRow
 	for rows.Next() {
-		var i ListTrustReposRow
-		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+		var i ListTrustReposOfRow
+		if err := rows.Scan(&i.TrustID, &i.ID, &i.Name); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1457,6 +1740,71 @@ func (q *Queries) RevokeUserDevice(ctx context.Context, arg RevokeUserDevicePara
 	return result.RowsAffected()
 }
 
+const searchDevices = `-- name: SearchDevices :many
+SELECT d.id, d.user_id, u.username, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+FROM device_grams g JOIN devices d ON d.id = g.device_id JOIN users u ON u.id = d.user_id
+WHERE g.gram = ?1 AND g.device_id < ?2 AND instr(g.text, ?3) > 0
+ORDER BY g.device_id DESC LIMIT ?4
+`
+
+type SearchDevicesParams struct {
+	Gram   string
+	Before int64
+	Text   string
+	Limit  int64
+}
+
+type SearchDevicesRow struct {
+	ID         int64
+	UserID     int64
+	Username   string
+	Name       string
+	CreatedAt  int64
+	ExpiresAt  int64
+	LastUsedAt sql.NullInt64
+	RevokedAt  sql.NullInt64
+}
+
+// The search of every device (internal/namesearch, migration 0004_device_and_log_search.sql),
+// newest first: the devices below before in the rows of one gram whose name or owner's username
+// holds the text (instr on the gram row).
+func (q *Queries) SearchDevices(ctx context.Context, arg SearchDevicesParams) ([]SearchDevicesRow, error) {
+	rows, err := q.db.QueryContext(ctx, searchDevices,
+		arg.Gram,
+		arg.Before,
+		arg.Text,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchDevicesRow
+	for rows.Next() {
+		var i SearchDevicesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Username,
+			&i.Name,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const searchTrusts = `-- name: SearchTrusts :many
 SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks, t.created_by, t.created_at, t.disabled
 FROM publish_trust_grams g JOIN publish_trusts t ON t.id = g.trust_id
@@ -1573,6 +1921,70 @@ func (q *Queries) SearchTrustsInRepos(ctx context.Context, arg SearchTrustsInRep
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.Disabled,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchUserDevices = `-- name: SearchUserDevices :many
+SELECT d.id, d.user_id, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+FROM device_grams g JOIN devices d ON d.id = g.device_id
+WHERE g.gram = ?1 AND g.user_id = ?2 AND g.device_id < ?3
+  AND instr(g.text, ?4) > 0
+ORDER BY g.device_id DESC LIMIT ?5
+`
+
+type SearchUserDevicesParams struct {
+	Gram   string
+	UserID int64
+	Before int64
+	Text   string
+	Limit  int64
+}
+
+type SearchUserDevicesRow struct {
+	ID         int64
+	UserID     int64
+	Name       string
+	CreatedAt  int64
+	ExpiresAt  int64
+	LastUsedAt sql.NullInt64
+	RevokedAt  sql.NullInt64
+}
+
+// The same search among one person's devices, through device_grams_user.
+func (q *Queries) SearchUserDevices(ctx context.Context, arg SearchUserDevicesParams) ([]SearchUserDevicesRow, error) {
+	rows, err := q.db.QueryContext(ctx, searchUserDevices,
+		arg.Gram,
+		arg.UserID,
+		arg.Before,
+		arg.Text,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchUserDevicesRow
+	for rows.Next() {
+		var i SearchUserDevicesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}

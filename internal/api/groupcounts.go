@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -81,44 +82,74 @@ type counters struct {
 	pending     bool
 }
 
-// of returns the counters of group for the members that a reader reads (in read order). A set
-// that has no row yet is pending: the job counts it next.
-func (g *groupCounts) of(ctx context.Context, group *repos.Repo, members []*repos.Repo) (counters, error) {
-	ids := make([]int64, len(members))
-	for i, m := range members {
-		ids[i] = m.ID
+// of returns the counters of each group of groups for the members that a reader reads (members,
+// by group id, in read order), by group id, in one query of their rows. A set that has no row
+// yet is pending: the job counts it next.
+func (g *groupCounts) of(ctx context.Context, groups []*repos.Repo, members map[int64][]*repos.Repo) (map[int64]counters, error) {
+	out := make(map[int64]counters, len(groups))
+	keys := map[int64]string{}
+	ids := map[int64][]int64{}
+	var sets [][2]any
+	for _, group := range groups {
+		ms := members[group.ID]
+		if len(ms) == 0 {
+			out[group.ID] = counters{}
+			continue
+		}
+		set := make([]int64, len(ms))
+		for i, m := range ms {
+			set[i] = m.ID
+		}
+		ids[group.ID], keys[group.ID] = set, membersKey(set)
+		sets = append(sets, [2]any{group.ID, keys[group.ID]})
 	}
-	if len(ids) == 0 {
-		return counters{}, nil
+	if len(sets) == 0 {
+		return out, nil
 	}
 	if g.ready.Load() {
-		row, err := dbq.New(g.a.h.DB.R).GetGroupCount(ctx, dbq.GetGroupCountParams{GroupID: group.ID, Members: membersKey(ids)})
-		switch {
-		case err == nil:
+		js, err := json.Marshal(sets)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := dbq.New(g.a.h.DB.R).ListGroupCounts(ctx, string(js))
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if keys[row.GroupID] != row.Members {
+				continue
+			}
 			c := counters{files: row.FileCount, size: row.TotalSize}
 			if row.LastPublishedAt > 0 {
 				c.last = time.Unix(row.LastPublishedAt, 0)
 			}
-			return c, nil
-		case !errors.Is(err, sql.ErrNoRows):
-			return counters{}, err
+			out[row.GroupID] = c
 		}
 	}
+	asked := false
 	g.mu.Lock()
-	sets := g.want[group.ID]
-	known := false
-	for _, s := range sets {
-		if membersKey(s) == membersKey(ids) {
-			known = true
-			break
+	for id, set := range ids {
+		if _, ok := out[id]; ok {
+			continue
 		}
-	}
-	if !known {
-		g.want[group.ID] = append(sets, ids)
+		out[id] = counters{pending: true}
+		known := false
+		for _, s := range g.want[id] {
+			if membersKey(s) == keys[id] {
+				known = true
+				break
+			}
+		}
+		if !known {
+			g.want[id] = append(g.want[id], set)
+		}
+		asked = true
 	}
 	g.mu.Unlock()
-	g.poke()
-	return counters{pending: true}, nil
+	if asked {
+		g.poke()
+	}
+	return out, nil
 }
 
 // run sets the unit of every asset row that has none, then counts, until ctx ends: the full set of
@@ -312,18 +343,31 @@ func (g *groupCounts) count(ctx context.Context, group int64, ids []int64) error
 	})
 }
 
-// groupCounters sets the counters of out, the JSON of group repo, for p who reads through r: those
-// of the members that p reads as a group read (access.Engine.GroupMembers).
-func (a *API) groupCounters(r *http.Request, p *auth.Principal, group *repos.Repo, out *repoJSON) error {
-	members, err := a.access.GroupMembers(r.Context(), r, p, group)
-	if err != nil {
-		return err
+// groupCounters returns the counters of each group of groups for p who reads through r, by group
+// id: those of the members that p reads as a group read (access.Engine.GroupMembers). The members
+// of every group come from one query (repos.Service.RememberMembers) and the counters from
+// another, whatever the number of groups.
+func (a *API) groupCounters(r *http.Request, p *auth.Principal, groups []*repos.Repo) (map[int64]counters, error) {
+	if len(groups) == 0 {
+		return map[int64]counters{}, nil
 	}
-	c, err := a.counts.of(r.Context(), group, members)
-	if err != nil {
-		return err
+	ctx := repos.Remember(r.Context())
+	if err := a.repos.RememberMembers(ctx, groups); err != nil {
+		return nil, err
 	}
+	members := make(map[int64][]*repos.Repo, len(groups))
+	for _, group := range groups {
+		ms, err := a.access.GroupMembers(ctx, r, p, group)
+		if err != nil {
+			return nil, err
+		}
+		members[group.ID] = ms
+	}
+	return a.counts.of(ctx, groups, members)
+}
+
+// setCounters sets the counters of out, the JSON of a group, to c.
+func setCounters(out *repoJSON, c counters) {
 	out.FileCount, out.TotalSize, out.CountsPending = c.files, c.size, c.pending
 	out.LastPublishedAt = timeOrNil(c.last)
-	return nil
 }

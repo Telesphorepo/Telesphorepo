@@ -90,11 +90,15 @@ func (b *Builds) Cleanup(ctx context.Context, cutoff time.Time) error {
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if _, err := q.DeleteUnusedBuild(ctx, id); err != nil {
+	if len(ids) > 0 {
+		js, err := json.Marshal(ids)
+		if err != nil {
 			return err
 		}
-		b.after = id
+		if _, err := q.DeleteUnusedBuilds(ctx, string(js)); err != nil {
+			return err
+		}
+		b.after = ids[len(ids)-1]
 	}
 	if len(ids) < cleanupBatch {
 		b.after = 0 // the next round starts over
@@ -131,12 +135,49 @@ func (l *Loader) Get(ctx context.Context, id int64) (*Build, error) {
 	if err != nil {
 		return nil, err
 	}
+	return l.keep(row), nil
+}
+
+// Load reads the builds of ids that the Loader has not read, in one query, so the Get of each
+// after it costs no lookup: a page of versions or files that many builds wrote costs one query.
+// An id of no build is kept as none; 0 is skipped.
+func (l *Loader) Load(ctx context.Context, ids []int64) error {
+	var want []int64
+	asked := map[int64]bool{}
+	for _, id := range ids {
+		if _, ok := l.seen[id]; !ok && id != 0 && !asked[id] {
+			asked[id] = true
+			want = append(want, id)
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	js, err := json.Marshal(want)
+	if err != nil {
+		return err
+	}
+	rows, err := l.q.ListBuildsByIDs(ctx, string(js))
+	if err != nil {
+		return err
+	}
+	for _, id := range want {
+		l.seen[id] = nil
+	}
+	for _, row := range rows {
+		l.keep(row)
+	}
+	return nil
+}
+
+// keep is the Build of row, kept by its id.
+func (l *Loader) keep(row dbq.Build) *Build {
 	out := &Build{ID: row.ID, Provider: row.Provider, ProviderTitle: l.reg.Title(row.Provider), Repository: row.Repository,
 		Revision: row.Revision, Ref: row.Ref, RefName: row.RefName, RefType: row.RefType, Run: row.Run,
 		Workflow: row.Workflow, Actor: row.Actor, Links: []Link{}}
 	if err := json.Unmarshal([]byte(row.Links), &out.Links); err != nil {
 		out.Links = []Link{}
 	}
-	l.seen[id] = out
-	return out, nil
+	l.seen[row.ID] = out
+	return out
 }

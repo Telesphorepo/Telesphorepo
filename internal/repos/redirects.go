@@ -74,6 +74,75 @@ func byName(ctx context.Context, q *dbq.Queries, name string) (*Repo, error) {
 	return byID(ctx, q, rd.RepoID)
 }
 
+// byNames reads the repos of names, as byName reads each one, by the name asked; a name of no repo
+// and no redirect is not in the map. At most three queries whatever the number of names: the own
+// names, the redirects of the others, and their repos.
+func byNames(ctx context.Context, q *dbq.Queries, names []string) (map[string]*Repo, error) {
+	out := make(map[string]*Repo, len(names))
+	if len(names) == 0 {
+		return out, nil
+	}
+	own, err := q.ListReposNamed(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range own {
+		repo, _ := fromRow(row(r), nil)
+		out[repo.Name] = repo
+	}
+	var rest []string
+	asked := map[string]bool{}
+	for _, n := range names {
+		if out[n] == nil && !asked[n] {
+			asked[n] = true
+			rest = append(rest, n)
+		}
+	}
+	if len(rest) == 0 {
+		return out, nil
+	}
+	rds, err := q.ListRepoRedirectsNamed(ctx, rest)
+	if err != nil || len(rds) == 0 {
+		return out, err
+	}
+	ids := make([]int64, len(rds))
+	for i, rd := range rds {
+		ids[i] = rd.RepoID
+	}
+	targets, err := q.ListReposByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]*Repo, len(targets))
+	for _, r := range targets {
+		repo, _ := fromRow(r, nil)
+		byID[repo.ID] = repo
+	}
+	for _, rd := range rds {
+		if repo := byID[rd.RepoID]; repo != nil {
+			out[rd.Name] = repo
+		}
+	}
+	return out, nil
+}
+
+// ByNames is ByName for a list (a bulk change, the scopes of a token): the repos of names that
+// exist, by the name asked, in at most three queries. Each lookup through a redirect notes its
+// use, as ByName does.
+func (s *Service) ByNames(ctx context.Context, names []string) (map[string]*Repo, error) {
+	found, err := byNames(ctx, dbq.New(s.db.R), names)
+	if err != nil {
+		return nil, err
+	}
+	for name, r := range found {
+		s.counted(r, nil)
+		if r.Name != name && s.onRedirect != nil {
+			s.onRedirect(name)
+		}
+	}
+	return found, nil
+}
+
 // checkNotRedirect refuses name when it is a redirect of a repo other than id (0: of any repo).
 func checkNotRedirect(ctx context.Context, q *dbq.Queries, name string, id int64) error {
 	rd, err := q.GetRepoRedirect(ctx, name)

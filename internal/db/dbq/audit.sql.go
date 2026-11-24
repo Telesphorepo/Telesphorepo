@@ -93,6 +93,21 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 	return err
 }
 
+const insertAuditEvents = `-- name: InsertAuditEvents :exec
+INSERT INTO audit_events (at, actor_user_id, actor, action, repo_id, target, detail, ip)
+SELECT json_extract(j.value, '$.at'), json_extract(j.value, '$.actor_user_id'), json_extract(j.value, '$.actor'),
+  json_extract(j.value, '$.action'), json_extract(j.value, '$.repo_id'), json_extract(j.value, '$.target'),
+  json_extract(j.value, '$.detail'), json_extract(j.value, '$.ip')
+FROM json_each(CAST(?1 AS TEXT)) j
+`
+
+// The events of one change of a list, in one statement and in their order: events is a JSON array
+// of objects with the columns (detail as a JSON string).
+func (q *Queries) InsertAuditEvents(ctx context.Context, events string) error {
+	_, err := q.db.ExecContext(ctx, insertAuditEvents, events)
+	return err
+}
+
 const listAudit = `-- name: ListAudit :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
 WHERE id < ?1 AND id >= ?2 ORDER BY id DESC LIMIT ?3

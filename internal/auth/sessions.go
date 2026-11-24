@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -139,6 +140,24 @@ func (s *Service) Username(ctx context.Context, id int64) (string, error) {
 		return "", err
 	}
 	return u.Username, nil
+}
+
+// Usernames returns the usernames of the users of ids that exist, by id: one query (the uploaders
+// of a page of files).
+func (s *Service) Usernames(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := map[int64]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+	rows, err := s.rq.ListUsernames(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Username
+	}
+	return out, nil
 }
 
 // StartSession creates a session for userID that ends after ttl, at most session_max_age, and

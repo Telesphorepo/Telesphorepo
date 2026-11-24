@@ -3,6 +3,7 @@ package assets
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"slices"
 	"strings"
@@ -161,9 +162,67 @@ func (p *Pipeline) VersionNames(ctx context.Context, repoID int64, dir string, f
 	return true, repopath.IsVersionKey(last), nil
 }
 
-// HasTreeFile reports whether folder dir of repo holds a file named name: one seek.
-func (p *Pipeline) HasTreeFile(ctx context.Context, repoID int64, dir, name string) (bool, error) {
-	return dbq.New(p.db.R).HasTreeFile(ctx, dbq.HasTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.NameKey(name)})
+// KindNames is what VersionNames reports of the sub-folders (Folders) and of the files (Files) of a
+// folder: whether it has children of the kind, and whether every one's name starts with a digit.
+type KindNames struct {
+	HasFolders, FolderDigits bool
+	HasFiles, FileDigits     bool
+}
+
+// VersionNamesIn is VersionNames of both kinds for folder dir in each repo of repoIDs (the members
+// of a group), by repo id: one query, two seeks per repo.
+func (p *Pipeline) VersionNamesIn(ctx context.Context, repoIDs []int64, dir string) (map[int64]KindNames, error) {
+	out := make(map[int64]KindNames, len(repoIDs))
+	if len(repoIDs) == 0 {
+		return out, nil
+	}
+	repos, err := jsonText(repoIDs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbq.New(p.db.R).ListLastTreeKeys(ctx, dbq.ListLastTreeKeysParams{Parent: dir, Repos: repos})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.RepoID] = KindNames{
+			HasFolders: r.LastFolder != nil, FolderDigits: r.LastFolder != nil && repopath.IsVersionKey(r.LastFolder),
+			HasFiles: r.LastFile != nil, FileDigits: r.LastFile != nil && repopath.IsVersionKey(r.LastFile),
+		}
+	}
+	return out, nil
+}
+
+// TreeFilesNamed returns which of names are files of folder dir in each repo of repoIDs, by repo
+// id: one query, a seek per repo and name.
+func (p *Pipeline) TreeFilesNamed(ctx context.Context, repoIDs []int64, dir string, names []string) (map[int64]map[string]bool, error) {
+	out := map[int64]map[string]bool{}
+	if len(repoIDs) == 0 || len(names) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(names))
+	for i, n := range names {
+		keys[i] = hex.EncodeToString(repopath.NameKey(n))
+	}
+	repos, err := jsonText(repoIDs)
+	if err != nil {
+		return nil, err
+	}
+	ks, err := jsonText(keys)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbq.New(p.db.R).ListTreeFilesKeyed(ctx, dbq.ListTreeFilesKeyedParams{Repos: repos, Keys: ks, Parent: dir})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if out[r.RepoID] == nil {
+			out[r.RepoID] = map[string]bool{}
+		}
+		out[r.RepoID][r.Name] = true
+	}
+	return out, nil
 }
 
 // lowerAfter returns the smallest key after key, the key with a 0 byte appended; the empty key

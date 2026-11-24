@@ -220,72 +220,80 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 	return addBuild(ctx, dbq.New(tx), w.Repo.ID, f)
 }
 
-// rangePage is how many paths one read of the files of a build takes.
-const rangePage = 200
-
 // onRemoved deletes the builds that lose their last file in a remove batch, and the versions
-// that lose their last build (format.Spec OnRemoved). A build is checked once per batch: one
-// range read of the files named like it.
+// that lose their last build (format.Spec OnRemoved). The batch costs four statements: one range
+// read of the files named like each build it touches, the delete of the builds left without one,
+// the count of their versions and the delete of the versions left without a build.
 func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	gone := make(map[string]bool, len(removed))
 	for _, a := range removed {
 		gone[a.Path] = true
 	}
-	q := dbq.New(tx)
-	checked := map[string]bool{}
+	var touched []fileRef // each build of the batch once
+	seen := map[string]bool{}
 	for _, a := range removed {
 		f, ok := parseBuildFile(a.Path)
-		if !ok || checked[f.dir+"\x00"+f.build] {
+		if !ok || seen[f.dir+"\x00"+f.build] {
 			continue
 		}
-		checked[f.dir+"\x00"+f.build] = true
-		left, err := buildHasFile(ctx, q, repo.ID, f, gone)
-		if err != nil {
-			return nil, err
-		}
-		if left {
+		seen[f.dir+"\x00"+f.build] = true
+		touched = append(touched, f)
+	}
+	if len(touched) == 0 {
+		return nil, nil
+	}
+	q := dbq.New(tx)
+	prefixes := make([]string, len(touched))
+	for i, f := range touched {
+		prefixes[i] = f.dir + buildStem(f.id, f.version, f.build)
+	}
+	files, err := q.ListFilesUnder(ctx, repo.ID, prefixes)
+	if err != nil {
+		return nil, err
+	}
+	left := map[string]bool{} // the builds with a file that the batch keeps
+	for _, x := range files {
+		if gone[x.Path] {
 			continue
 		}
-		n, err := q.DeleteBuild(ctx, dbq.DeleteBuildParams{RepoID: repo.ID, Folder: f.dir, SortKey: buildKey(f.build)})
-		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			continue
-		}
-		vk := versionKey(f.version)
-		if err := q.DropVersionBuild(ctx, dbq.DropVersionBuildParams{RepoID: repo.ID, Folder: f.art, SortKey: vk}); err != nil {
-			return nil, err
-		}
-		if err := q.DeleteEmptyVersion(ctx, dbq.DeleteEmptyVersionParams{RepoID: repo.ID, Folder: f.art, SortKey: vk}); err != nil {
-			return nil, err
+		if g, ok := parseBuildFile(x.Path); ok {
+			left[g.dir+"\x00"+g.build] = true
 		}
 	}
-	return nil, nil
-}
-
-// buildHasFile reports whether the build of f has a file that is not in gone.
-func buildHasFile(ctx context.Context, q *dbq.Queries, repoID int64, f fileRef, gone map[string]bool) (bool, error) {
-	lower := f.dir + buildStem(f.id, f.version, f.build)
-	upper, _ := assets.PrefixEnd(lower)
-	for {
-		ps, err := q.ListPathsInRange(ctx, dbq.ListPathsInRangeParams{RepoID: repoID, Lower: lower, Upper: upper, Limit: rangePage})
-		if err != nil {
-			return false, err
+	var empty []dbq.Key
+	versionOf := map[string]fileRef{} // by the key of an empty build
+	for _, f := range touched {
+		if !left[f.dir+"\x00"+f.build] {
+			k := dbq.Key{Folder: f.dir, SortKey: buildKey(f.build)}
+			empty = append(empty, k)
+			versionOf[k.Folder+"\x00"+string(k.SortKey)] = f
 		}
-		for _, p := range ps {
-			if gone[p] {
-				continue
-			}
-			if g, ok := parseBuildFile(p); ok && g.dir == f.dir && g.build == f.build {
-				return true, nil
-			}
-		}
-		if len(ps) < rangePage {
-			return false, nil
-		}
-		lower = ps[len(ps)-1] + "\x00"
 	}
+	if len(empty) == 0 {
+		return nil, nil
+	}
+	deleted, err := q.DeleteBuilds(ctx, repo.ID, empty)
+	if err != nil {
+		return nil, err
+	}
+	var versions []dbq.Key
+	var counts []int64
+	at := map[string]int{}
+	for _, k := range deleted {
+		f := versionOf[k.Folder+"\x00"+string(k.SortKey)]
+		vk := dbq.Key{Folder: f.art, SortKey: versionKey(f.version)}
+		i, ok := at[vk.Folder+"\x00"+string(vk.SortKey)]
+		if !ok {
+			i = len(versions)
+			at[vk.Folder+"\x00"+string(vk.SortKey)] = i
+			versions, counts = append(versions, vk), append(counts, 0)
+		}
+		counts[i]++
+	}
+	if len(versions) == 0 {
+		return nil, nil
+	}
+	return nil, q.DropVersionBuilds(ctx, repo.ID, versions, counts)
 }
 
 // indexBatch is how many paths one transaction of indexExisting reads.

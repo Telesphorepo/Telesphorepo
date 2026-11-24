@@ -58,27 +58,28 @@ func (q *Queries) DeleteName(ctx context.Context, arg DeleteNameParams) error {
 	return err
 }
 
-const deleteVersionsOfAsset = `-- name: DeleteVersionsOfAsset :many
-DELETE FROM cargo_versions WHERE asset_id = ?
+const deleteVersionsOfAssets = `-- name: DeleteVersionsOfAssets :many
+DELETE FROM cargo_versions WHERE asset_id IN (SELECT value FROM json_each(?1))
 RETURNING repo_id, name, lower_name
 `
 
-type DeleteVersionsOfAssetRow struct {
+type DeleteVersionsOfAssetsRow struct {
 	RepoID    int64
 	Name      string
 	LowerName string
 }
 
-// Removes the version of a deleted .crate file through cargo_versions_asset.
-func (q *Queries) DeleteVersionsOfAsset(ctx context.Context, assetID int64) ([]DeleteVersionsOfAssetRow, error) {
-	rows, err := q.db.QueryContext(ctx, deleteVersionsOfAsset, assetID)
+// Removes the versions of the deleted .crate files of a remove batch (the JSON array of their
+// asset ids) through cargo_versions_asset.
+func (q *Queries) DeleteVersionsOfAssets(ctx context.Context, assetIds interface{}) ([]DeleteVersionsOfAssetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, deleteVersionsOfAssets, assetIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeleteVersionsOfAssetRow
+	var items []DeleteVersionsOfAssetsRow
 	for rows.Next() {
-		var i DeleteVersionsOfAssetRow
+		var i DeleteVersionsOfAssetsRow
 		if err := rows.Scan(&i.RepoID, &i.Name, &i.LowerName); err != nil {
 			return nil, err
 		}

@@ -1241,6 +1241,9 @@ export type CLIArchive = { name: string; sha256: string; os: string; arch: strin
 export type PublishSession = { id: number; token: string; repo: string; expires_at: string; renewal_key?: string };
 export type PublishRenewal = { valid_for_ms: number; renew_after_ms: number };
 
+/** The filters of GET /api/publish/log: one repository and one person, by name. */
+export type PublishLogFilter = { repo?: string; user?: string };
+
 export type SessionInfo = {
   id: number;
   repo: string;

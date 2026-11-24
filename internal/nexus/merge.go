@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -294,23 +295,39 @@ func (m *merger) decide(ctx context.Context, a, e *assets.Asset) (verdict, strin
 }
 
 // walk decides each file of the source after path after, in path order, and calls fn with it,
-// the target's file at its path (nil: none) and the verdict.
-func (s *Service) walk(ctx context.Context, m *merger, after string, fn func(a, e *assets.Asset, v verdict, reason string) error) error {
+// the target's file at its path (nil: none) and the verdict. With readOnly (fn writes nothing to
+// the target: the plan) it reads the target's files of a page of the source in one query;
+// otherwise it reads the target's file of each source file after fn handled the one before, since
+// fn's writes (a commit, a merged file) may change it.
+func (s *Service) walk(ctx context.Context, m *merger, after string, readOnly bool, fn func(a, e *assets.Asset, v verdict, reason string) error) error {
 	for {
 		page, next, err := s.assets.List(ctx, m.from.ID, "", after, mergePage)
 		if err != nil {
 			return err
 		}
+		var have map[string]*assets.Asset
+		if readOnly {
+			paths := make([]string, len(page))
+			for i, a := range page {
+				paths[i] = a.Path
+			}
+			if have, err = s.assets.GetMany(ctx, m.into.ID, paths); err != nil {
+				return err
+			}
+		}
 		for _, a := range page {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			e, err := s.assets.Get(ctx, m.into.ID, a.Path)
-			if errors.Is(err, assets.ErrNotFound) {
-				e, err = nil, nil
-			}
-			if err != nil {
-				return err
+			e := have[a.Path]
+			if !readOnly {
+				e, err = s.assets.Get(ctx, m.into.ID, a.Path)
+				if errors.Is(err, assets.ErrNotFound) {
+					e, err = nil, nil
+				}
+				if err != nil {
+					return err
+				}
 			}
 			v, reason, err := m.decide(ctx, a, e)
 			if err != nil {
@@ -416,6 +433,23 @@ func (s *Service) activeMerge(ctx context.Context, id int64) (int64, error) {
 	return 0, nil
 }
 
+// groupNames returns the names of the groups that repo id is a member of, in id order, in one
+// query; none when they cannot be read.
+func (s *Service) groupNames(ctx context.Context, id int64) []string {
+	gids := s.repos.GroupsOf(id)
+	names, err := s.repoNames(ctx, gids)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(gids))
+	for _, gid := range gids {
+		if name, ok := names[gid]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // MergePlan works out what a merge of repo from into repo into does, from the files of both now
 // (into "" is the repo that from moves into). It writes nothing. It reads every file of from.
 func (s *Service) MergePlan(ctx context.Context, fromName, intoName string) (*MergePlan, error) {
@@ -430,7 +464,7 @@ func (s *Service) MergePlan(ctx context.Context, fromName, intoName string) (*Me
 		p.SourceName = src.Name
 	}
 	m := s.newMerger(from, into)
-	err = s.walk(ctx, m, "", func(a, e *assets.Asset, v verdict, reason string) error {
+	err = s.walk(ctx, m, "", true, func(a, e *assets.Asset, v verdict, reason string) error {
 		switch v {
 		case vCopy:
 			p.Copy++
@@ -486,11 +520,7 @@ func (s *Service) MergePlan(ctx context.Context, fromName, intoName string) (*Me
 			return nil, err
 		}
 	}
-	for _, gid := range s.repos.GroupsOf(from.ID) {
-		if g, err := s.repos.ByID(ctx, gid); err == nil {
-			p.Groups = append(p.Groups, g.Name)
-		}
-	}
+	p.Groups = append(p.Groups, s.groupNames(ctx, from.ID)...)
 	for _, side := range []struct {
 		repo *repos.Repo
 		out  *[]string
@@ -574,12 +604,24 @@ func (s *Service) StartMerge(ctx context.Context, in MergeInput, userID int64) (
 		if err != nil {
 			return err
 		}
-		for path, c := range in.Choices {
-			take := int64(0)
-			if c == ChoiceTake {
-				take = 1
+		if len(in.Choices) > 0 {
+			type choice struct {
+				Path string `json:"path"`
+				Take int64  `json:"take"`
 			}
-			if err := q.InsertNexusMergeChoice(ctx, dbq.InsertNexusMergeChoiceParams{MergeID: id, Path: path, Take: take}); err != nil {
+			choices := make([]choice, 0, len(in.Choices))
+			for path, c := range in.Choices {
+				take := int64(0)
+				if c == ChoiceTake {
+					take = 1
+				}
+				choices = append(choices, choice{path, take})
+			}
+			js, err := json.Marshal(choices)
+			if err != nil {
+				return err
+			}
+			if err := q.InsertNexusMergeChoices(ctx, dbq.InsertNexusMergeChoicesParams{MergeID: id, Choices: string(js)}); err != nil {
 				return err
 			}
 		}
@@ -642,11 +684,7 @@ func (s *Service) Merge(ctx context.Context, id int64) (*Merge, error) {
 	switch {
 	case err == nil:
 		out.Name, out.Format = into.Name, into.Format
-		for _, gid := range s.repos.GroupsOf(into.ID) {
-			if g, err := s.repos.ByID(ctx, gid); err == nil {
-				out.Groups = append(out.Groups, g.Name)
-			}
-		}
+		out.Groups = append(out.Groups, s.groupNames(ctx, into.ID)...)
 	case !errors.Is(err, repos.ErrNotFound):
 		return nil, err
 	}
@@ -862,7 +900,7 @@ func (s *Service) mergeCopy(ctx context.Context, row dbq.GetNexusMergeRow) (stri
 		}
 		return nil
 	}
-	err = s.walk(ctx, m, cursor, func(a, e *assets.Asset, v verdict, reason string) error {
+	err = s.walk(ctx, m, cursor, false, func(a, e *assets.Asset, v verdict, reason string) error {
 		// The files of one unit commit together: a new unit commits the one before.
 		if m.carry != nil && m.carry.Unit != nil {
 			if u := m.carry.Unit(a.Path); u != unit {
@@ -948,6 +986,9 @@ func (s *Service) mergeCopy(ctx context.Context, row dbq.GetNexusMergeRow) (stri
 // labelPrefix starts the choice key of a label (format.Carry Labels): no file path starts with it.
 const labelPrefix = "label:"
 
+// labelEnd is the first key after every key that starts with labelPrefix.
+const labelEnd = "label;"
+
 // labelSnapshot is the choice key that marks a merge whose labels are saved.
 const labelSnapshot = labelPrefix
 
@@ -968,13 +1009,20 @@ func (s *Service) snapshotLabels(ctx context.Context, m *merger, row dbq.GetNexu
 	if err != nil {
 		return fmt.Errorf("read the labels of %s: %w", m.from.Name, err)
 	}
+	var paths []string
+	for _, l := range labels {
+		if !l.Conflict() && l.Target != l.Value {
+			paths = append(paths, labelPrefix+l.Key)
+		}
+	}
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		for _, l := range labels {
-			if l.Conflict() || l.Target == l.Value {
-				continue
+		if len(paths) > 0 {
+			js, err := json.Marshal(paths)
+			if err != nil {
+				return err
 			}
-			if err := q.InsertNexusMergeChoiceIfNone(ctx, dbq.InsertNexusMergeChoiceIfNoneParams{MergeID: row.ID, Path: labelPrefix + l.Key, Take: 1}); err != nil {
+			if err := q.InsertNexusMergeChoicesIfNone(ctx, dbq.InsertNexusMergeChoicesIfNoneParams{MergeID: row.ID, Take: 1, Paths: string(js)}); err != nil {
 				return err
 			}
 		}
@@ -992,25 +1040,32 @@ func (s *Service) settleLabels(ctx context.Context, m *merger, row dbq.GetNexusM
 	if err != nil {
 		return fmt.Errorf("read the labels of %s: %w", m.from.Name, err)
 	}
-	q := dbq.New(s.db.R)
+	// The choices of every label, in one read of the range of their keys.
+	rows, err := dbq.New(s.db.R).ListNexusMergeChoicesIn(ctx, dbq.ListNexusMergeChoicesInParams{MergeID: row.ID,
+		From: labelPrefix, To: labelEnd})
+	if err != nil {
+		return err
+	}
+	choices := make(map[string]int64, len(rows))
+	for _, c := range rows {
+		choices[c.Path] = c.Take
+	}
 	for _, l := range labels {
 		if l.Target == l.Value {
 			continue
 		}
-		take, err := q.GetNexusMergeChoice(ctx, dbq.GetNexusMergeChoiceParams{MergeID: row.ID, Path: labelPrefix + l.Key})
+		take, found := choices[labelPrefix+l.Key]
 		switch {
-		case err == nil && take != 1, err != nil && errors.Is(err, sql.ErrNoRows) && !l.Conflict():
+		case found && take != 1, !found && !l.Conflict():
 			continue
-		case err != nil && errors.Is(err, sql.ErrNoRows):
-			ok, err := s.choice(ctx, row, m.into, labelPrefix+l.Key)
+		case !found:
+			ok, err := otherwise(row, m.into, labelPrefix+l.Key)
 			if err != nil {
 				return fmt.Errorf("%s: %w", l.Title, err)
 			}
 			if !ok {
 				continue
 			}
-		case err != nil:
-			return err
 		}
 		if err := m.carry.SetLabel(ctx, m.into, l); err != nil {
 			return fmt.Errorf("set %s in %s: %w", l.Title, m.into.Name, err)
@@ -1029,6 +1084,12 @@ func (s *Service) choice(ctx context.Context, row dbq.GetNexusMergeRow, into *re
 	case !errors.Is(err, sql.ErrNoRows):
 		return false, err
 	}
+	return otherwise(row, into, path)
+}
+
+// otherwise is the choice of the conflict at path that the merge has no choice for: row's
+// otherwise, else an error.
+func otherwise(row dbq.GetNexusMergeRow, into *repos.Repo, path string) (bool, error) {
 	switch row.Otherwise {
 	case ChoiceTake:
 		return true, nil
@@ -1160,26 +1221,39 @@ func (s *Service) mergeAccess(ctx context.Context, row dbq.GetNexusMergeRow) (st
 			return "", fmt.Errorf("add %s to the CI pipelines of %s: %w", into.Name, from.Name, err)
 		}
 	}
-	for _, gid := range s.repos.GroupsOf(from.ID) {
-		g, err := s.repos.ByID(ctx, gid)
-		if errors.Is(err, repos.ErrNotFound) {
+	// The groups and the names of their members, in one query each.
+	gids := s.repos.GroupsOf(from.ID)
+	groups, err := s.reposByID(ctx, gids)
+	if err != nil {
+		return "", err
+	}
+	membersOf := make(map[int64][]int64, len(gids))
+	var all []int64
+	for _, gid := range gids {
+		membersOf[gid] = s.repos.Members(gid)
+		all = append(all, membersOf[gid]...)
+	}
+	memberNames, err := s.repoNames(ctx, all)
+	if err != nil {
+		return "", err
+	}
+	for _, gid := range gids {
+		g := groups[gid]
+		if g == nil {
 			continue
 		}
-		if err != nil {
-			return "", err
-		}
-		members, err := s.repos.MemberRepos(ctx, g)
-		if err != nil {
-			return "", err
-		}
-		names := make([]string, 0, len(members))
+		names := make([]string, 0, len(membersOf[gid]))
 		reads := false
-		for _, mm := range members {
-			reads = reads || mm.ID == into.ID
-			if mm.ID == from.ID {
+		for _, id := range membersOf[gid] {
+			name, ok := memberNames[id]
+			if !ok {
+				continue // a member deleted after the copy was read is gone
+			}
+			reads = reads || id == into.ID
+			if id == from.ID {
 				names = append(names, into.Name)
 			} else {
-				names = append(names, mm.Name)
+				names = append(names, name)
 			}
 		}
 		if reads {

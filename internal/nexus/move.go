@@ -60,26 +60,6 @@ func (s *Service) movesInto(id int64) int64 {
 	return s.moves[id]
 }
 
-// movingInto returns the names of the moving repos of repo id, by creation.
-func (s *Service) movingInto(ctx context.Context, id int64) ([]string, error) {
-	ids, err := dbq.New(s.db.R).ListMovesInto(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(ids))
-	for _, rid := range ids {
-		r, err := s.repos.ByID(ctx, rid)
-		if errors.Is(err, repos.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r.Name)
-	}
-	return out, nil
-}
-
 // moveField is the repo field moves_into of the hosted repos. Move sets it when it creates the
 // repo; a create or an update through the API cannot.
 func (s *Service) moveField() repos.Field {
@@ -100,18 +80,7 @@ func (s *Service) moveField() repos.Field {
 			id, _ := ctx.Value(moveKey{}).(int64)
 			return dbq.New(tx).InsertRepoMove(ctx, dbq.InsertRepoMoveParams{RepoID: repo.ID, IntoRepoID: id, CreatedAt: time.Now().Unix()})
 		},
-		Load: func(repoID int64) json.RawMessage {
-			id := s.movesInto(repoID)
-			if id == 0 {
-				return nil
-			}
-			r, err := s.repos.ByID(context.Background(), id)
-			if err != nil {
-				return nil
-			}
-			raw, _ := json.Marshal(r.Name)
-			return raw
-		},
+		Load: func(repoID int64) json.RawMessage { return s.nameField(s.movesInto(repoID)) },
 	}
 }
 
@@ -182,6 +151,7 @@ func (s *Service) Move(ctx context.Context, sourceID int64, sourceRepo string, i
 	}
 	s.rehMu.Lock()
 	s.moves[r.ID] = target.ID
+	s.names[target.ID] = target.Name
 	s.rehMu.Unlock()
 
 	grants, err := s.auth.ListPermissions(ctx, target.ID)

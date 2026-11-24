@@ -9,6 +9,23 @@ import (
 	"context"
 )
 
+const countSigningKeyGram = `-- name: CountSigningKeyGram :one
+SELECT count(*) FROM (SELECT 1 FROM signing_key_grams WHERE gram = ?1 LIMIT ?2)
+`
+
+type CountSigningKeyGramParams struct {
+	Gram  string
+	Limit int64
+}
+
+// The probe of a gram: its rows, up to limit.
+func (q *Queries) CountSigningKeyGram(ctx context.Context, arg CountSigningKeyGramParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countSigningKeyGram, arg.Gram, arg.Limit)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createSigningKey = `-- name: CreateSigningKey :one
 INSERT INTO signing_keys (name, fingerprint, public_key, private_key, created_at) VALUES (?, ?, ?, X'', ?)
 RETURNING id
@@ -40,6 +57,27 @@ DELETE FROM signing_keys WHERE id = ?
 
 func (q *Queries) DeleteSigningKey(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, deleteSigningKey, id)
+	return err
+}
+
+const insertSigningKeyGram = `-- name: InsertSigningKeyGram :exec
+INSERT OR IGNORE INTO signing_key_grams (gram, key_id, name, fingerprint) VALUES (?, ?, ?, ?)
+`
+
+type InsertSigningKeyGramParams struct {
+	Gram        string
+	KeyID       int64
+	Name        string
+	Fingerprint string
+}
+
+func (q *Queries) InsertSigningKeyGram(ctx context.Context, arg InsertSigningKeyGramParams) error {
+	_, err := q.db.ExecContext(ctx, insertSigningKeyGram,
+		arg.Gram,
+		arg.KeyID,
+		arg.Name,
+		arg.Fingerprint,
+	)
 	return err
 }
 
@@ -117,6 +155,42 @@ func (q *Queries) ListReposOfSigningKey(ctx context.Context, arg ListReposOfSign
 	return items, nil
 }
 
+const listReposOfSigningKeys = `-- name: ListReposOfSigningKeys :many
+SELECT k.key_id, k.repo_id, r.name FROM repo_signing_keys k JOIN repos r ON r.id = k.repo_id
+WHERE k.key_id IN (SELECT value FROM json_each(?1))
+`
+
+type ListReposOfSigningKeysRow struct {
+	KeyID  int64
+	RepoID int64
+	Name   string
+}
+
+// The repos bound to a set of keys (a JSON array of ids), through repo_signing_keys_key: one query
+// for the keys of a list, which the caller orders by repo id.
+func (q *Queries) ListReposOfSigningKeys(ctx context.Context, keyIds interface{}) ([]ListReposOfSigningKeysRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposOfSigningKeys, keyIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposOfSigningKeysRow
+	for rows.Next() {
+		var i ListReposOfSigningKeysRow
+		if err := rows.Scan(&i.KeyID, &i.RepoID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSigningKeys = `-- name: ListSigningKeys :many
 
 SELECT id, name, fingerprint, public_key, private_key, created_at
@@ -129,7 +203,7 @@ type ListSigningKeysParams struct {
 }
 
 // Repository signing keys (internal/signing). Request paths read the in-memory snapshot; these
-// queries run at startup and on an admin change.
+// queries run at startup and on an admin change, but for the search of the keys.
 // Keyset page by name (pass "" for the first page).
 func (q *Queries) ListSigningKeys(ctx context.Context, arg ListSigningKeysParams) ([]SigningKey, error) {
 	rows, err := q.db.QueryContext(ctx, listSigningKeys, arg.After, arg.Limit)
@@ -151,6 +225,75 @@ func (q *Queries) ListSigningKeys(ctx context.Context, arg ListSigningKeysParams
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchSigningKeyFingerprints = `-- name: SearchSigningKeyFingerprints :many
+SELECT k.name FROM signing_key_grams g JOIN signing_keys k ON k.id = g.key_id
+WHERE g.gram = ?1 AND instr(g.fingerprint, ?2) > 0
+`
+
+type SearchSigningKeyFingerprintsParams struct {
+	Gram string
+	Text string
+}
+
+// The names of the keys in the rows of one trigram whose fingerprint holds a key ID.
+func (q *Queries) SearchSigningKeyFingerprints(ctx context.Context, arg SearchSigningKeyFingerprintsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, searchSigningKeyFingerprints, arg.Gram, arg.Text)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchSigningKeyNames = `-- name: SearchSigningKeyNames :many
+SELECT k.name FROM signing_key_grams g JOIN signing_keys k ON k.id = g.key_id
+WHERE g.gram = ?1 AND instr(g.name, ?2) > 0
+`
+
+type SearchSigningKeyNamesParams struct {
+	Gram string
+	Text string
+}
+
+// The search of the keys (internal/namesearch, migration 0002_key_search.sql): the names of the
+// keys in the rows of one gram whose name holds the text.
+func (q *Queries) SearchSigningKeyNames(ctx context.Context, arg SearchSigningKeyNamesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, searchSigningKeyNames, arg.Gram, arg.Text)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

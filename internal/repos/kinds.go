@@ -382,7 +382,64 @@ func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error)
 			return slices.Clone(out), nil
 		}
 	}
-	ids := s.Members(group.ID)
+	read, err := s.memberRepos(ctx, map[int64][]int64{group.ID: s.Members(group.ID)})
+	if err != nil {
+		return nil, err
+	}
+	out := read[group.ID]
+	if m != nil {
+		m.mu.Lock()
+		m.members[group.ID] = slices.Clone(out)
+		m.mu.Unlock()
+	}
+	return out, nil
+}
+
+// RememberMembers reads the member repos of every group of groups that the memo of ctx (Remember)
+// does not hold yet, in one query of their ids, into the memo: MemberRepos then reads none of
+// them again in the request (a page of repos with many groups). Without a memo it reads nothing.
+func (s *Service) RememberMembers(ctx context.Context, groups []*Repo) error {
+	m, _ := ctx.Value(memoKey{}).(*memo)
+	if m == nil {
+		return nil
+	}
+	want := map[int64][]int64{}
+	m.mu.Lock()
+	for _, g := range groups {
+		if _, ok := m.members[g.ID]; !ok && g.Kind == KindGroup {
+			want[g.ID] = nil
+		}
+	}
+	m.mu.Unlock()
+	if len(want) == 0 {
+		return nil
+	}
+	for id := range want {
+		want[id] = s.Members(id)
+	}
+	read, err := s.memberRepos(ctx, want)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	for id, out := range read {
+		if _, ok := m.members[id]; !ok {
+			m.members[id] = out
+		}
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// memberRepos returns the member repos of each group of members (group id -> member ids in read
+// order), in read order, from one query of every member id. A member deleted after the copy in
+// memory was read is gone.
+func (s *Service) memberRepos(ctx context.Context, members map[int64][]int64) (map[int64][]*Repo, error) {
+	var ids []int64
+	for _, ms := range members {
+		ids = append(ids, ms...)
+	}
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
 	found, err := s.rows(dbq.New(s.db.R).ListReposByIDs(ctx, ids))
 	if err != nil {
 		return nil, err
@@ -391,16 +448,15 @@ func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error)
 	for _, r := range found {
 		byID[r.ID] = r
 	}
-	out := make([]*Repo, 0, len(ids))
-	for _, id := range ids {
-		if r, ok := byID[id]; ok { // a member deleted after the copy was read is gone
-			out = append(out, r)
+	out := make(map[int64][]*Repo, len(members))
+	for g, ms := range members {
+		repos := make([]*Repo, 0, len(ms))
+		for _, id := range ms {
+			if r, ok := byID[id]; ok {
+				repos = append(repos, r)
+			}
 		}
-	}
-	if m != nil {
-		m.mu.Lock()
-		m.members[group.ID] = slices.Clone(out)
-		m.mu.Unlock()
+		out[g] = repos
 	}
 	return out, nil
 }
@@ -411,14 +467,15 @@ func resolveMembers(ctx context.Context, q *dbq.Queries, format string, names []
 	if len(names) == 0 || len(names) > MaxMembers {
 		return nil, invalid("a group holds 1 to %d repositories", MaxMembers)
 	}
+	found, err := byNames(ctx, q, names)
+	if err != nil {
+		return nil, err
+	}
 	ids := make([]int64, 0, len(names))
 	for _, n := range names {
-		r, err := byName(ctx, q, n)
-		if errors.Is(err, ErrNotFound) {
+		r := found[n]
+		if r == nil {
 			return nil, invalid("there is no repository %q", clip(n))
-		}
-		if err != nil {
-			return nil, err
 		}
 		switch {
 		case r.Kind == KindGroup:
@@ -440,16 +497,19 @@ func clip(s string) string {
 	return s
 }
 
+// writeMembers replaces the members of group with ids, in read order: two statements.
 func writeMembers(ctx context.Context, q *dbq.Queries, group int64, ids []int64) error {
 	if err := q.DeleteGroupMembers(ctx, group); err != nil {
 		return err
 	}
-	for i, id := range ids {
-		if err := q.InsertGroupMember(ctx, dbq.InsertGroupMemberParams{GroupID: group, MemberID: id, Position: int64(i)}); err != nil {
-			return err
-		}
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	js, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return q.InsertGroupMembers(ctx, dbq.InsertGroupMembersParams{GroupID: group, Members: string(js)})
 }
 
 // Proxy returns the remote of proxy repo id (in memory).

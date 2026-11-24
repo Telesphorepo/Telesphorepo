@@ -24,14 +24,15 @@ func (q *Queries) DeletePackage(ctx context.Context, arg DeletePackageParams) er
 	return err
 }
 
-const deleteVersionsOfAsset = `-- name: DeleteVersionsOfAsset :many
-DELETE FROM nuget_versions WHERE asset_id = ?
+const deleteVersionsOfAssets = `-- name: DeleteVersionsOfAssets :many
+DELETE FROM nuget_versions WHERE asset_id IN (SELECT value FROM json_each(?1))
 RETURNING lower_id
 `
 
-// Removes the version of a deleted .nupkg, through nuget_versions_asset.
-func (q *Queries) DeleteVersionsOfAsset(ctx context.Context, assetID int64) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, deleteVersionsOfAsset, assetID)
+// Removes the versions of the deleted .nupkg files of a remove batch (the JSON array of their
+// asset ids), through nuget_versions_asset.
+func (q *Queries) DeleteVersionsOfAssets(ctx context.Context, assetIds interface{}) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, deleteVersionsOfAssets, assetIds)
 	if err != nil {
 		return nil, err
 	}
@@ -584,104 +585,6 @@ func (q *Queries) ListVersionsDesc(ctx context.Context, arg ListVersionsDescPara
 			&i.UpdatedAt,
 			&i.BuildID,
 		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listVisibleReleases = `-- name: ListVisibleReleases :many
-SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease = 0 AND semver2 <= ?
-ORDER BY sort_key
-LIMIT ?
-`
-
-type ListVisibleReleasesParams struct {
-	RepoID  int64
-	LowerID string
-	Semver2 int64
-	Limit   int64
-}
-
-type ListVisibleReleasesRow struct {
-	Version    string
-	Normalized string
-}
-
-// The versions of a package that a search without prereleases shows, oldest first, through the
-// partial index of the listed releases.
-func (q *Queries) ListVisibleReleases(ctx context.Context, arg ListVisibleReleasesParams) ([]ListVisibleReleasesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listVisibleReleases,
-		arg.RepoID,
-		arg.LowerID,
-		arg.Semver2,
-		arg.Limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListVisibleReleasesRow
-	for rows.Next() {
-		var i ListVisibleReleasesRow
-		if err := rows.Scan(&i.Version, &i.Normalized); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listVisibleVersions = `-- name: ListVisibleVersions :many
-SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND semver2 <= ?
-ORDER BY sort_key
-LIMIT ?
-`
-
-type ListVisibleVersionsParams struct {
-	RepoID  int64
-	LowerID string
-	Semver2 int64
-	Limit   int64
-}
-
-type ListVisibleVersionsRow struct {
-	Version    string
-	Normalized string
-}
-
-// The versions of a package that a search with prereleases shows, oldest first, without their
-// metadata.
-func (q *Queries) ListVisibleVersions(ctx context.Context, arg ListVisibleVersionsParams) ([]ListVisibleVersionsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listVisibleVersions,
-		arg.RepoID,
-		arg.LowerID,
-		arg.Semver2,
-		arg.Limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListVisibleVersionsRow
-	for rows.Next() {
-		var i ListVisibleVersionsRow
-		if err := rows.Scan(&i.Version, &i.Normalized); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

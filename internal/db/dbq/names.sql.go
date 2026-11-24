@@ -70,17 +70,19 @@ func (q *Queries) DeleteRepoGrams(ctx context.Context, arg DeleteRepoGramsParams
 	return err
 }
 
-const insertRepoGram = `-- name: InsertRepoGram :exec
+const insertRepoGrams = `-- name: InsertRepoGrams :exec
 
-INSERT OR REPLACE INTO repo_name_grams (gram, name, format, kind, anonymous) VALUES (?, ?, ?, ?, ?)
+INSERT OR REPLACE INTO repo_name_grams (gram, name, format, kind, anonymous)
+SELECT j.value, ?1, ?2, ?3, ?4
+FROM json_each(CAST(?5 AS TEXT)) j
 `
 
-type InsertRepoGramParams struct {
-	Gram      string
+type InsertRepoGramsParams struct {
 	Name      string
 	Format    string
 	Kind      string
 	Anonymous int64
+	Grams     string
 }
 
 // Name search (internal/namesearch) over repo_name_grams and user_name_grams (migration
@@ -88,29 +90,32 @@ type InsertRepoGramParams struct {
 // in name order, and keeps the names that hold the text (instr on the gram row, no other row
 // read); the text ” keeps every name. The repos of a caller's grants are in dbq/extra.go
 // (ListReposIn), one lookup per grant.
-func (q *Queries) InsertRepoGram(ctx context.Context, arg InsertRepoGramParams) error {
-	_, err := q.db.ExecContext(ctx, insertRepoGram,
-		arg.Gram,
+// The rows of a name in one statement: grams is a JSON array of its grams.
+func (q *Queries) InsertRepoGrams(ctx context.Context, arg InsertRepoGramsParams) error {
+	_, err := q.db.ExecContext(ctx, insertRepoGrams,
 		arg.Name,
 		arg.Format,
 		arg.Kind,
 		arg.Anonymous,
+		arg.Grams,
 	)
 	return err
 }
 
-const insertUserGram = `-- name: InsertUserGram :exec
-INSERT OR REPLACE INTO user_name_grams (gram, name, user_id) VALUES (?, ?, ?)
+const insertUserGrams = `-- name: InsertUserGrams :exec
+INSERT OR REPLACE INTO user_name_grams (gram, name, user_id)
+SELECT j.value, ?1, ?2 FROM json_each(CAST(?3 AS TEXT)) j
 `
 
-type InsertUserGramParams struct {
-	Gram   string
+type InsertUserGramsParams struct {
 	Name   string
 	UserID int64
+	Grams  string
 }
 
-func (q *Queries) InsertUserGram(ctx context.Context, arg InsertUserGramParams) error {
-	_, err := q.db.ExecContext(ctx, insertUserGram, arg.Gram, arg.Name, arg.UserID)
+// The rows of a username in one statement: grams is a JSON array of its grams.
+func (q *Queries) InsertUserGrams(ctx context.Context, arg InsertUserGramsParams) error {
+	_, err := q.db.ExecContext(ctx, insertUserGrams, arg.Name, arg.UserID, arg.Grams)
 	return err
 }
 

@@ -13,6 +13,7 @@ package rebuild
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -274,12 +275,14 @@ func (q *Queue) rebuild(ctx context.Context, k key) (remaining bool, err error) 
 	} else if err := run(ctx, repo, k.grp, units); err != nil {
 		return false, err
 	}
+	js, err := json.Marshal(units)
+	if err != nil {
+		return false, err
+	}
 	err = q.db.Tx(ctx, func(tx *sql.Tx) error {
 		w := dbq.New(tx)
-		for _, u := range units {
-			if err := w.ClearRebuild(ctx, dbq.ClearRebuildParams{RepoID: k.repoID, Grp: k.grp, Unit: u, MarkedAt: start}); err != nil {
-				return err
-			}
+		if err := w.ClearRebuilds(ctx, dbq.ClearRebuildsParams{RepoID: k.repoID, Grp: k.grp, Units: string(js), MarkedAt: start}); err != nil {
+			return err
 		}
 		remaining, err = w.HasRebuild(ctx, dbq.HasRebuildParams{RepoID: k.repoID, Grp: k.grp})
 		return err

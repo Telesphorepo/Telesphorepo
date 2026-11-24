@@ -34,12 +34,16 @@ DELETE FROM arch_db_entries WHERE repo_id = ? AND arch = ? AND name = ?;
 SELECT id, vkey FROM arch_packages WHERE repo_id = ? AND arch = ? AND name = ?
 ORDER BY vkey DESC LIMIT 1;
 
--- The index entries that name a package, through arch_db_entries_package.
--- name: EntriesOfPackage :many
-SELECT arch, name FROM arch_db_entries WHERE package_id = ?;
+-- The index entries that name the packages of the deleted files of a remove batch (a JSON array
+-- of asset ids), through arch_packages_asset and arch_db_entries_package.
+-- name: EntriesOfAssets :many
+SELECT arch, name FROM arch_db_entries
+WHERE package_id IN (SELECT p.id FROM arch_packages p WHERE p.asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids))));
 
--- name: DeletePackage :exec
-DELETE FROM arch_packages WHERE id = ?;
+-- Removes the packages of the deleted files of a remove batch (a JSON array of asset ids), their
+-- file lists and entries with them, through arch_packages_asset.
+-- name: DeletePackagesOfAssets :many
+DELETE FROM arch_packages WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids))) RETURNING asset_id;
 
 -- Whether a package name has a file, through arch_packages_order.
 -- name: PackageHasFiles :one

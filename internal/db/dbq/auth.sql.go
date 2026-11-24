@@ -11,18 +11,16 @@ import (
 	"strings"
 )
 
-const addRepoPerm = `-- name: AddRepoPerm :exec
-INSERT INTO repo_permissions (repo_id, user_id, perm) VALUES (?, ?, ?) ON CONFLICT DO NOTHING
+const addPairPerms = `-- name: AddPairPerms :exec
+INSERT INTO repo_permissions (repo_id, user_id, perm)
+SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]')
+FROM json_each(CAST(?1 AS TEXT)) j WHERE true
+ON CONFLICT DO NOTHING
 `
 
-type AddRepoPermParams struct {
-	RepoID int64
-	UserID int64
-	Perm   string
-}
-
-func (q *Queries) AddRepoPerm(ctx context.Context, arg AddRepoPermParams) error {
-	_, err := q.db.ExecContext(ctx, addRepoPerm, arg.RepoID, arg.UserID, arg.Perm)
+// rows is a JSON array of [repo_id, user_id, perm].
+func (q *Queries) AddPairPerms(ctx context.Context, rows string) error {
+	_, err := q.db.ExecContext(ctx, addPairPerms, rows)
 	return err
 }
 
@@ -191,21 +189,14 @@ func (q *Queries) DeleteOtherUserSessions(ctx context.Context, arg DeleteOtherUs
 	return err
 }
 
-const deleteRepoUserPerms = `-- name: DeleteRepoUserPerms :execrows
-DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?
+const deletePairPerms = `-- name: DeletePairPerms :exec
+DELETE FROM repo_permissions WHERE (repo_id, user_id) IN
+  (SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]') FROM json_each(CAST(?1 AS TEXT)) j)
 `
 
-type DeleteRepoUserPermsParams struct {
-	RepoID int64
-	UserID int64
-}
-
-func (q *Queries) DeleteRepoUserPerms(ctx context.Context, arg DeleteRepoUserPermsParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteRepoUserPerms, arg.RepoID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) DeletePairPerms(ctx context.Context, pairs string) error {
+	_, err := q.db.ExecContext(ctx, deletePairPerms, pairs)
+	return err
 }
 
 const deleteSession = `-- name: DeleteSession :exec
@@ -270,6 +261,26 @@ func (q *Queries) DeleteUserToken(ctx context.Context, arg DeleteUserTokenParams
 	var i DeleteUserTokenRow
 	err := row.Scan(&i.UserID, &i.PublicID)
 	return i, err
+}
+
+const deleteUsersSessions = `-- name: DeleteUsersSessions :exec
+DELETE FROM sessions WHERE user_id IN (/*SLICE:ids*/?)
+`
+
+// The sessions of the users of ids, served by sessions_user.
+func (q *Queries) DeleteUsersSessions(ctx context.Context, ids []int64) error {
+	query := deleteUsersSessions
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.db.ExecContext(ctx, query, queryParams...)
+	return err
 }
 
 const extendSession = `-- name: ExtendSession :execrows
@@ -663,6 +674,38 @@ func (q *Queries) ListAnonymousRepoIDs(ctx context.Context) ([]int64, error) {
 	return items, nil
 }
 
+const listPairPerms = `-- name: ListPairPerms :many
+SELECT p.repo_id, p.user_id, p.perm
+FROM json_each(CAST(?1 AS TEXT)) j CROSS JOIN repo_permissions p
+WHERE p.repo_id = json_extract(j.value, '$[0]') AND p.user_id = json_extract(j.value, '$[1]')
+`
+
+// A list change of grants (PUT /api/grants) reads and writes every pair of it in one statement
+// each: pairs is a JSON array of [repo_id, user_id], a seek of the primary key per pair (CROSS
+// JOIN keeps the grants the inner loop).
+func (q *Queries) ListPairPerms(ctx context.Context, pairs string) ([]RepoPermission, error) {
+	rows, err := q.db.QueryContext(ctx, listPairPerms, pairs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RepoPermission
+	for rows.Next() {
+		var i RepoPermission
+		if err := rows.Scan(&i.RepoID, &i.UserID, &i.Perm); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPeople = `-- name: ListPeople :many
 SELECT username FROM users
 WHERE username >= ?1 AND username < ?2 AND disabled = 0
@@ -871,6 +914,49 @@ func (q *Queries) ListUserPerms(ctx context.Context, userID int64) ([]string, er
 	return items, nil
 }
 
+const listUsernames = `-- name: ListUsernames :many
+SELECT id, username FROM users WHERE id IN (/*SLICE:ids*/?)
+`
+
+type ListUsernamesRow struct {
+	ID       int64
+	Username string
+}
+
+// The usernames of ids (the uploaders of a page of files), through the primary key.
+func (q *Queries) ListUsernames(ctx context.Context, ids []int64) ([]ListUsernamesRow, error) {
+	query := listUsernames
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsernamesRow
+	for rows.Next() {
+		var i ListUsernamesRow
+		if err := rows.Scan(&i.ID, &i.Username); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
@@ -927,18 +1013,180 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUse
 	return items, nil
 }
 
-const setUserDisabled = `-- name: SetUserDisabled :exec
-UPDATE users SET disabled = ? WHERE id = ?
+const listUsersGrants = `-- name: ListUsersGrants :many
+SELECT user_id, repo_id, perm FROM repo_permissions WHERE user_id IN (/*SLICE:ids*/?)
 `
 
-type SetUserDisabledParams struct {
-	Disabled bool
-	ID       int64
+type ListUsersGrantsRow struct {
+	UserID int64
+	RepoID int64
+	Perm   string
 }
 
-func (q *Queries) SetUserDisabled(ctx context.Context, arg SetUserDisabledParams) error {
-	_, err := q.db.ExecContext(ctx, setUserDisabled, arg.Disabled, arg.ID)
-	return err
+// The grants of the users of ids, one row per permission, through repo_permissions_user.
+func (q *Queries) ListUsersGrants(ctx context.Context, ids []int64) ([]ListUsersGrantsRow, error) {
+	query := listUsersGrants
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersGrantsRow
+	for rows.Next() {
+		var i ListUsersGrantsRow
+		if err := rows.Scan(&i.UserID, &i.RepoID, &i.Perm); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersNamed = `-- name: ListUsersNamed :many
+SELECT id, username, disabled, kind, email, created_at,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE username IN (/*SLICE:names*/?)
+`
+
+type ListUsersNamedRow struct {
+	ID        int64
+	Username  string
+	Disabled  bool
+	Kind      string
+	Email     sql.NullString
+	CreatedAt int64
+	Perms     string
+}
+
+// The accounts of usernames (a list of a bulk change, at most a page), through the username index.
+func (q *Queries) ListUsersNamed(ctx context.Context, names []string) ([]ListUsersNamedRow, error) {
+	query := listUsersNamed
+	var queryParams []interface{}
+	if len(names) > 0 {
+		for _, v := range names {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:names*/?", strings.Repeat(",?", len(names))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:names*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersNamedRow
+	for rows.Next() {
+		var i ListUsersNamedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Username,
+			&i.Disabled,
+			&i.Kind,
+			&i.Email,
+			&i.CreatedAt,
+			&i.Perms,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPerms = `-- name: ListUsersPerms :many
+SELECT user_id, perm FROM user_permissions WHERE user_id IN (/*SLICE:ids*/?)
+`
+
+// The server permissions of the users of ids, through the user_permissions primary key.
+func (q *Queries) ListUsersPerms(ctx context.Context, ids []int64) ([]UserPermission, error) {
+	query := listUsersPerms
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserPermission
+	for rows.Next() {
+		var i UserPermission
+		if err := rows.Scan(&i.UserID, &i.Perm); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersWithRepoPermIn = `-- name: ListUsersWithRepoPermIn :many
+SELECT CAST(u.value AS INTEGER) AS user_id FROM json_each(CAST(?1 AS TEXT)) u
+WHERE EXISTS (SELECT 1 FROM repo_permissions p WHERE p.user_id = u.value
+  AND p.perm IN (SELECT value FROM json_each(CAST(?2 AS TEXT))))
+`
+
+type ListUsersWithRepoPermInParams struct {
+	Users string
+	Perms string
+}
+
+// The users of users (a JSON array of ids) who hold one of perms (a JSON array) on some repo,
+// through repo_permissions_user: a seek per user and permission.
+func (q *Queries) ListUsersWithRepoPermIn(ctx context.Context, arg ListUsersWithRepoPermInParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listUsersWithRepoPermIn, arg.Users, arg.Perms)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var user_id int64
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setUserPassword = `-- name: SetUserPassword :exec
@@ -953,6 +1201,31 @@ type SetUserPasswordParams struct {
 
 func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams) error {
 	_, err := q.db.ExecContext(ctx, setUserPassword, arg.PasswordHash, arg.PasswordChangedAt, arg.ID)
+	return err
+}
+
+const setUsersDisabled = `-- name: SetUsersDisabled :exec
+UPDATE users SET disabled = ?1 WHERE id IN (/*SLICE:ids*/?)
+`
+
+type SetUsersDisabledParams struct {
+	Disabled bool
+	Ids      []int64
+}
+
+func (q *Queries) SetUsersDisabled(ctx context.Context, arg SetUsersDisabledParams) error {
+	query := setUsersDisabled
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Disabled)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.db.ExecContext(ctx, query, queryParams...)
 	return err
 }
 

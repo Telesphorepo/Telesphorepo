@@ -384,13 +384,17 @@ func (a *API) readMembers(r *http.Request, c *route.Call) ([]*repos.Repo, error)
 	return a.access.GroupMembers(r.Context(), r, c.P, c.Repo)
 }
 
-// stores reports whether member m stores the file at path (format.Stores).
-func (a *API) stores(ctx context.Context, m *repos.Repo, path string) (bool, error) {
-	_, err := a.assets.Get(ctx, m.ID, path)
-	if errors.Is(err, assets.ErrNotFound) {
-		return false, nil
+// stores returns the paths of paths that member m stores (format.Stores): one query.
+func (a *API) stores(ctx context.Context, m *repos.Repo, paths []string) (map[string]bool, error) {
+	got, err := a.assets.GetMany(ctx, m.ID, paths)
+	if err != nil {
+		return nil, err
 	}
-	return err == nil, err
+	out := make(map[string]bool, len(got))
+	for p := range got {
+		out[p] = true
+	}
+	return out, nil
 }
 
 // failVersions answers an error of the versions, builds and snippets routes: 502 when a proxy's

@@ -38,7 +38,7 @@
     <span class="flex h-6 min-w-4 shrink-0 items-center text-label text-muted-foreground tabular-nums">{n}</span>
     <div class="min-w-0">
       <h3 class="text-label leading-6">{title}</h3>
-      {#if text}<p class="max-w-prose text-meta text-muted-foreground">{text}</p>{/if}
+      {#if text}<p class="text-meta text-pretty text-muted-foreground">{text}</p>{/if}
     </div>
   </div>
 {/snippet}

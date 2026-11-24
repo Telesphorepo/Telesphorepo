@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
@@ -11,14 +12,14 @@ import (
 // grams of each username (internal/namesearch), written in the transaction of the account's
 // create. A username is never renamed; the account's row takes its grams with it.
 
-// writeUserGrams writes the grams of username, the account id, in the transaction of q.
+// writeUserGrams writes the grams of username, the account id, in the transaction of q: one
+// statement.
 func writeUserGrams(ctx context.Context, q *dbq.Queries, id int64, username string) error {
-	for _, g := range namesearch.Grams(username) {
-		if err := q.InsertUserGram(ctx, dbq.InsertUserGramParams{Gram: g, Name: username, UserID: id}); err != nil {
-			return err
-		}
+	grams, err := json.Marshal(namesearch.Grams(username))
+	if err != nil {
+		return err
 	}
-	return nil
+	return q.InsertUserGrams(ctx, dbq.InsertUserGramsParams{Name: username, UserID: id, Grams: string(grams)})
 }
 
 // searchUsers returns at most limit items of a search of text (folded) after the name after, by

@@ -257,6 +257,9 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 	var follow []repopath.Path
 	projects := map[string]bool{}
 	listChanged := false
+	// The rows of the batch's files and .metadata siblings: one statement each.
+	var metadata []string
+	var files []*assets.Asset
 	for _, a := range removed {
 		if strings.HasPrefix(a.Path, ".simple/") {
 			listChanged = true
@@ -265,24 +268,46 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 			continue
 		}
 		if base, ok := strings.CutSuffix(a.Path, ".metadata"); ok {
-			ps, err := q.ClearMetadata(ctx, dbq.ClearMetadataParams{RepoID: repo.ID, Filename: repopath.Path(base).Base()})
-			if err != nil {
-				return nil, err
-			}
-			for _, p := range ps {
-				projects[p] = true
-			}
+			metadata = append(metadata, repopath.Path(base).Base())
 			continue
 		}
-		ps, err := q.DeleteFilesOfAsset(ctx, a.ID)
+		files = append(files, a)
+	}
+	if len(metadata) > 0 {
+		js, err := json.Marshal(metadata)
+		if err != nil {
+			return nil, err
+		}
+		ps, err := q.ClearMetadata(ctx, dbq.ClearMetadataParams{RepoID: repo.ID, Filenames: string(js)})
 		if err != nil {
 			return nil, err
 		}
 		for _, p := range ps {
 			projects[p] = true
 		}
-		if len(ps) > 0 {
-			follow = append(follow, repopath.Path(a.Path+".metadata"))
+	}
+	if len(files) > 0 {
+		ids := make([]int64, len(files))
+		for i, a := range files {
+			ids[i] = a.ID
+		}
+		js, err := json.Marshal(ids)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := q.DeleteFilesOfAssets(ctx, string(js))
+		if err != nil {
+			return nil, err
+		}
+		had := map[int64]bool{}
+		for _, r := range rows {
+			projects[r.Project] = true
+			had[r.AssetID] = true
+		}
+		for _, a := range files {
+			if had[a.ID] {
+				follow = append(follow, repopath.Path(a.Path+".metadata"))
+			}
 		}
 	}
 	for p := range projects {

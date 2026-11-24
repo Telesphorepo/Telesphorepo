@@ -12,6 +12,7 @@ package blobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -131,26 +132,39 @@ func (s *Store) Ensure(ctx context.Context, sp *Spooled) (*Blob, error) {
 	return m[sp.SHA256], nil
 }
 
-// EnsureAll is Ensure for several bodies, under the digest locks of all of them: it writes the
-// missing objects (a few at a time), then inserts their rows in one transaction. fast writes an
+// EnsureAll is Ensure for several bodies, under the digest locks of all of them: it reads the
+// blobs of every digest in one query, writes the missing objects (a few at a time), then inserts
+// their rows in one transaction. fast writes an
 // object without the store's crash safety when the store has such a path (the dev demo data). It
 // returns the blobs by digest.
 func (s *Store) EnsureAll(ctx context.Context, sps []*Spooled, fast bool) (map[string]*Blob, error) {
 	out := make(map[string]*Blob, len(sps))
+	// The blobs that exist, in one query for every digest.
+	var digests []string
+	asked := make(map[string]bool, len(sps))
+	for _, sp := range sps {
+		if !asked[sp.SHA256] {
+			asked[sp.SHA256] = true
+			digests = append(digests, sp.SHA256)
+		}
+	}
+	js, err := json.Marshal(digests)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbq.New(s.db.R).ListBlobsBySha256(ctx, string(js))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.Sha256] = &Blob{ID: r.ID, SHA256: r.Sha256, Size: r.Size, MD5: r.Md5, SHA1: r.Sha1}
+	}
 	var missing []*Spooled
 	for _, sp := range sps {
 		if _, ok := out[sp.SHA256]; ok || slices.ContainsFunc(missing, func(m *Spooled) bool { return m.SHA256 == sp.SHA256 }) {
 			continue
 		}
-		b, err := s.Get(ctx, sp.SHA256)
-		switch {
-		case err == nil:
-			out[sp.SHA256] = b
-		case errors.Is(err, ErrUnknown):
-			missing = append(missing, sp)
-		default:
-			return nil, err
-		}
+		missing = append(missing, sp)
 	}
 	if len(missing) == 0 {
 		return out, nil
@@ -159,7 +173,7 @@ func (s *Store) EnsureAll(ctx context.Context, sps []*Spooled, fast bool) (map[s
 		return nil, err
 	}
 	now := time.Now().Unix()
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		for _, sp := range missing {
 			id, err := q.InsertBlob(ctx, dbq.InsertBlobParams{Sha256: sp.SHA256, Size: sp.Size, UnreferencedAt: now, CreatedAt: now,
@@ -235,7 +249,7 @@ const gcBatch = 1000
 // GC deletes every blob that no asset referenced for longer than grace, in rounds of gcBatch.
 // Under the digest locks of the round, which every new reference to a blob also holds, it checks
 // again in one query which blobs no asset points to, deletes their objects with one DeleteMany,
-// then their rows in one transaction. A blob whose object delete failed keeps its row, and a
+// then their rows in one statement. A blob whose object delete failed keeps its row, and a
 // later run tries again. It returns how many blobs it deleted.
 func (s *Store) GC(ctx context.Context, grace time.Duration) (int, error) {
 	n := 0
@@ -298,22 +312,22 @@ func (s *Store) collect(ctx context.Context, rows []dbq.ListUnreferencedBlobsRow
 	// The rows of deleted objects go even when ctx ends: a row without its object would make a
 	// new upload of the same bytes reuse a blob that is gone.
 	dctx := context.WithoutCancel(ctx)
-	n := 0
-	err = s.db.Tx(dctx, func(tx *sql.Tx) error {
-		n = 0
-		q := dbq.New(tx)
-		for _, r := range rows {
-			if !collectable[r.ID] || left[Key(r.Sha256)] {
-				continue
-			}
-			c, err := q.DeleteUnreferencedBlob(dctx, r.ID)
-			if err != nil {
-				return err
-			}
-			n += int(c)
+	var gone []int64
+	for _, r := range rows {
+		if collectable[r.ID] && !left[Key(r.Sha256)] {
+			gone = append(gone, r.ID)
 		}
-		return nil
-	})
+	}
+	n := 0
+	if len(gone) > 0 {
+		js, jerr := json.Marshal(gone)
+		if jerr != nil {
+			return 0, errors.Join(delErr, jerr)
+		}
+		var c int64
+		c, err = dbq.New(s.db.W).DeleteUnreferencedBlobs(dctx, string(js))
+		n = int(c)
+	}
 	if err != nil {
 		return 0, errors.Join(delErr, err)
 	}

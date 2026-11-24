@@ -1,12 +1,15 @@
 -- The counters of group repos (internal/api/groupcounts.go): group_counts, group_count_members
 -- and group_count_pending. The triggers of migration 0003 keep a row from its insert on.
 
--- The counters of a group for a set of members, through UNIQUE (group_id, members), once the job
--- has counted them (no group_count_pending entry).
--- name: GetGroupCount :one
-SELECT file_count, total_size, last_published_at FROM group_counts
-WHERE group_id = ? AND members = ?
-  AND NOT EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = group_counts.id);
+-- The counters of groups for their sets of members, once the job has counted them (no
+-- group_count_pending entry): sets is a JSON array of [group_id, members] pairs (the groups of a
+-- page of repos), each a seek of UNIQUE (group_id, members). A pair without a counted row has no
+-- row.
+-- name: ListGroupCounts :many
+SELECT g.group_id, g.members, g.file_count, g.total_size, g.last_published_at
+FROM json_each(CAST(sqlc.arg(sets) AS TEXT)) j CROSS JOIN group_counts g
+WHERE g.group_id = json_extract(j.value, '$[0]') AND g.members = json_extract(j.value, '$[1]')
+  AND NOT EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = g.id);
 
 -- The row of a group for a set of members, counted or not, and whether the job still counts it.
 -- name: FindGroupCount :one

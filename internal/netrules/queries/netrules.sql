@@ -19,8 +19,10 @@ SELECT list_id FROM ip_list_grams WHERE gram = sqlc.arg(gram) AND instr(text, sq
 -- name: CountIPListGram :one
 SELECT count(*) FROM (SELECT 1 FROM ip_list_grams WHERE gram = sqlc.arg(gram) LIMIT sqlc.arg(limit));
 
--- name: InsertIPListGram :exec
-INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text) VALUES (?, ?, ?);
+-- The grams of a list in one statement: grams is a JSON array of the grams.
+-- name: InsertIPListGrams :exec
+INSERT OR REPLACE INTO ip_list_grams (gram, list_id, text)
+SELECT g.value, CAST(sqlc.arg(list_id) AS INTEGER), CAST(sqlc.arg(text) AS TEXT) FROM json_each(sqlc.arg(grams)) g;
 
 -- The grams of a list, through ip_list_grams_list (a change of its name or title writes them again).
 -- name: DeleteIPListGrams :exec
@@ -49,18 +51,21 @@ UPDATE ip_lists SET name = ?, title = ?, description = ?, ranges = ? WHERE id = 
 -- name: DeleteCustomList :exec
 DELETE FROM ip_lists WHERE id = ? AND kind = 'custom';
 
--- The repos whose allowed networks name a list, through repo_networks_list_id.
--- name: ListReposOfList :many
-SELECT r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
-WHERE x.list_id = ?;
+-- The repos whose allowed networks name each of the lists of a JSON array of list ids, through
+-- repo_networks_list_id: one query for every list of GET /api/ip-lists.
+-- name: ListReposOfLists :many
+SELECT x.list_id, r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
+WHERE x.list_id IN (SELECT value FROM json_each(sqlc.arg(list_ids)));
 
--- The next repo after repo_id that has allowed networks: one seek on repo_networks_repo.
--- name: NextNetworkRepo :one
-SELECT repo_id FROM repo_networks WHERE repo_id > ? ORDER BY repo_id LIMIT 1;
+-- A page of every allowed network in id order (entry order within a repo), after the id after:
+-- the start reads them all into memory, a page per query.
+-- name: ListNetworksAfter :many
+SELECT id, repo_id, cidr, list_id, note FROM repo_networks WHERE id > sqlc.arg(after) ORDER BY id LIMIT sqlc.arg(limit);
 
--- The allowed networks of a repo in entry order, through repo_networks_repo.
--- name: ListRepoNetworks :many
-SELECT id, cidr, list_id, note FROM repo_networks WHERE repo_id = ? ORDER BY id;
+-- The public repos among a JSON array of repo ids (the repos with allowed networks): one seek
+-- of the primary key per id.
+-- name: ListPublicReposIn :many
+SELECT id, name FROM repos WHERE id IN (SELECT value FROM json_each(sqlc.arg(ids))) AND anonymous_read = 1;
 
 -- Whether a repo has allowed networks, through repo_networks_repo.
 -- name: HasRepoNetworks :one
@@ -69,8 +74,13 @@ SELECT EXISTS (SELECT 1 FROM repo_networks WHERE repo_id = ?);
 -- name: DeleteRepoNetworks :exec
 DELETE FROM repo_networks WHERE repo_id = ?;
 
--- name: InsertRepoNetwork :exec
-INSERT INTO repo_networks (repo_id, cidr, list_id, note) VALUES (?, ?, ?, ?);
+-- The allowed networks of a repo in one statement, in entry order: networks is a JSON array of
+-- {"cidr", "list_id", "note"} (cidr or list_id null).
+-- name: InsertRepoNetworks :exec
+INSERT INTO repo_networks (repo_id, cidr, list_id, note)
+SELECT CAST(sqlc.arg(repo_id) AS INTEGER), json_extract(n.value, '$.cidr'), json_extract(n.value, '$.list_id'),
+  json_extract(n.value, '$.note')
+FROM json_each(sqlc.arg(networks)) n;
 
 -- Whether a repo is public, read in the transaction that saves its allowed networks.
 -- name: RepoIsPublic :one
@@ -83,5 +93,6 @@ SELECT list_id FROM trusted_proxy_lists ORDER BY list_id;
 -- name: DeleteTrustedProxyLists :exec
 DELETE FROM trusted_proxy_lists;
 
--- name: InsertTrustedProxyList :exec
-INSERT INTO trusted_proxy_lists (list_id) VALUES (?);
+-- The IP lists that trusted proxies include, in one statement: list_ids is a JSON array.
+-- name: InsertTrustedProxyLists :exec
+INSERT INTO trusted_proxy_lists (list_id) SELECT value FROM json_each(sqlc.arg(list_ids));

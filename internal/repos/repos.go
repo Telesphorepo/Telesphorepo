@@ -659,20 +659,25 @@ func (s *Service) Update(ctx context.Context, name string, p Patch) (*Repo, erro
 
 // UpdateAll applies p to every repo of names in one transaction. It checks every repo first: an
 // unknown name returns a *MissingError and changes nothing. It returns the repos after the
-// change, in the order of names, and how many of them changed.
+// change, in the order of names, and how many of them changed. The repos of names are read in one
+// query (byNames); each changed repo writes its own row, change hooks and event.
 func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Repo, int, error) {
 	var all []*changes
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		all = all[:0]
 		q := dbq.New(tx)
+		found, err := byNames(ctx, q, names)
+		if err != nil {
+			return err
+		}
 		for _, name := range names {
-			cur, err := s.counted(byName(ctx, q, name))
-			if errors.Is(err, ErrNotFound) {
+			cur := found[name]
+			if cur == nil {
 				return &MissingError{Kind: "repository", Name: name}
 			}
-			if err != nil {
-				return err
-			}
+			// A copy: two names of one repo (its name and a redirect) plan from the same row.
+			cp := *cur
+			cur, _ = s.counted(&cp, nil)
 			c, err := s.plan(ctx, q, cur, p)
 			if err != nil {
 				return err

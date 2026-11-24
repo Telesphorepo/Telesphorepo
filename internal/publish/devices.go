@@ -14,6 +14,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 )
@@ -229,6 +230,9 @@ func (s *Service) Approve(ctx context.Context, r *http.Request, p *auth.Principa
 		if err != nil {
 			return err
 		}
+		if err := writeDeviceGrams(ctx, q, id, p.UserID, p.Username, e.Name); err != nil {
+			return err
+		}
 		n, err := q.ApproveEnrollment(ctx, dbq.ApproveEnrollmentParams{
 			ApprovedBy: nullID(p.UserID), DeviceID: nullID(id), DeviceCodeHash: e.DeviceCodeHash, Now: now.Unix(),
 		})
@@ -292,9 +296,25 @@ func (s *Service) Poll(ctx context.Context, deviceCode string) (int64, string, e
 }
 
 // UserDevices returns a newest-first keyset page of a user's devices: ids below after (0: first
-// page). next is the cursor of the next page, 0 at the end.
-func (s *Service) UserDevices(ctx context.Context, userID, after int64, limit int) ([]Device, int64, error) {
-	rows, err := s.rq.ListUserDevices(ctx, dbq.ListUserDevicesParams{UserID: userID, Before: beforeCursor(after), Limit: int64(limit)})
+// page); with a text (folded, namesearch.Text) the devices whose name or the person's username
+// holds it. next is the cursor of the next page, 0 at the end.
+func (s *Service) UserDevices(ctx context.Context, userID int64, text string, after int64, limit int) ([]Device, int64, error) {
+	var rows []dbq.ListUserDevicesRow
+	var err error
+	if text == "" {
+		rows, err = s.rq.ListUserDevices(ctx, dbq.ListUserDevicesParams{UserID: userID, Before: beforeCursor(after), Limit: int64(limit)})
+	} else {
+		var g string
+		var ok bool
+		if g, ok, err = s.deviceGram(ctx, text); ok {
+			var found []dbq.SearchUserDevicesRow
+			found, err = s.rq.SearchUserDevices(ctx, dbq.SearchUserDevicesParams{Gram: g, UserID: userID,
+				Before: beforeCursor(after), Text: text, Limit: int64(limit)})
+			for _, r := range found {
+				rows = append(rows, dbq.ListUserDevicesRow(r))
+			}
+		}
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -311,9 +331,25 @@ func (s *Service) UserDevices(ctx context.Context, userID, after int64, limit in
 	return out, nextID(len(rows), limit, func() int64 { return rows[len(rows)-1].ID }), nil
 }
 
-// Devices returns a newest-first keyset page of every device with its owner (people).
-func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device, int64, error) {
-	rows, err := s.rq.ListDevices(ctx, dbq.ListDevicesParams{Before: beforeCursor(after), Limit: int64(limit)})
+// Devices returns a newest-first keyset page of every device with its owner (people); with a
+// text (folded, namesearch.Text) the devices whose name or owner's username holds it.
+func (s *Service) Devices(ctx context.Context, text string, after int64, limit int) ([]Device, int64, error) {
+	var rows []dbq.ListDevicesRow
+	var err error
+	if text == "" {
+		rows, err = s.rq.ListDevices(ctx, dbq.ListDevicesParams{Before: beforeCursor(after), Limit: int64(limit)})
+	} else {
+		var g string
+		var ok bool
+		if g, ok, err = s.deviceGram(ctx, text); ok {
+			var found []dbq.SearchDevicesRow
+			found, err = s.rq.SearchDevices(ctx, dbq.SearchDevicesParams{Gram: g, Before: beforeCursor(after), Text: text,
+				Limit: int64(limit)})
+			for _, r := range found {
+				rows = append(rows, dbq.ListDevicesRow(r))
+			}
+		}
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -328,6 +364,26 @@ func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device
 		})
 	}
 	return out, nextID(len(rows), limit, func() int64 { return rows[len(rows)-1].ID }), nil
+}
+
+// deviceGram is the gram of device_grams whose rows a search of text reads (namesearch.Gram); ok
+// is false when no device can hold text.
+func (s *Service) deviceGram(ctx context.Context, text string) (string, bool, error) {
+	return namesearch.Gram(ctx, text, func(ctx context.Context, g string, limit int64) (int64, error) {
+		return s.rq.CountDeviceGram(ctx, dbq.CountDeviceGramParams{Gram: g, Limit: limit})
+	})
+}
+
+// writeDeviceGrams writes the grams of device id of userID (device_grams), those of its name and
+// of the owner's username, in the transaction q of the device's create.
+func writeDeviceGrams(ctx context.Context, q *dbq.Queries, id, userID int64, username, name string) error {
+	text := namesearch.Fold(username) + "\x1f" + namesearch.Fold(name)
+	for _, g := range append(namesearch.Grams(username), namesearch.Grams(name)...) {
+		if err := q.InsertDeviceGram(ctx, dbq.InsertDeviceGramParams{Gram: g, DeviceID: id, UserID: userID, Text: text}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RevokeDevice revokes a device of p (any device when p holds people.manage), ends its open

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/arch/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -61,10 +62,11 @@ func group(rows []dbq.VersionFile) []*version {
 	return out
 }
 
-func (h *Handler) summary(ctx context.Context, v *version) (*format.Version, error) {
+// summary is the format.Version of v, with its CI build record from loader.
+func summary(ctx context.Context, loader *ci.Loader, v *version) (*format.Version, error) {
 	out := &format.Version{Version: v.name, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: v.at}
 	var err error
-	out.CI, err = h.host.Builds.Loader().Get(ctx, v.build)
+	out.CI, err = loader.Get(ctx, v.build)
 	return out, err
 }
 
@@ -93,12 +95,21 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		}
 		return &art, nil, "", nil
 	}
+	// The CI build records of the page: one query.
+	loader := h.host.Builds.Loader()
+	ids := make([]int64, len(versions))
+	for i, v := range versions {
+		ids[i] = v.build
+	}
+	if err := loader.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	var out []format.Version
 	for _, v := range versions {
 		if len(out) == limit {
 			return &art, out, out[len(out)-1].Version, nil
 		}
-		s, err := h.summary(ctx, v)
+		s, err := summary(ctx, loader, v)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -119,7 +130,7 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 		return nil, nil, nil, "", err
 	}
 	v := group(rows)[0]
-	ver, err := h.summary(ctx, v)
+	ver, err := summary(ctx, h.host.Builds.Loader(), v)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}

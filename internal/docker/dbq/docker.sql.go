@@ -542,41 +542,6 @@ func (q *Queries) ListRefs(ctx context.Context, arg ListRefsParams) ([]ListRefsR
 	return items, nil
 }
 
-const listRepoImages = `-- name: ListRepoImages :many
-SELECT full_name FROM docker_images WHERE repo_id = ?1 AND image > ?2
-ORDER BY image LIMIT ?3
-`
-
-type ListRepoImagesParams struct {
-	RepoID int64
-	After  string
-	Limit  int64
-}
-
-// A keyset page of the images of a repo by name, through the primary key.
-func (q *Queries) ListRepoImages(ctx context.Context, arg ListRepoImagesParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoImages, arg.RepoID, arg.After, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var full_name string
-		if err := rows.Scan(&full_name); err != nil {
-			return nil, err
-		}
-		items = append(items, full_name)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listTags = `-- name: ListTags :many
 SELECT tag FROM docker_tags WHERE repo_id = ?1 AND image = ?2 AND tag > ?3
 ORDER BY tag LIMIT ?4
@@ -852,21 +817,39 @@ func (q *Queries) RenameImages(ctx context.Context, arg RenameImagesParams) erro
 	return err
 }
 
-const repoLinkOf = `-- name: RepoLinkOf :one
-SELECT image FROM docker_links WHERE repo_id = ? AND digest = ? LIMIT 1
+const repoLinkedDigests = `-- name: RepoLinkedDigests :many
+SELECT CAST(j.value AS TEXT) AS digest FROM json_each(?1) j
+WHERE EXISTS (SELECT 1 FROM docker_links l WHERE l.repo_id = ?2 AND l.digest = j.value)
 `
 
-type RepoLinkOfParams struct {
-	RepoID int64
-	Digest string
+type RepoLinkedDigestsParams struct {
+	Digests interface{}
+	RepoID  int64
 }
 
-// An image of the repo that links a blob, through docker_links_digest.
-func (q *Queries) RepoLinkOf(ctx context.Context, arg RepoLinkOfParams) (string, error) {
-	row := q.db.QueryRowContext(ctx, repoLinkOf, arg.RepoID, arg.Digest)
-	var image string
-	err := row.Scan(&image)
-	return image, err
+// The blobs of a set (a JSON array of digests) that an image of the repo links: one seek of
+// docker_links_digest per digest.
+func (q *Queries) RepoLinkedDigests(ctx context.Context, arg RepoLinkedDigestsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, repoLinkedDigests, arg.Digests, arg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var digest string
+		if err := rows.Scan(&digest); err != nil {
+			return nil, err
+		}
+		items = append(items, digest)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const reposWithImages = `-- name: ReposWithImages :many
@@ -932,6 +915,43 @@ func (q *Queries) SomeTagsOfDigest(ctx context.Context, arg SomeTagsOfDigestPara
 		arg.Digest,
 		arg.Limit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		items = append(items, tag)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const tagsIn = `-- name: TagsIn :many
+SELECT t.tag FROM docker_tags t
+WHERE t.repo_id = ?1 AND t.image = ?2 AND t.tag IN (SELECT value FROM json_each(?3))
+  AND EXISTS (SELECT 1 FROM docker_images i WHERE i.repo_id = t.repo_id AND i.image = t.image)
+`
+
+type TagsInParams struct {
+	RepoID int64
+	Image  string
+	Tags   interface{}
+}
+
+// The tags of a set (a JSON array) that an image has, through the primary key: the versions that a
+// group merge asks a member about, in one query (format.Spec HasVersions).
+func (q *Queries) TagsIn(ctx context.Context, arg TagsInParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, tagsIn, arg.RepoID, arg.Image, arg.Tags)
 	if err != nil {
 		return nil, err
 	}

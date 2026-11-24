@@ -34,55 +34,6 @@ func (q *Queries) AddVersionBuild(ctx context.Context, arg AddVersionBuildParams
 	return err
 }
 
-const deleteBuild = `-- name: DeleteBuild :execrows
-DELETE FROM maven_builds WHERE repo_id = ? AND folder = ? AND sort_key = ?
-`
-
-type DeleteBuildParams struct {
-	RepoID  int64
-	Folder  string
-	SortKey []byte
-}
-
-// Deletes a build that has no file left; 1 when it was there.
-func (q *Queries) DeleteBuild(ctx context.Context, arg DeleteBuildParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteBuild, arg.RepoID, arg.Folder, arg.SortKey)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const deleteEmptyVersion = `-- name: DeleteEmptyVersion :exec
-DELETE FROM maven_versions WHERE repo_id = ? AND folder = ? AND sort_key = ? AND builds <= 0
-`
-
-type DeleteEmptyVersionParams struct {
-	RepoID  int64
-	Folder  string
-	SortKey []byte
-}
-
-func (q *Queries) DeleteEmptyVersion(ctx context.Context, arg DeleteEmptyVersionParams) error {
-	_, err := q.db.ExecContext(ctx, deleteEmptyVersion, arg.RepoID, arg.Folder, arg.SortKey)
-	return err
-}
-
-const dropVersionBuild = `-- name: DropVersionBuild :exec
-UPDATE maven_versions SET builds = builds - 1 WHERE repo_id = ? AND folder = ? AND sort_key = ?
-`
-
-type DropVersionBuildParams struct {
-	RepoID  int64
-	Folder  string
-	SortKey []byte
-}
-
-func (q *Queries) DropVersionBuild(ctx context.Context, arg DropVersionBuildParams) error {
-	_, err := q.db.ExecContext(ctx, dropVersionBuild, arg.RepoID, arg.Folder, arg.SortKey)
-	return err
-}
-
 const getBuild = `-- name: GetBuild :one
 SELECT build FROM maven_builds WHERE repo_id = ? AND folder = ? AND sort_key = ?
 `
@@ -254,50 +205,6 @@ type ListPathsAfterParams struct {
 // holds already reads, batch by batch.
 func (q *Queries) ListPathsAfter(ctx context.Context, arg ListPathsAfterParams) ([]string, error) {
 	rows, err := q.db.QueryContext(ctx, listPathsAfter, arg.RepoID, arg.Path, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return nil, err
-		}
-		items = append(items, path)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPathsInRange = `-- name: ListPathsInRange :many
-SELECT path FROM assets
-WHERE repo_id = ?1 AND path >= ?2 AND path < ?3
-ORDER BY path
-LIMIT ?4
-`
-
-type ListPathsInRangeParams struct {
-	RepoID int64
-	Lower  string
-	Upper  string
-	Limit  int64
-}
-
-// The paths of a repo in [lower, upper), in path order, through the assets (repo_id, path) key:
-// the files of a build in the transaction of a remove.
-func (q *Queries) ListPathsInRange(ctx context.Context, arg ListPathsInRangeParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listPathsInRange,
-		arg.RepoID,
-		arg.Lower,
-		arg.Upper,
-		arg.Limit,
-	)
 	if err != nil {
 		return nil, err
 	}

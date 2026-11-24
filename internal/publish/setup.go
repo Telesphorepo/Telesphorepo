@@ -203,6 +203,9 @@ func (s *Service) setupWith(ctx context.Context, r *http.Request, sc *auth.Setup
 		if err != nil {
 			return err
 		}
+		if err := writeDeviceGrams(ctx, q, id, u.UserID, u.Username, name); err != nil {
+			return err
+		}
 		res.DeviceID = id
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceSetup, RepoID: repo.ID, Repo: repo.Name, Target: name,
 			Detail: map[string]any{"device_id": id, "new": true}})

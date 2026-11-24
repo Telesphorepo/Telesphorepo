@@ -132,6 +132,16 @@ type Spec struct {
 	// at the same place in every member (Maven; Docker orders tags by date). A GroupEach merge then
 	// knows from the members' pages and cursors which members hold a version, without a lookup.
 	VersionsByName bool
+	// HasVersions returns which of versions the artifact at artifactPath of member from has, in
+	// one read (optional). A GroupEach merge without VersionsByName asks it once per member for
+	// the versions of the pages it holds, where it would look up the Builds of each version.
+	HasVersions func(ctx context.Context, repo, from *repos.Repo, artifactPath string, versions []string) (map[string]bool, error)
+	// VersionsBuilds returns versions of the artifact at artifactPath of member from, each with
+	// all its builds, as Builds answers them with every build on one page, in one read
+	// (optional; a version that from does not have is left out). A GroupEach group reads the
+	// builds of the versions of a page that several members hold through it, once per member,
+	// where it would call Builds once per version and member.
+	VersionsBuilds func(ctx context.Context, repo, from *repos.Repo, artifactPath string, versions []string) (map[string]VersionBuilds, error)
 	// BuildOrder orders two builds of one version as Builds lists them (by Build id): negative
 	// when a comes first. A GroupEach group sorts the union of the members' builds of a version
 	// with a Folder by it; nil keeps the builds in member order.
@@ -362,6 +372,13 @@ type Build struct {
 	Files       []BuildFile `json:"files"`
 	PublishedAt time.Time   `json:"published_at"`
 	CI          *ci.Build   `json:"build"`
+}
+
+// VersionBuilds is a version of an artifact with all its builds (Spec.VersionsBuilds).
+type VersionBuilds struct {
+	Artifact *Artifact
+	Version  *Version
+	Builds   []Build
 }
 
 // BuildFile is one file of a build. Classifier and Extension are the format's split of its name

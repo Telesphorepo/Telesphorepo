@@ -1,7 +1,7 @@
 package nuget
 
 import (
-	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -102,14 +102,25 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	if !semver2 {
 		u.reg = u.base + "/" + regSemVer1
 	}
+	// The packages of the page with their versions: one query.
+	page := hits[min(skip, len(hits)):]
+	keys := make([][3]any, len(page))
+	for i, ht := range page {
+		keys[i] = [3]any{ht.repo.ID, ht.LowerID, ht.Latest}
+	}
+	items, err := h.q.SearchItems(ctx, keys, vis.prerelease == 1, vis.semver2, maxVersions)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
 	data := []any{}
-	for _, ht := range hits[min(skip, len(hits)):] {
-		item, err := h.searchItem(ctx, u, ht.repo.ID, ht.LowerID, ht.Latest, vis, semver2)
-		if err != nil {
-			route.Fail(w, r, err)
+	for i, ht := range page {
+		it, ok := items[i]
+		if !ok {
+			route.Fail(w, r, sql.ErrNoRows) // the version went since the search read it
 			return
 		}
-		data = append(data, item)
+		data = append(data, searchItem(u, ht.LowerID, it, semver2))
 	}
 	format.WriteDocument(w, r, jsonType, format.NewDocument(mustJSON(map[string]any{"totalHits": total, "data": data})))
 }
@@ -136,42 +147,23 @@ func searchFilter(repoID int64, q string, vis visibility) dbq.SearchFilter {
 // prereleases, 1 to show the SemVer 2.0 versions.
 type visibility struct{ prerelease, semver2 int64 }
 
-// searchItem is one package of a search answer: its newest visible version (sort key latest) with
-// its metadata, and every visible version.
-func (h *Handler) searchItem(ctx context.Context, u urls, repoID int64, lid, latest string, vis visibility, semver2 bool) (map[string]any, error) {
-	row, err := h.q.GetVersion(ctx, dbq.GetVersionParams{RepoID: repoID, LowerID: lid, SortKey: latest})
-	if err != nil {
-		return nil, err
-	}
-	var rows []dbq.ListVisibleVersionsRow
-	if vis.prerelease == 1 {
-		rows, err = h.q.ListVisibleVersions(ctx, dbq.ListVisibleVersionsParams{RepoID: repoID, LowerID: lid,
-			Semver2: vis.semver2, Limit: maxVersions})
-	} else {
-		var rel []dbq.ListVisibleReleasesRow
-		rel, err = h.q.ListVisibleReleases(ctx, dbq.ListVisibleReleasesParams{RepoID: repoID, LowerID: lid,
-			Semver2: vis.semver2, Limit: maxVersions})
-		for _, r := range rel {
-			rows = append(rows, dbq.ListVisibleVersionsRow(r))
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
+// searchItem is one package of a search answer: its newest visible version with its metadata,
+// and every visible version.
+func searchItem(u urls, lid string, it dbq.SearchItem, semver2 bool) map[string]any {
 	show := func(full, normalized string) string {
 		if semver2 {
 			return full
 		}
 		return normalized
 	}
-	versions := make([]any, len(rows))
-	for i, v := range rows {
+	versions := make([]any, len(it.Versions))
+	for i, v := range it.Versions {
 		versions[i] = map[string]any{"version": show(v.Version, v.Normalized), "downloads": 0, "@id": u.leaf(lid, strings.ToLower(v.Normalized))}
 	}
-	out := map[string]any{"@id": u.index(lid), "@type": "Package", "registration": u.index(lid), "id": row.PackageID,
-		"version": show(row.Version, row.Normalized), "versions": versions, "totalDownloads": 0, "verified": false, "vulnerabilities": []any{}}
+	out := map[string]any{"@id": u.index(lid), "@type": "Package", "registration": u.index(lid), "id": it.PackageID,
+		"version": show(it.Version, it.Normalized), "versions": versions, "totalDownloads": 0, "verified": false, "vulnerabilities": []any{}}
 	var e map[string]any
-	_ = json.Unmarshal([]byte(row.Meta), &e)
+	_ = json.Unmarshal([]byte(it.Meta), &e)
 	for _, k := range []string{"description", "summary", "title", "iconUrl", "licenseUrl", "projectUrl", "tags"} {
 		if v, ok := e[k]; ok {
 			out[k] = v
@@ -183,7 +175,7 @@ func (h *Handler) searchItem(ctx context.Context, u urls, repoID int64, lid, lat
 	if o, ok := e["owners"].(string); ok && o != "" {
 		out["owners"] = splitList(o)
 	}
-	return out, nil
+	return out
 }
 
 // splitList splits a comma-separated list of the .nuspec.

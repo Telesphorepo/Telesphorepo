@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -145,9 +146,11 @@ func (pg *memberPage) holds(v string) bool {
 // place in every member, so the merge takes the versions of all members in one order: an earlier
 // member that has the version holds it in its page or took it last on an earlier page (its
 // cursor), and a later member that has it holds it in its page. Otherwise a member that does not
-// hold it in its page is asked by a lookup of its Builds. A page costs one Versions call per
-// member that has more (one more for each page a member takes up), and without VersionsByName at
-// most one Builds lookup per other member and version.
+// hold it in its page is asked (has): with HasVersions once for every version of the pages read
+// so far that it was not asked about, else by a lookup of its Builds. A page costs one Versions
+// call per member that has more (one more for each page a member takes up), and without
+// VersionsByName one HasVersions call per other member and page read (without HasVersions, at
+// most one Builds lookup per other member and version).
 func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*repos.Repo, p, after string, limit int) (*Artifact, []Version, string, error) {
 	cur, err := decodeCursor(after)
 	if err != nil {
@@ -182,8 +185,42 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 	if art == nil {
 		return nil, nil, "", nil // no member that has more has the artifact
 	}
+	// known holds per member (by id) the answers of HasVersions so far.
+	known := map[int64]map[string]bool{}
+	has := func(m *repos.Repo, v string) (bool, error) {
+		if s.HasVersions == nil {
+			return s.hasVersion(ctx, repo, m, p, v)
+		}
+		k := known[m.ID]
+		if k == nil {
+			k = map[string]bool{}
+			known[m.ID] = k
+		}
+		if h, ok := k[v]; ok {
+			return h, nil
+		}
+		ask := []string{v}
+		asked := map[string]bool{v: true}
+		for _, pg := range pages {
+			for _, x := range pg.items {
+				if _, ok := k[x.Version]; !ok && !asked[x.Version] {
+					asked[x.Version] = true
+					ask = append(ask, x.Version)
+				}
+			}
+		}
+		got, err := s.HasVersions(ctx, repo, m, p, ask)
+		if err != nil {
+			return false, err
+		}
+		for _, x := range ask {
+			k[x] = got[x]
+		}
+		return k[v], nil
+	}
 	taken := map[string]bool{}
 	var out []Version
+	var unions []pendingUnion
 	for len(out) < limit {
 		best := -1
 		for i, pg := range pages {
@@ -208,7 +245,7 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 		if taken[v.Version] {
 			continue
 		}
-		earlier, err := s.earlierHas(ctx, repo, pages[:best], p, v.Version)
+		earlier, err := s.earlierHas(pages[:best], v.Version, has)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -219,22 +256,19 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 		v.Repo = pg.m.Name
 		if v.Folder != "" {
 			// The files of a version folder serve path by path: a version that later members hold
-			// too is the union of their builds.
-			later, err := s.laterHolders(ctx, repo, pages[best+1:], p, v.Version)
+			// too is the union of their builds, read after the merge for the whole page.
+			later, err := s.laterHolders(pages[best+1:], v.Version, has)
 			if err != nil {
 				return nil, nil, "", err
 			}
 			if len(later) > 0 {
-				u, err := s.union(ctx, repo, append([]*repos.Repo{pg.m}, later...), p, v.Version)
-				if err != nil {
-					return nil, nil, "", err
-				}
-				if u != nil {
-					v = *u.ver
-				}
+				unions = append(unions, pendingUnion{at: len(out), v: v.Version, holders: append([]*repos.Repo{pg.m}, later...)})
 			}
 		}
 		out = append(out, v)
+	}
+	if err := s.unionPage(ctx, repo, p, unions, out); err != nil {
+		return nil, nil, "", err
 	}
 	next := &groupCursor{After: map[string]string{}}
 	open := false
@@ -255,13 +289,13 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 }
 
 // earlierHas reports whether one of the earlier members has version v: in the page it read, as
-// its cursor (VersionsByName), or else by a lookup of the version's Builds.
-func (s *Spec) earlierHas(ctx context.Context, repo *repos.Repo, earlier []*memberPage, p, v string) (bool, error) {
+// its cursor (VersionsByName), or else by has.
+func (s *Spec) earlierHas(earlier []*memberPage, v string, has func(m *repos.Repo, v string) (bool, error)) (bool, error) {
 	for _, pg := range earlier {
 		found := pg.holds(v) || s.VersionsByName && pg.from == v
 		if !found && !s.VersionsByName {
 			var err error
-			if found, err = s.hasVersion(ctx, repo, pg.m, p, v); err != nil {
+			if found, err = has(pg.m, v); err != nil {
 				return false, err
 			}
 		}
@@ -273,14 +307,14 @@ func (s *Spec) earlierHas(ctx context.Context, repo *repos.Repo, earlier []*memb
 }
 
 // laterHolders returns the members of pages that have version v: in the page they read, or else
-// (without VersionsByName) by a lookup of the version's Builds.
-func (s *Spec) laterHolders(ctx context.Context, repo *repos.Repo, pages []*memberPage, p, v string) ([]*repos.Repo, error) {
+// (without VersionsByName) by has.
+func (s *Spec) laterHolders(pages []*memberPage, v string, has func(m *repos.Repo, v string) (bool, error)) ([]*repos.Repo, error) {
 	var out []*repos.Repo
 	for _, pg := range pages {
 		found := pg.holds(v)
 		if !found && !s.VersionsByName {
 			var err error
-			if found, err = s.hasVersion(ctx, repo, pg.m, p, v); err != nil {
+			if found, err = has(pg.m, v); err != nil {
 				return nil, err
 			}
 		}
@@ -332,29 +366,120 @@ type unionBuilds struct {
 	builds []Build
 }
 
+// memberBuilds is a version of one member with all its builds (allBuilds).
+type memberBuilds struct {
+	art    *Artifact
+	ver    *Version
+	builds []Build
+}
+
 // union is version v of the members holders (in read order) of a group: the union of their builds,
 // a build id once, a file path once from the first member that has it (named in the file's Repo),
 // as a group read serves the files of a version folder path by path. The builds are in BuildOrder;
 // the version is the first holder's with the count, the latest build, its time and its CI build
 // record taken from the union. nil when no holder has the version.
 func (s *Spec) union(ctx context.Context, repo *repos.Repo, holders []*repos.Repo, p, v string) (*unionBuilds, error) {
-	var u *unionBuilds
-	byID := map[string]int{}
-	seen := map[string]bool{}
-	for _, m := range holders {
+	each := make([]*memberBuilds, len(holders))
+	for i, m := range holders {
+		got, err := s.versionsBuilds(ctx, repo, m, p, []string{v})
+		if err != nil {
+			return nil, err
+		}
+		each[i] = got[v]
+	}
+	return s.unionOf(holders, each), nil
+}
+
+// pendingUnion is a version of a page of a group's versions that several members hold: out[at]
+// becomes the union of the builds of holders.
+type pendingUnion struct {
+	at      int
+	v       string
+	holders []*repos.Repo
+}
+
+// unionPage replaces each version of unions in out with the union of its holders' builds (see
+// union). Each member reads the builds of every version of the page it holds at once
+// (versionsBuilds), so a page costs one read per member, not one per version and member.
+func (s *Spec) unionPage(ctx context.Context, repo *repos.Repo, p string, unions []pendingUnion, out []Version) error {
+	if len(unions) == 0 {
+		return nil
+	}
+	var members []*repos.Repo
+	wants := map[int64][]string{}
+	for _, u := range unions {
+		for _, m := range u.holders {
+			if _, ok := wants[m.ID]; !ok {
+				members = append(members, m)
+			}
+			wants[m.ID] = append(wants[m.ID], u.v)
+		}
+	}
+	read := map[int64]map[string]*memberBuilds{}
+	for _, m := range members {
+		got, err := s.versionsBuilds(ctx, repo, m, p, wants[m.ID])
+		if err != nil {
+			return err
+		}
+		read[m.ID] = got
+	}
+	for _, u := range unions {
+		each := make([]*memberBuilds, len(u.holders))
+		for i, m := range u.holders {
+			each[i] = read[m.ID][u.v]
+		}
+		if x := s.unionOf(u.holders, each); x != nil {
+			out[u.at] = *x.ver
+		}
+	}
+	return nil
+}
+
+// versionsBuilds returns versions of member m with all their builds, by version (a version m
+// does not have is not in the map): one call of VersionsBuilds, else allBuilds per version.
+func (s *Spec) versionsBuilds(ctx context.Context, repo, m *repos.Repo, p string, versions []string) (map[string]*memberBuilds, error) {
+	out := make(map[string]*memberBuilds, len(versions))
+	if s.VersionsBuilds != nil {
+		got, err := s.VersionsBuilds(ctx, repo, m, p, versions)
+		if err != nil {
+			return nil, err
+		}
+		for v, vb := range got {
+			if vb.Version != nil {
+				out[v] = &memberBuilds{vb.Artifact, vb.Version, vb.Builds}
+			}
+		}
+		return out, nil
+	}
+	for _, v := range versions {
 		art, ver, builds, err := s.allBuilds(ctx, repo, m, p, v)
 		if err != nil {
 			return nil, err
 		}
-		if ver == nil {
+		if ver != nil {
+			out[v] = &memberBuilds{art, ver, builds}
+		}
+	}
+	return out, nil
+}
+
+// unionOf is the union of the builds each of a version of holders (see union); each[i] is nil
+// when holders[i] does not have the version. nil when no holder has it.
+func (s *Spec) unionOf(holders []*repos.Repo, each []*memberBuilds) *unionBuilds {
+	var u *unionBuilds
+	byID := map[string]int{}
+	seen := map[string]bool{}
+	for k, m := range holders {
+		mb := each[k]
+		if mb == nil {
 			continue
 		}
 		if u == nil {
-			x := *ver
+			x := *mb.ver
 			x.Repo = m.Name
-			u = &unionBuilds{art: art, ver: &x}
+			u = &unionBuilds{art: mb.art, ver: &x}
 		}
-		for _, b := range builds {
+		for _, b := range mb.builds {
 			i, ok := byID[b.Build]
 			if !ok {
 				i = len(u.builds)
@@ -383,7 +508,7 @@ func (s *Spec) union(ctx context.Context, repo *repos.Repo, holders []*repos.Rep
 		}
 	}
 	if u == nil {
-		return nil, nil
+		return nil
 	}
 	u.builds = slices.DeleteFunc(u.builds, func(b Build) bool { return len(b.Files) == 0 })
 	if s.BuildOrder != nil {
@@ -396,7 +521,7 @@ func (s *Spec) union(ctx context.Context, repo *repos.Repo, holders []*repos.Rep
 			u.ver.LatestBuild, u.ver.LatestLabel = newest.Build, newest.Label
 		}
 	}
-	return u, nil
+	return u
 }
 
 // page is the page of builds of u after build after (in BuildOrder; "" for the first), at most
@@ -429,8 +554,9 @@ func (u *unionBuilds) page(order func(a, b Build) int, build, after string, limi
 	return out, ""
 }
 
-// Stores reports whether member m stores the file at path (a hosted file, a proxy's cached copy).
-type Stores func(ctx context.Context, m *repos.Repo, path string) (bool, error)
+// Stores returns the paths of paths that member m stores (a hosted file, a proxy's cached copy),
+// in one read for the files of a page.
+type Stores func(ctx context.Context, m *repos.Repo, paths []string) (map[string]bool, error)
 
 // BuildsOf answers Builds for repo. In a group (members as for VersionsOf) the builds are those
 // that a group read serves for the version, and every file names in Repo the member that serves
@@ -441,7 +567,8 @@ type Stores func(ctx context.Context, m *repos.Repo, path string) (bool, error)
 //     the page of the first member that has it when no later member does.
 //   - GroupEach, a version without a Folder (one path names it, e.g. a Docker tag): the builds of
 //     the first member that has the version; each file names the first member that stores its
-//     path (stores), else that member.
+//     path (stores, one call per member for the files of the page that no earlier member
+//     stores), else that member.
 //
 // The version names the first member that has it in Repo.
 func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.Repo, stores Stores, p, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error) {
@@ -499,23 +626,32 @@ func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.
 			// The only member that has the version serves its files: its own page.
 		}
 		ver.Repo = m.Name
+		open := map[string]bool{} // the paths no member before x stores
 		for i := range items {
 			for j := range items[i].Files {
-				f := &items[i].Files[j]
-				f.Repo = m.Name
-				if folder {
-					continue
+				items[i].Files[j].Repo = m.Name
+				if !folder {
+					open[items[i].Files[j].Path] = true
 				}
-				for _, x := range members {
-					ok, err := stores(ctx, x, f.Path)
-					if err != nil {
-						return nil, nil, nil, "", err
-					}
-					if ok {
+			}
+		}
+		for _, x := range members {
+			if len(open) == 0 {
+				break
+			}
+			has, err := stores(ctx, x, slices.Sorted(maps.Keys(open)))
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			for i := range items {
+				for j := range items[i].Files {
+					if f := &items[i].Files[j]; open[f.Path] && has[f.Path] {
 						f.Repo = x.Name
-						break
 					}
 				}
+			}
+			for p := range has {
+				delete(open, p)
 			}
 		}
 		return art, ver, items, next, nil

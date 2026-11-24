@@ -56,6 +56,13 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		return nil, nil, "", err
 	}
 	builds := h.host.Builds.Loader()
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.BuildID.Int64
+	}
+	if err := builds.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	var out []format.Version
 	for i, r := range rows {
 		if i == limit {

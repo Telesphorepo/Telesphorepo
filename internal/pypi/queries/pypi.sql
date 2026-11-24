@@ -62,23 +62,26 @@ GROUP BY sort_key
 ORDER BY sort_key DESC
 LIMIT ?;
 
--- The files of one version with the time and the publish session of each.
+-- The files of the versions of a project from one sort key through another (one version, or a
+-- page of them), with the time and the publish session of each, through pypi_files_project.
 -- name: ListVersionFiles :many
-SELECT f.version, f.filename, f.path, f.sha256, f.size, a.updated_at, a.build_id
+SELECT f.sort_key, f.version, f.filename, f.path, f.sha256, f.size, a.updated_at, a.build_id
 FROM pypi_files f JOIN assets a ON a.id = f.asset_id
-WHERE f.repo_id = ? AND f.project = ? AND f.sort_key = ?;
+WHERE f.repo_id = sqlc.arg(repo_id) AND f.project = sqlc.arg(project) AND f.sort_key >= sqlc.arg(lower) AND f.sort_key <= sqlc.arg(upper);
 
 -- The file row of a filename, through the UNIQUE index.
 -- name: GetFile :one
 SELECT project, version, filename FROM pypi_files WHERE repo_id = ? AND filename = ?;
 
--- Removes the file rows of a deleted asset, through pypi_files_asset.
--- name: DeleteFilesOfAsset :many
-DELETE FROM pypi_files WHERE asset_id = ? RETURNING project;
+-- Removes the file rows of the deleted assets of a remove batch (a JSON array of ids), through
+-- pypi_files_asset.
+-- name: DeleteFilesOfAssets :many
+DELETE FROM pypi_files WHERE asset_id IN (SELECT value FROM json_each(sqlc.arg(asset_ids))) RETURNING asset_id, project;
 
--- A deleted .metadata sibling: the file no longer advertises it.
+-- The deleted .metadata siblings of a remove batch (a JSON array of the filenames of their
+-- files): the files no longer advertise them. Through the UNIQUE (repo_id, filename) index.
 -- name: ClearMetadata :many
-UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ? AND filename = ?
+UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = sqlc.arg(repo_id) AND filename IN (SELECT value FROM json_each(sqlc.arg(filenames)))
 RETURNING project;
 
 -- Whether a project has a file left, through pypi_files_project.

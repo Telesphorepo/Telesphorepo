@@ -240,32 +240,48 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 	return q.InsertName(ctx, dbq.InsertNameParams{RepoID: w.Repo.ID, FoldedName: fold(e.Name), Name: e.Name, Rev: time.Now().UnixNano()})
 }
 
-// onRemoved removes the version of each deleted .crate, and the name of a crate that has no
-// version left, while the rows are still readable (format.Spec OnRemoved); a crate with versions
-// left gets a new revision. The index stops listing the version at once.
+// onRemoved removes the versions of the deleted .crate files (one statement for the batch), and
+// the name of a crate that has no version left, while the rows are still readable (format.Spec
+// OnRemoved); a crate with versions left gets a new revision, once per crate. The index stops
+// listing the version at once.
 func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
-	q := dbq.New(tx)
+	var ids []int64
 	for _, a := range removed {
-		if !strings.HasPrefix(a.Path, "crates/") {
+		if strings.HasPrefix(a.Path, "crates/") {
+			ids = append(ids, a.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	js, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	q := dbq.New(tx)
+	rows, err := q.DeleteVersionsOfAssets(ctx, string(js))
+	if err != nil {
+		return nil, err
+	}
+	type crate struct{ lower, name string }
+	done := map[crate]bool{}
+	for _, r := range rows {
+		c := crate{r.LowerName, r.Name}
+		if done[c] {
 			continue
 		}
-		rows, err := q.DeleteVersionsOfAsset(ctx, a.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range rows {
-			_, err := q.CrateName(ctx, dbq.CrateNameParams{RepoID: repo.ID, LowerName: r.LowerName})
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				if err := q.DeleteName(ctx, dbq.DeleteNameParams{RepoID: repo.ID, FoldedName: fold(r.Name)}); err != nil {
-					return nil, err
-				}
-			case err != nil:
+		done[c] = true
+		_, err := q.CrateName(ctx, dbq.CrateNameParams{RepoID: repo.ID, LowerName: r.LowerName})
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if err := q.DeleteName(ctx, dbq.DeleteNameParams{RepoID: repo.ID, FoldedName: fold(r.Name)}); err != nil {
 				return nil, err
-			default:
-				if err := q.BumpRev(ctx, dbq.BumpRevParams{At: time.Now().UnixNano(), RepoID: repo.ID, FoldedName: fold(r.Name)}); err != nil {
-					return nil, err
-				}
+			}
+		case err != nil:
+			return nil, err
+		default:
+			if err := q.BumpRev(ctx, dbq.BumpRevParams{At: time.Now().UnixNano(), RepoID: repo.ID, FoldedName: fold(r.Name)}); err != nil {
+				return nil, err
 			}
 		}
 	}

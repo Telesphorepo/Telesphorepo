@@ -6,6 +6,7 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"iter"
 )
 
@@ -15,6 +16,7 @@ var Extra = map[string]string{
 	"StreamArch":    streamArch,
 	"VersionsPage":  versionsPage,
 	"VersionFiles":  versionFiles,
+	"UpsertEntries": upsertEntries,
 }
 
 // The entries of the index of one architecture in name order (the primary key of
@@ -160,4 +162,33 @@ func (q *Queries) VersionFiles(ctx context.Context, repoID int64, name string, v
 		return nil, err
 	}
 	return scanFiles(rows)
+}
+
+// Writes the index entries of one architecture of the JSON array ?3 of [name, package id] in one
+// statement: a batch of a fill. "WHERE true" keeps the upsert apart from the SELECT.
+const upsertEntries = `INSERT INTO arch_db_entries (repo_id, arch, name, package_id)
+SELECT ?1, ?2, json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]') FROM json_each(?3) j WHERE true
+ON CONFLICT (repo_id, arch, name) DO UPDATE SET package_id = excluded.package_id`
+
+// Entry is one index entry of UpsertEntries: a package name and the package it installs.
+type Entry struct {
+	Name      string
+	PackageID int64
+}
+
+// UpsertEntries writes the entries of arch of repoID, each pointing its name at its package.
+func (q *Queries) UpsertEntries(ctx context.Context, repoID int64, arch string, entries []Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	pairs := make([][2]any, len(entries))
+	for i, e := range entries {
+		pairs[i] = [2]any{e.Name, e.PackageID}
+	}
+	js, err := json.Marshal(pairs)
+	if err != nil {
+		return err
+	}
+	_, err = q.db.ExecContext(ctx, upsertEntries, repoID, arch, string(js))
+	return err
 }

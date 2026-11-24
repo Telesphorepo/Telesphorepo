@@ -45,14 +45,6 @@ DELETE FROM nexus_sources WHERE id = ?;
 SELECT source_id, source_repo, source_format, kind, target_repo_id
 FROM nexus_source_repos WHERE source_id = ? ORDER BY source_repo;
 
--- name: InsertNexusSourceRepo :exec
-INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id) VALUES (?, ?, ?, ?, ?);
-
--- The source that a target repo mirrors, through nexus_source_repos_target.
--- name: GetNexusSourceByTarget :one
-SELECT s.id, s.name FROM nexus_source_repos m JOIN nexus_sources s ON s.id = m.source_id
-WHERE m.target_repo_id = ? LIMIT 1;
-
 -- A second running sync of the same source violates the nexus_syncs_running unique index.
 -- name: CreateNexusSync :one
 INSERT INTO nexus_syncs (source_id, state, trigger, started_by, started_at)
@@ -83,12 +75,6 @@ FROM nexus_syncs WHERE source_id = ? AND state = 'running';
 SELECT id, source_id, state, trigger, started_by, started_at, finished_at, error
 FROM nexus_syncs WHERE state = 'running' ORDER BY source_id;
 
--- name: GetLatestNexusSync :one
-SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
-  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
-FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
-WHERE s.source_id = ? ORDER BY s.id DESC LIMIT 1;
-
 -- Keyset page of a source's syncs, newest first: ids below before.
 -- name: ListNexusSyncs :many
 SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
@@ -117,15 +103,6 @@ SELECT sync_id, source_repo, source_format, target_repo_id, continuation, checke
   bytes, active_at, state, error
 FROM nexus_sync_repos WHERE sync_id = ? ORDER BY source_repo;
 
--- The checked count of the newest walk of a source repo that reached the end, in a sync of the
--- source before sync before: newest first through nexus_syncs_source, then the primary key of
--- nexus_sync_repos. Retention bounds the walk to 100 syncs.
--- name: PreviousNexusChecked :one
-SELECT r.checked FROM nexus_syncs s
-JOIN nexus_sync_repos r ON r.sync_id = s.id AND r.source_repo = sqlc.arg(source_repo)
-WHERE s.source_id = sqlc.arg(source_id) AND s.id < sqlc.arg(before) AND r.state = 'done'
-ORDER BY s.id DESC LIMIT 1;
-
 -- The runner saves the next page's continuation token with the counters after each page.
 -- name: UpdateNexusSyncRepoProgress :exec
 UPDATE nexus_sync_repos SET continuation = ?, checked = ?, imported = ?, skipped = ?, ignored = ?, failed = ?,
@@ -134,11 +111,6 @@ WHERE sync_id = ? AND source_repo = ?;
 
 -- name: SetNexusSyncRepoState :exec
 UPDATE nexus_sync_repos SET state = ?, error = ? WHERE sync_id = ? AND source_repo = ?;
-
--- A repeated failure of the same file (a resumed page) replaces the reason and keeps its id.
--- name: InsertNexusSyncFailure :exec
-INSERT INTO nexus_sync_failures (sync_id, source_repo, path, reason) VALUES (?, ?, ?, ?)
-ON CONFLICT (sync_id, source_repo, path) DO UPDATE SET reason = excluded.reason;
 
 -- Keyset page of a sync's failures in insertion order.
 -- name: ListNexusSyncFailures :many
@@ -171,10 +143,6 @@ DELETE FROM nexus_source_repos WHERE (source_id, source_repo) IN (SELECT x.sourc
 -- name: GetNexusSourceRepo :one
 SELECT source_id, source_repo, source_format, kind, target_repo_id
 FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?;
-
--- Removes the mapping of one Nexus repo of a source (a save keeps the switched-over ones).
--- name: DeleteNexusSourceRepo :exec
-DELETE FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?;
 
 -- Copies the source's mapped hosted repos that still copy and go into target into the sync's
 -- repos: the final sync of one repository's switch-over.
@@ -215,10 +183,6 @@ DELETE FROM repo_rehearsals WHERE repo_id = ?;
 -- name: PurgeRepoRehearsalsFor :execrows
 DELETE FROM repo_rehearsals WHERE repo_id IN (SELECT x.repo_id FROM repo_rehearsals x WHERE x.for_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 
--- The rehearsal repos of a repo, through repo_rehearsals_for.
--- name: ListRehearsalsFor :many
-SELECT repo_id FROM repo_rehearsals WHERE for_repo_id = ? ORDER BY repo_id;
-
 -- The mapped repos of every source that copy into a target, each with whether it switched over,
 -- through nexus_source_repos_target.
 -- name: ListNexusTargetRepos :many
@@ -233,10 +197,6 @@ SELECT repo_id, into_repo_id FROM repo_moves ORDER BY repo_id;
 -- name: InsertRepoMove :exec
 INSERT INTO repo_moves (repo_id, into_repo_id, created_at) VALUES (?, ?, ?);
 
--- The moving repos of a repo, through repo_moves_into.
--- name: ListMovesInto :many
-SELECT repo_id FROM repo_moves WHERE into_repo_id = ? ORDER BY repo_id;
-
 -- A repo delete empties these rows before its row goes (repos.Service.OnPurge).
 -- name: PurgeRepoMoves :execrows
 DELETE FROM repo_moves WHERE repo_id = ?;
@@ -248,9 +208,6 @@ DELETE FROM repo_moves WHERE repo_id IN (SELECT x.repo_id FROM repo_moves x WHER
 INSERT INTO nexus_merges (target_repo_id, source_repo_id, source_name, target_name, keep, otherwise, state, step, files, started_by, started_at)
 VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
 RETURNING id;
-
--- name: InsertNexusMergeChoice :exec
-INSERT INTO nexus_merge_choices (merge_id, path, take) VALUES (?, ?, ?);
 
 -- A choice that the merge saves itself (a label that the target takes), unless one is saved.
 -- name: InsertNexusMergeChoiceIfNone :exec
@@ -274,11 +231,6 @@ SELECT id, state FROM nexus_merges WHERE target_repo_id = ? ORDER BY id DESC LIM
 -- name: GetNexusMergeOfSync :one
 SELECT id FROM nexus_merges WHERE sync_id = ? AND state = 'running' AND step = 'sync' LIMIT 1;
 
--- The merge whose final sync is sync_id, in any state, through nexus_merges_sync: a sync shows
--- as part of its merge.
--- name: GetNexusMergeBySync :one
-SELECT id, source_name, target_name FROM nexus_merges WHERE sync_id = ? ORDER BY id DESC LIMIT 1;
-
 -- name: SetNexusMergeStep :exec
 UPDATE nexus_merges SET step = ?, sync_id = ? WHERE id = ?;
 
@@ -296,3 +248,142 @@ DELETE FROM nexus_merge_choices WHERE (merge_id, path) IN (
 
 -- name: PurgeNexusMerges :execrows
 DELETE FROM nexus_merges WHERE id IN (SELECT x.id FROM nexus_merges x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- The newest sync of each source of source_ids: one seek of nexus_syncs_source per source.
+-- name: ListLatestNexusSyncs :many
+SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
+  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
+WHERE s.id IN (SELECT (SELECT max(x.id) FROM nexus_syncs x WHERE x.source_id = j.value) FROM json_each(sqlc.arg(source_ids)) j);
+
+-- The sums of the repos of each sync of sync_ids, through the primary key of nexus_sync_repos:
+-- done counts the ended repos, current_repo is the last running repo by name ('' for none).
+-- name: SumNexusSyncRepos :many
+SELECT sync_id, count(*) AS repos,
+  CAST(sum(checked) AS INTEGER) AS checked, CAST(sum(imported) AS INTEGER) AS imported,
+  CAST(sum(skipped) AS INTEGER) AS skipped, CAST(sum(ignored) AS INTEGER) AS ignored,
+  CAST(sum(failed) AS INTEGER) AS failed, CAST(sum(bytes) AS INTEGER) AS bytes,
+  CAST(sum(state IN ('done', 'failed', 'cancelled')) AS INTEGER) AS done,
+  CAST(COALESCE(max(CASE WHEN state = 'running' THEN source_repo END), '') AS TEXT) AS current_repo
+FROM nexus_sync_repos WHERE sync_id IN (SELECT value FROM json_each(sqlc.arg(sync_ids)))
+GROUP BY sync_id;
+
+-- The merges whose final sync is one of sync_ids, through nexus_merges_sync; the caller keeps
+-- the newest of each sync.
+-- name: ListNexusMergesBySyncs :many
+SELECT sync_id, id, source_name, target_name FROM nexus_merges
+WHERE sync_id IN (SELECT value FROM json_each(sqlc.arg(sync_ids)));
+
+-- The mapped repos of each source of source_ids, and the hosted ones among them, through the
+-- primary key of nexus_source_repos.
+-- name: CountNexusSourceRepos :many
+SELECT source_id, count(*) AS repos, CAST(sum(kind = 'hosted') AS INTEGER) AS hosted
+FROM nexus_source_repos WHERE source_id IN (SELECT value FROM json_each(sqlc.arg(source_ids)))
+GROUP BY source_id;
+
+-- The switch-overs of each source of source_ids, through the primary key of nexus_switch_overs.
+-- name: CountNexusSwitchOvers :many
+SELECT source_id, count(*) AS switched
+FROM nexus_switch_overs WHERE source_id IN (SELECT value FROM json_each(sqlc.arg(source_ids)))
+GROUP BY source_id;
+
+-- A sync's repos in source repo order with the name of each target ('' when it is gone) and the
+-- checked count of the repo's newest earlier walk that reached the end (0 for none): newest first
+-- through nexus_syncs_source, then the primary key of nexus_sync_repos. Retention bounds the walk
+-- to 100 syncs.
+-- name: ListNexusSyncReposDetail :many
+SELECT r.source_repo, r.source_format, r.checked, r.imported, r.skipped, r.ignored, r.failed, r.bytes,
+  r.active_at, r.state, r.error, CAST(COALESCE(t.name, '') AS TEXT) AS target,
+  CAST(COALESCE((SELECT p.checked FROM nexus_syncs s
+    JOIN nexus_sync_repos p ON p.sync_id = s.id AND p.source_repo = r.source_repo
+    WHERE s.source_id = sqlc.arg(source_id) AND s.id < r.sync_id AND p.state = 'done'
+    ORDER BY s.id DESC LIMIT 1), 0) AS INTEGER) AS previous_checked
+FROM nexus_sync_repos r LEFT JOIN repos t ON t.id = r.target_repo_id
+WHERE r.sync_id = sqlc.arg(sync_id) ORDER BY r.source_repo;
+
+-- The rehearsal repos of each repo of ids, with their names, through repo_rehearsals_for; the
+-- caller orders them by repo id (creation).
+-- name: ListRehearsalsOf :many
+SELECT x.for_repo_id, x.repo_id, r.name FROM repo_rehearsals x JOIN repos r ON r.id = x.repo_id
+WHERE x.for_repo_id IN (SELECT value FROM json_each(sqlc.arg(ids)));
+
+-- The moving repos of each repo of ids, with their names, through repo_moves_into; the caller
+-- orders them by repo id (creation).
+-- name: ListMovesOf :many
+SELECT x.into_repo_id, x.repo_id, r.name FROM repo_moves x JOIN repos r ON r.id = x.repo_id
+WHERE x.into_repo_id IN (SELECT value FROM json_each(sqlc.arg(ids)));
+
+-- The newest merge into each repo of ids, through nexus_merges_target.
+-- name: ListLatestNexusMergesOf :many
+SELECT g.target_repo_id, g.id, g.state FROM nexus_merges g
+WHERE g.id IN (SELECT (SELECT max(x.id) FROM nexus_merges x WHERE x.target_repo_id = j.value) FROM json_each(sqlc.arg(ids)) j);
+
+-- The names of the repos of ids that exist, through the primary key of repos.
+-- name: ListRepoNamesIn :many
+SELECT id, name FROM repos WHERE id IN (SELECT value FROM json_each(sqlc.arg(ids)));
+
+-- The mapping rows of the repos of a source that switched over, through the primary keys.
+-- name: ListNexusSwitchedMappings :many
+SELECT m.source_id, m.source_repo, m.source_format, m.kind, m.target_repo_id
+FROM nexus_switch_overs o JOIN nexus_source_repos m ON m.source_id = o.source_id AND m.source_repo = o.source_repo
+WHERE o.source_id = ? ORDER BY o.source_repo;
+
+-- Ends every repo of a sync that has not ended, through the primary key.
+-- name: EndNexusSyncRepos :exec
+UPDATE nexus_sync_repos SET state = sqlc.arg(state), error = sqlc.arg(error)
+WHERE sync_id = sqlc.arg(sync_id) AND state IN ('pending', 'running');
+
+-- The switch-overs of every repo of the final sync sync_id of source source_id at once (a repo
+-- that switched over again is left as it is).
+-- name: InsertNexusSwitchOversOfSync :exec
+INSERT INTO nexus_switch_overs (source_id, source_repo, sync_id, failed, switched_at)
+SELECT sqlc.arg(source_id), r.source_repo, r.sync_id, r.failed, sqlc.arg(switched_at)
+FROM nexus_sync_repos r WHERE r.sync_id = sqlc.arg(sync_id)
+ON CONFLICT (source_id, source_repo) DO NOTHING;
+
+-- The failures of one saved page of a sync in one statement: failures is a JSON array of
+-- {"path", "reason"}. A repeated failure of the same file replaces the reason and keeps its id.
+-- name: InsertNexusSyncFailures :exec
+INSERT INTO nexus_sync_failures (sync_id, source_repo, path, reason)
+SELECT CAST(sqlc.arg(sync_id) AS INTEGER), CAST(sqlc.arg(source_repo) AS TEXT),
+  json_extract(f.value, '$.path'), json_extract(f.value, '$.reason')
+FROM json_each(sqlc.arg(failures)) f WHERE true
+ON CONFLICT (sync_id, source_repo, path) DO UPDATE SET reason = excluded.reason;
+
+-- The source that each target repo of ids mirrors, through nexus_source_repos_target (a target
+-- mirrors at most one source).
+-- name: ListNexusSourcesByTargets :many
+SELECT m.target_repo_id, s.id, s.name FROM nexus_source_repos m JOIN nexus_sources s ON s.id = m.source_id
+WHERE m.target_repo_id IN (SELECT value FROM json_each(sqlc.arg(ids)));
+
+-- Removes the mapping of the repos of a source that did not switch over (a save keeps the
+-- switched-over ones), through the primary keys.
+-- name: DeleteUnswitchedNexusSourceRepos :exec
+DELETE FROM nexus_source_repos WHERE nexus_source_repos.source_id = sqlc.arg(source_id) AND nexus_source_repos.source_repo NOT IN (
+  SELECT o.source_repo FROM nexus_switch_overs o WHERE o.source_id = sqlc.arg(source_id));
+
+-- The mapping of a save in one statement: repos is a JSON array of
+-- {"source_repo", "source_format", "kind", "target_repo_id"}.
+-- name: InsertNexusSourceRepos :exec
+INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id)
+SELECT CAST(sqlc.arg(source_id) AS INTEGER), json_extract(r.value, '$.source_repo'), json_extract(r.value, '$.source_format'),
+  json_extract(r.value, '$.kind'), json_extract(r.value, '$.target_repo_id')
+FROM json_each(sqlc.arg(repos)) r;
+
+-- The choices of a merge in one statement: choices is a JSON array of {"path", "take"}.
+-- name: InsertNexusMergeChoices :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take)
+SELECT CAST(sqlc.arg(merge_id) AS INTEGER), json_extract(c.value, '$.path'), json_extract(c.value, '$.take')
+FROM json_each(sqlc.arg(choices)) c;
+
+-- The choices that a merge saves itself, unless one is saved, in one statement: paths is a JSON
+-- array of the paths, each with take.
+-- name: InsertNexusMergeChoicesIfNone :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take)
+SELECT CAST(sqlc.arg(merge_id) AS INTEGER), p.value, CAST(sqlc.arg(take) AS INTEGER) FROM json_each(sqlc.arg(paths)) p WHERE true
+ON CONFLICT (merge_id, path) DO NOTHING;
+
+-- The choices of a merge whose path is in [from, to), through the primary key (the labels).
+-- name: ListNexusMergeChoicesIn :many
+SELECT path, take FROM nexus_merge_choices
+WHERE merge_id = sqlc.arg(merge_id) AND path >= sqlc.arg(from) AND path < sqlc.arg(to);

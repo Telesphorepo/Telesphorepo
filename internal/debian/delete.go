@@ -3,6 +3,7 @@ package debian
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"slices"
 	"strings"
 
@@ -21,11 +22,18 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 	q := dbq.New(tx)
 	type mark struct{ dist, unit string }
 	var marks []mark
+	var ids []int64
 	for _, a := range removed {
-		if !strings.HasPrefix(a.Path, "pool/") {
-			continue
+		if strings.HasPrefix(a.Path, "pool/") {
+			ids = append(ids, a.ID)
 		}
-		rows, err := q.DeletePackagesOfAsset(ctx, a.ID)
+	}
+	if len(ids) > 0 {
+		js, err := json.Marshal(ids)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := q.DeletePackagesOfAssets(ctx, string(js)) // one statement for the batch
 		if err != nil {
 			return nil, err
 		}
@@ -56,22 +64,16 @@ const byHashBatch = 200
 // pruneByHash deletes the by-hash files under prefix (dists/{dist}/{comp}/binary-{arch}/by-hash/
 // SHA256/) whose hash is not in keep: the current Packages and Packages.gz and the generation
 // they replaced, so a client that read the previous Release still finds its files. It runs
-// after a rebuild of the unit.
+// after a rebuild of the unit and reads the files a page of byHashBatch at a time.
 func (h *Handler) pruneByHash(ctx context.Context, repo *repos.Repo, prefix string, keep []string) error {
-	end, _ := assets.PrefixEnd(prefix)
-	lower, inclusive := prefix, true
+	after := ""
 	for {
+		page, next, err := h.assets.List(ctx, repo.ID, prefix, after, byHashBatch)
+		if err != nil {
+			return err
+		}
 		var stale []repopath.Path
-		n := 0
-		for ; n < byHashBatch; n++ {
-			a, err := h.assets.Seek(ctx, repo.ID, lower, inclusive, end)
-			if err != nil {
-				return err
-			}
-			if a == nil {
-				break
-			}
-			lower, inclusive = a.Path, false
+		for _, a := range page {
 			if !slices.Contains(keep, strings.TrimPrefix(a.Path, prefix)) {
 				stale = append(stale, repopath.Path(a.Path))
 			}
@@ -81,8 +83,9 @@ func (h *Handler) pruneByHash(ctx context.Context, repo *repos.Repo, prefix stri
 				return err
 			}
 		}
-		if n < byHashBatch {
+		if next == "" {
 			return nil
 		}
+		after = next
 	}
 }

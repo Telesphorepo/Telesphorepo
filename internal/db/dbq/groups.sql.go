@@ -151,35 +151,6 @@ func (q *Queries) FindGroupCount(ctx context.Context, arg FindGroupCountParams) 
 	return i, err
 }
 
-const getGroupCount = `-- name: GetGroupCount :one
-
-SELECT file_count, total_size, last_published_at FROM group_counts
-WHERE group_id = ? AND members = ?
-  AND NOT EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = group_counts.id)
-`
-
-type GetGroupCountParams struct {
-	GroupID int64
-	Members string
-}
-
-type GetGroupCountRow struct {
-	FileCount       int64
-	TotalSize       int64
-	LastPublishedAt int64
-}
-
-// The counters of group repos (internal/api/groupcounts.go): group_counts, group_count_members
-// and group_count_pending. The triggers of migration 0003 keep a row from its insert on.
-// The counters of a group for a set of members, through UNIQUE (group_id, members), once the job
-// has counted them (no group_count_pending entry).
-func (q *Queries) GetGroupCount(ctx context.Context, arg GetGroupCountParams) (GetGroupCountRow, error) {
-	row := q.db.QueryRowContext(ctx, getGroupCount, arg.GroupID, arg.Members)
-	var i GetGroupCountRow
-	err := row.Scan(&i.FileCount, &i.TotalSize, &i.LastPublishedAt)
-	return i, err
-}
-
 const insertGroupCount = `-- name: InsertGroupCount :one
 INSERT INTO group_counts (group_id, members) VALUES (?, ?) RETURNING id
 `
@@ -218,6 +189,57 @@ INSERT INTO group_count_pending (count_id) VALUES (?)
 func (q *Queries) InsertGroupCountPending(ctx context.Context, countID int64) error {
 	_, err := q.db.ExecContext(ctx, insertGroupCountPending, countID)
 	return err
+}
+
+const listGroupCounts = `-- name: ListGroupCounts :many
+
+SELECT g.group_id, g.members, g.file_count, g.total_size, g.last_published_at
+FROM json_each(CAST(?1 AS TEXT)) j CROSS JOIN group_counts g
+WHERE g.group_id = json_extract(j.value, '$[0]') AND g.members = json_extract(j.value, '$[1]')
+  AND NOT EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = g.id)
+`
+
+type ListGroupCountsRow struct {
+	GroupID         int64
+	Members         string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+}
+
+// The counters of group repos (internal/api/groupcounts.go): group_counts, group_count_members
+// and group_count_pending. The triggers of migration 0003 keep a row from its insert on.
+// The counters of groups for their sets of members, once the job has counted them (no
+// group_count_pending entry): sets is a JSON array of [group_id, members] pairs (the groups of a
+// page of repos), each a seek of UNIQUE (group_id, members). A pair without a counted row has no
+// row.
+func (q *Queries) ListGroupCounts(ctx context.Context, sets string) ([]ListGroupCountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listGroupCounts, sets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupCountsRow
+	for rows.Next() {
+		var i ListGroupCountsRow
+		if err := rows.Scan(
+			&i.GroupID,
+			&i.Members,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listUnsetUnits = `-- name: ListUnsetUnits :many

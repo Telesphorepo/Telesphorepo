@@ -89,7 +89,7 @@
   {/snippet}
   {#if created}
     <div class="flex flex-col gap-4">
-      <p class="max-w-prose text-body text-muted-foreground">
+      <p class="text-body text-pretty text-muted-foreground">
         Run this line in a terminal{helper ? "" : " in the project folder"}. It works once and ends <RelativeTime at={created.expires_at} />.
       </p>
       <Segmented
@@ -103,10 +103,10 @@
       <CodeSnippet label={os === "windows" ? "PowerShell" : "Terminal"} value={line} />
       <div class="flex flex-col gap-2">
         {#if helper}
-          <p class="max-w-prose text-body text-muted-foreground">Then publish with the native command{runs.length > 1 ? "s" : ""} of the tool.</p>
+          <p class="text-body text-pretty text-muted-foreground">Then publish with the native command{runs.length > 1 ? "s" : ""} of the tool.</p>
           {#each runs as run (run)}<CodeSnippet value={run} />{/each}
         {:else}
-          <p class="max-w-prose text-body text-muted-foreground">Then publish from the project folder.</p>
+          <p class="text-body text-pretty text-muted-foreground">Then publish from the project folder.</p>
           <CodeSnippet value="telesphorepo publish" />
         {/if}
       </div>
@@ -119,7 +119,7 @@
   {:else if asking}
     <div class="flex flex-col items-start gap-4">
       {#if sso}
-        <p class="max-w-prose text-body">Sign in again at your identity provider to get the line.</p>
+        <p class="text-body text-pretty">Sign in again at your identity provider to get the line.</p>
         <Button href={api.publish.ssoSetupURL(repo.name)}>Sign in again with single sign-on</Button>
       {:else}
         <FreshFactor actionLabel="Set up a project" onProof={create} back={repoPath(repo.name, "publish")} />

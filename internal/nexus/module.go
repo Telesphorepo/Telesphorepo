@@ -88,10 +88,14 @@ func Module() module.Module {
 				m.svc.auth = h.Auth
 				m.svc.publish = module.Use[*publish.Service](h)
 				h.Repos.OnDelete(m.svc.forgetRepo) // a rehearsal's or a move's row cascades with either repo; an id can be used again
+				h.Repos.AfterChange(m.svc.renamed) // the fields name a repo by its name now
 				if err := m.svc.loadRehearsals(ctx); err != nil {
 					return err
 				}
-				return m.svc.loadMoves(ctx)
+				if err := m.svc.loadMoves(ctx); err != nil {
+					return err
+				}
+				return m.svc.loadNames(ctx)
 			})
 			x.Job(jobs.Job{
 				Name: "nexus.scheduler",

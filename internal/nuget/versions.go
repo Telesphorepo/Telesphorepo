@@ -106,6 +106,13 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 		next = rows[limit-1].Normalized
 	}
 	loader := h.host.Builds.Loader()
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = buildOf(r)
+	}
+	if err := loader.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	out := make([]format.Version, 0, len(rows))
 	for _, r := range rows {
 		s, err := summary(ctx, loader, r)
@@ -220,18 +227,22 @@ func (h *Handler) proxyList(ctx context.Context, repo *repos.Repo, lid string) (
 // proxySummary is the format.Version of version v of package lid of proxy repo: Remote while
 // the proxy has not stored its .nupkg.
 func (h *Handler) proxySummary(ctx context.Context, repo *repos.Repo, lid string, v remoteVersion) (format.Version, *assets.Asset, error) {
-	lver := strings.ToLower(v.Version)
-	nupkg, _ := packagePaths(lid, lver)
-	s := format.Version{Version: v.Version, Kind: format.VersionRelease, Folder: flatDir + lid + "/" + lver + "/", BuildsCount: 1}
+	nupkg, _ := packagePaths(lid, strings.ToLower(v.Version))
 	a, err := h.host.Assets.Get(ctx, repo.ID, nupkg)
 	switch {
 	case errors.Is(err, assets.ErrNotFound):
-		s.Remote = true
-		return s, nil, nil
+		a = nil
 	case err != nil:
 		return format.Version{}, nil, err
 	}
-	return s, a, nil
+	return proxySummaryOf(lid, v, a), a, nil
+}
+
+// proxySummaryOf is the format.Version of version v of package lid of a proxy that stores its
+// .nupkg as a (nil: Remote).
+func proxySummaryOf(lid string, v remoteVersion, a *assets.Asset) format.Version {
+	lver := strings.ToLower(v.Version)
+	return format.Version{Version: v.Version, Kind: format.VersionRelease, Folder: flatDir + lid + "/" + lver + "/", BuildsCount: 1, Remote: a == nil}
 }
 
 // proxyVersions lists the versions of package lid of proxy repo, newest first, keyset-paged on
@@ -256,13 +267,18 @@ func (h *Handler) proxyVersions(ctx context.Context, repo *repos.Repo, lid, afte
 	if len(page) > 0 && start+len(page) < len(list) {
 		next = page[len(page)-1].Version
 	}
+	// The .nupkg files of the page that the proxy stores: one query.
+	paths := make([]string, len(page))
+	for i, v := range page {
+		paths[i], _ = packagePaths(lid, strings.ToLower(v.Version))
+	}
+	stored, err := h.host.Assets.GetMany(ctx, repo.ID, paths)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	out := make([]format.Version, 0, len(page))
-	for _, v := range page {
-		s, _, err := h.proxySummary(ctx, repo, lid, v)
-		if err != nil {
-			return nil, nil, "", err
-		}
-		out = append(out, s)
+	for i, v := range page {
+		out = append(out, proxySummaryOf(lid, v, stored[paths[i]]))
 	}
 	return &art, out, next, nil
 }

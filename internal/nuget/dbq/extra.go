@@ -3,7 +3,13 @@ package dbq
 // Hand-written queries that sqlc cannot express. Each one is a named constant in
 // Extra, so the plan guard (db.CheckPlans) checks it like a generated query.
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+)
 
 // Extra maps each hand-written query name to its SQL.
 var Extra = map[string]string{
@@ -11,6 +17,8 @@ var Extra = map[string]string{
 	"CountSearchPackages": countSearchPackages,
 	"ListPackagesFrom":    listPackagesFrom,
 	"CountPackagesFrom":   countPackagesFrom,
+	"SearchItems":         searchItemsAll,
+	"SearchItemsReleases": searchItemsReleases,
 }
 
 // The search index nuget_packages_search keys each package by repo_id << SearchShift | id, so
@@ -108,4 +116,81 @@ func (q *Queries) CountSearchPackages(ctx context.Context, f SearchFilter, limit
 	var n int64
 	err := q.db.QueryRowContext(ctx, query, args...).Scan(&n)
 	return n, err
+}
+
+// The packages of a page of a search (the JSON array ?1 of [repo id, lowered id, sort key of the
+// version it shows]), each with that version and the versions the search shows, oldest first
+// (listed, SemVer 2.0 ones when ?2 is 1, at most ?3; the JSON array of [sort key, version,
+// normalized]): a seek of the nuget_versions UNIQUE index per package, and a range of it (of
+// nuget_versions_releases without prereleases) for its versions. The CROSS JOIN keeps the page the
+// outer loop.
+const searchItems = `SELECT j.key, v.package_id, v.version, v.normalized, v.meta,
+  (SELECT json_group_array(json_array(sort_key, version, normalized)) FROM (SELECT w.sort_key, w.version, w.normalized
+    FROM nuget_versions w
+    WHERE w.repo_id = v.repo_id AND w.lower_id = v.lower_id AND w.listed = 1 AND w.semver2 <= ?2%s
+    ORDER BY w.sort_key LIMIT ?3))
+FROM json_each(?1) j
+CROSS JOIN nuget_versions v ON v.repo_id = json_extract(j.value, '$[0]') AND v.lower_id = json_extract(j.value, '$[1]')
+  AND v.sort_key = json_extract(j.value, '$[2]')
+JOIN assets a ON a.id = v.asset_id`
+
+var (
+	searchItemsAll      = fmt.Sprintf(searchItems, "")
+	searchItemsReleases = fmt.Sprintf(searchItems, " AND w.prerelease = 0")
+)
+
+// SearchItem is one package of SearchItems: its version, the metadata of that version, and the
+// versions the search shows, oldest first.
+type SearchItem struct {
+	PackageID, Version, Normalized, Meta string
+	Versions                             []SearchVersion
+}
+
+// SearchVersion is one version that a search shows of a package.
+type SearchVersion struct {
+	Version, Normalized string
+}
+
+// SearchItems returns the packages of hits (each [repo id, lowered id, sort key]), by their
+// place in hits, with the versions a search shows (prereleases when prerelease is set, SemVer
+// 2.0 ones when semver2 is 1), at most limit of each. A hit whose version is gone is not in the
+// map.
+func (q *Queries) SearchItems(ctx context.Context, hits [][3]any, prerelease bool, semver2, limit int64) (map[int]SearchItem, error) {
+	out := make(map[int]SearchItem, len(hits))
+	if len(hits) == 0 {
+		return out, nil
+	}
+	js, err := json.Marshal(hits)
+	if err != nil {
+		return nil, err
+	}
+	query := searchItemsReleases
+	if prerelease {
+		query = searchItemsAll
+	}
+	rows, err := q.db.QueryContext(ctx, query, string(js), semver2, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k int
+		var it SearchItem
+		var versions string
+		if err := rows.Scan(&k, &it.PackageID, &it.Version, &it.Normalized, &it.Meta, &versions); err != nil {
+			return nil, err
+		}
+		var vs [][3]string
+		if err := json.Unmarshal([]byte(versions), &vs); err != nil {
+			return nil, err
+		}
+		// Oldest first, as the subquery reads them; the order of an aggregate is not the
+		// subquery's by contract, so sort by the key.
+		slices.SortFunc(vs, func(a, b [3]string) int { return strings.Compare(a[0], b[0]) })
+		for _, v := range vs {
+			it.Versions = append(it.Versions, SearchVersion{Version: v[1], Normalized: v[2]})
+		}
+		out[k] = it
+	}
+	return out, rows.Err()
 }

@@ -209,21 +209,29 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 	q := dbq.New(tx)
 	var follow []repopath.Path
 	changed := map[string]bool{}
+	var assetIDs []int64
 	for _, a := range removed {
 		lid, lver, file, ok := flatFile(a.Path)
 		if !ok || !strings.HasSuffix(file, ".nupkg") {
 			continue
 		}
-		ids, err := q.DeleteVersionsOfAsset(ctx, a.ID)
+		assetIDs = append(assetIDs, a.ID)
+		_, nuspec := packagePaths(lid, lver)
+		if p, err := repopath.Parse(nuspec); err == nil {
+			follow = append(follow, p)
+		}
+	}
+	if len(assetIDs) > 0 {
+		js, err := json.Marshal(assetIDs)
+		if err != nil {
+			return nil, err
+		}
+		ids, err := q.DeleteVersionsOfAssets(ctx, string(js)) // one statement for the batch
 		if err != nil {
 			return nil, err
 		}
 		for _, id := range ids {
 			changed[id] = true
-		}
-		_, nuspec := packagePaths(lid, lver)
-		if p, err := repopath.Parse(nuspec); err == nil {
-			follow = append(follow, p)
 		}
 	}
 	for lid := range changed {

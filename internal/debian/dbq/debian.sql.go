@@ -24,28 +24,28 @@ func (q *Queries) DeleteIndexFile(ctx context.Context, arg DeleteIndexFileParams
 	return err
 }
 
-const deletePackagesOfAsset = `-- name: DeletePackagesOfAsset :many
-DELETE FROM deb_packages WHERE asset_id = ?
+const deletePackagesOfAssets = `-- name: DeletePackagesOfAssets :many
+DELETE FROM deb_packages WHERE asset_id IN (SELECT value FROM json_each(?1))
 RETURNING distribution, component, architecture
 `
 
-type DeletePackagesOfAssetRow struct {
+type DeletePackagesOfAssetsRow struct {
 	Distribution string
 	Component    string
 	Architecture string
 }
 
-// Removes the packages of a deleted pool file (one row per dist and component that holds it)
-// through deb_packages_asset.
-func (q *Queries) DeletePackagesOfAsset(ctx context.Context, assetID int64) ([]DeletePackagesOfAssetRow, error) {
-	rows, err := q.db.QueryContext(ctx, deletePackagesOfAsset, assetID)
+// Removes the packages of the deleted pool files of a remove batch (the JSON array of their
+// asset ids; one row per dist and component that holds a file) through deb_packages_asset.
+func (q *Queries) DeletePackagesOfAssets(ctx context.Context, assetIds interface{}) ([]DeletePackagesOfAssetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, deletePackagesOfAssets, assetIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeletePackagesOfAssetRow
+	var items []DeletePackagesOfAssetsRow
 	for rows.Next() {
-		var i DeletePackagesOfAssetRow
+		var i DeletePackagesOfAssetsRow
 		if err := rows.Scan(&i.Distribution, &i.Component, &i.Architecture); err != nil {
 			return nil, err
 		}

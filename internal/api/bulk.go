@@ -40,18 +40,27 @@ func listOf(w http.ResponseWriter, r *http.Request, field string, xs []string) (
 }
 
 // canEach checks with the access engine that p may manage every repo of names with need (or one
-// of them): 404 for an unknown name, else the refusal of the engine.
+// of them): 404 for an unknown name, else the refusal of the engine, for the first name in order
+// that fails. The repos are read in one lookup of the list (repos.Service.ByNames) and p's grants
+// once (auth.Service.WithGrants).
 func (a *API) canEach(w http.ResponseWriter, r *http.Request, p *auth.Principal, names []string, need perm.ID) bool {
+	ctx, err := a.auth.WithGrants(r.Context(), p)
+	if err != nil {
+		route.Fail(w, r, err)
+		return false
+	}
+	found, err := a.repos.ByNames(ctx, names)
+	if err != nil {
+		route.Fail(w, r, err)
+		return false
+	}
 	for _, name := range names {
-		repo, err := a.repos.ByName(r.Context(), name)
-		if errors.Is(err, repos.ErrNotFound) {
-			err = &repos.MissingError{Kind: "repository", Name: name}
-		}
-		if err != nil {
-			route.Fail(w, r, err)
+		repo := found[name]
+		if repo == nil {
+			route.Fail(w, r, &repos.MissingError{Kind: "repository", Name: name})
 			return false
 		}
-		if d := a.access.Decide(r.Context(), r, p, repo, access.Manage, need); !d.Allowed {
+		if d := a.access.Decide(ctx, r, p, repo, access.Manage, need); !d.Allowed {
 			httpx.Error(w, r, d.Status, d.Message)
 			return false
 		}
@@ -115,23 +124,34 @@ func (a *API) setUsersDisabled(w http.ResponseWriter, r *http.Request, c *route.
 		httpx.Error(w, r, http.StatusBadRequest, "You cannot disable your own account.")
 		return
 	}
+	// The users and their grants are read in one query each, then checked in the order of names.
+	users, err := a.auth.UsersNamed(r.Context(), names)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	var found []*auth.User
 	for _, name := range names {
-		u, err := a.auth.GetUser(r.Context(), name)
-		if errors.Is(err, auth.ErrNotFound) {
-			err = &repos.MissingError{Kind: "user", Name: name}
+		if u := users[name]; u != nil {
+			found = append(found, u)
 		}
-		if err != nil {
-			route.Fail(w, r, err)
+	}
+	covered, err := a.auth.CoversEach(r.Context(), p, found)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	i := 0
+	for _, name := range names {
+		if users[name] == nil {
+			route.Fail(w, r, &repos.MissingError{Kind: "user", Name: name})
 			return
 		}
-		if ok, err := a.auth.Covers(r.Context(), p, u); err != nil || !ok {
-			if err != nil {
-				route.Fail(w, r, err)
-			} else {
-				httpx.Error(w, r, http.StatusForbidden, "you can change only people whose permissions you all hold: "+name)
-			}
+		if !covered[i] {
+			httpx.Error(w, r, http.StatusForbidden, "you can change only people whose permissions you all hold: "+name)
 			return
 		}
+		i++
 	}
 	changed, err := a.auth.SetDisabled(r.Context(), names, *in.Disabled)
 	if err != nil {

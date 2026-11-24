@@ -152,12 +152,15 @@ func (rd *Reader) ResolveLive(ctx context.Context, r *http.Request, p *auth.Prin
 	if err != nil {
 		return nil, err
 	}
-	from, a, err := rd.storedFirst(ctx, members, path)
+	from, a, absent, err := rd.storedFirst(ctx, members, path)
 	if err != nil || a != nil {
 		return a, err
 	}
 	remoteFailed := false
 	for _, m := range members[from:] {
+		if absent[m.ID] {
+			continue // a hosted member that the pass read: it does not store the file
+		}
 		a, err := rd.has(ctx, m, path, live)
 		if live != nil && live.started {
 			return a, err // the member's answer went out: no other member serves
@@ -212,23 +215,39 @@ func (rd *Reader) Owner(ctx context.Context, r *http.Request, p *auth.Principal,
 
 // Stored returns the stored asset of path in repo for p, who reads through r, and never
 // contacts a remote: a hosted file, a proxy's cached file, or in a group the first member in read
-// order that p may read and that stores the file. nil when there is none.
+// order that p may read and that stores the file (one query of every member). nil when there is
+// none.
 func (rd *Reader) Stored(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path repopath.Path) (*Asset, error) {
-	list := []*repos.Repo{repo}
-	if repo.Kind == repos.KindGroup {
-		var err error
-		if list, err = rd.access.GroupMembers(ctx, r, p, repo); err != nil {
-			return nil, err
-		}
-	}
-	for _, m := range list {
-		a, err := rd.p.Get(ctx, m.ID, string(path))
+	if repo.Kind != repos.KindGroup {
+		a, err := rd.p.Get(ctx, repo.ID, string(path))
 		if errors.Is(err, ErrNotFound) {
-			continue
+			return nil, nil
 		}
 		return a, err
 	}
+	list, err := rd.access.GroupMembers(ctx, r, p, repo)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := rd.p.GetAt(ctx, memberIDs(list), string(path))
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range list {
+		if a := stored[m.ID]; a != nil {
+			return a, nil
+		}
+	}
 	return nil, nil
+}
+
+// memberIDs returns the ids of members.
+func memberIDs(members []*repos.Repo) []int64 {
+	ids := make([]int64, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	return ids
 }
 
 // storedFirst looks for path in the stored rows of members, in read order and without a remote,
@@ -239,37 +258,61 @@ func (rd *Reader) Stored(ctx context.Context, r *http.Request, p *auth.Principal
 // or a file that does not name its bytes: an immutable file at the same path in a later member
 // may hold other bytes than the remote's (a Maven release), and the first member wins. It returns
 // the stored asset, else the index from which the read in order goes on (the members before it
-// do not serve the file; len(members) when none does).
-func (rd *Reader) storedFirst(ctx context.Context, members []*repos.Repo, path repopath.Path) (int, *Asset, error) {
-	from := -1 // the first proxy member that the pass went past
+// do not serve the file; len(members) when none does), and the hosted members it found without
+// the file. The stored rows of every member the pass may read (those before the first proxy
+// member of a changing file) come from one query.
+func (rd *Reader) storedFirst(ctx context.Context, members []*repos.Repo, path repopath.Path) (int, *Asset, map[int64]bool, error) {
+	type classed struct {
+		class Class
+		ok    bool
+	}
+	classes := make([]classed, len(members))
+	var ids []int64
 	for i, m := range members {
 		if m.Kind == repos.KindProxy {
 			class, ok := rd.classify(m, path)
+			classes[i] = classed{class, ok}
 			if !ok {
 				continue
 			}
 			if class.Changing {
-				return firstOf(from, i), nil, nil
+				break
 			}
-			a, err := rd.p.Get(ctx, m.ID, string(path))
+		}
+		ids = append(ids, m.ID)
+	}
+	stored := map[int64]*Asset{}
+	if len(ids) > 0 {
+		var err error
+		if stored, err = rd.p.GetAt(ctx, ids, string(path)); err != nil {
+			return 0, nil, nil, err
+		}
+	}
+	absent := map[int64]bool{}
+	from := -1 // the first proxy member that the pass went past
+	for i, m := range members {
+		if m.Kind == repos.KindProxy {
+			class, ok := classes[i].class, classes[i].ok
 			switch {
-			case err == nil:
-				return 0, a, nil // an immutable cached file is always fresh
-			case !errors.Is(err, ErrNotFound):
-				return 0, nil, err
+			case !ok:
+				continue
+			case class.Changing:
+				return firstOf(from, i), nil, absent, nil
+			case stored[m.ID] != nil:
+				return 0, stored[m.ID], absent, nil // an immutable cached file is always fresh
 			case !class.Addressed:
-				return firstOf(from, i), nil, nil
+				return firstOf(from, i), nil, absent, nil
 			case from < 0:
 				from = i
 			}
 			continue
 		}
-		a, err := rd.p.Get(ctx, m.ID, string(path))
-		if err == nil || !errors.Is(err, ErrNotFound) {
-			return 0, a, err
+		if a := stored[m.ID]; a != nil {
+			return 0, a, absent, nil
 		}
+		absent[m.ID] = true
 	}
-	return firstOf(from, len(members)), nil, nil
+	return firstOf(from, len(members)), nil, absent, nil
 }
 
 // firstOf is from when it is set (>= 0), else i.
@@ -323,7 +366,8 @@ var checksums = map[string]func() hash.Hash{"md5": md5.New, "sha1": sha1.New, "s
 // serveMerged answers path of a group, whose base file the format merges. With one member that
 // has the base file, that member's file (or its checksum file, when it has one) serves; with more,
 // the server merges them. A checksum path is the checksum of the bytes the base path serves. The
-// members are asked and read at the same time; the merge keeps member order. The merged bytes
+// hosted members are read in one query and the proxy members asked at the same time; the merge
+// keeps member order. The merged bytes
 // stay in memory under the SHA-256s of the members' files, so a checksum request and the next
 // request of the same files reuse them.
 func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *repos.Repo, members []*repos.Repo, mg *Merger,
@@ -334,9 +378,26 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 		a    *Asset
 		err  error
 	}
+	// The hosted members' files are one query; each proxy member asks its cache or its remote.
+	var hosted []int64
+	for _, m := range members {
+		if m.Kind != repos.KindProxy {
+			hosted = append(hosted, m.ID)
+		}
+	}
+	stored, err := rd.p.GetAt(ctx, hosted, string(base))
+	if err != nil {
+		rd.log.Error("group: member files", "group", group.Name, "path", base, "err", err)
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
 	found := make([]source, len(members))
 	var wg sync.WaitGroup
 	for i, m := range members {
+		if m.Kind != repos.KindProxy {
+			found[i] = source{m, stored[m.ID], nil}
+			continue
+		}
 		wg.Go(func() {
 			a, err := rd.has(ctx, m, base, nil)
 			found[i] = source{m, a, err}

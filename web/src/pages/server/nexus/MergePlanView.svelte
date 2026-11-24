@@ -8,15 +8,18 @@
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
-  import { api, type NexusMergeChoice, type NexusMergePlan } from "$lib/api";
+  import { api, type NexusMergeChoice, type NexusMergeConflict, type NexusMergePlan } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { formatCount, formatRelative } from "$lib/format";
   import { count, someNames } from "$lib/words";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { Button } from "$lib/components/ui/button";
+  import * as InputGroup from "$lib/components/ui/input-group";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
+  import Toolbar from "$lib/components/Toolbar.svelte";
+  import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
@@ -28,6 +31,8 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import FileWarningIcon from "@lucide/svelte/icons/file-warning";
   import FileIcon from "@lucide/svelte/icons/file";
+  import SearchIcon from "@lucide/svelte/icons/search";
+  import SearchXIcon from "@lucide/svelte/icons/search-x";
 
   let { from, into }: { from: string; into: string } = $props();
 
@@ -49,9 +54,18 @@
   }
   const choiceOf = (path: string) => choices[path] ?? otherwise ?? "";
 
-  const conflictSource: TableSource<NexusMergePlan["conflicts"][number]> = {
+  // The search over the listed conflicts: they come whole with the plan (the first 1000), so it
+  // filters what the page holds. Keep all and Take all still decide every conflict.
+  let conflictQuery = $state("");
+  const searching = $derived(conflictQuery.trim().toLowerCase());
+  const conflictText = (c: NexusMergeConflict) => (c.kind === "label" ? c.title : c.path);
+  const shownConflicts = $derived(
+    searching ? (p?.conflicts ?? []).filter((c) => conflictText(c).toLowerCase().includes(searching)) : (p?.conflicts ?? []),
+  );
+  const hasLabels = $derived(!!p?.conflicts.some((c) => c.kind === "label"));
+  const conflictSource: TableSource<NexusMergeConflict> = {
     get items() {
-      return p?.conflicts ?? [];
+      return shownConflicts;
     },
     loading: false,
     error: "",
@@ -143,9 +157,33 @@
         {#if open}<StatusBadge tone="warning">{formatCount(open)} to choose</StatusBadge>{/if}
       {/snippet}
       {#snippet actions()}
-        <Button variant="outline" size="sm" onclick={() => chooseAll("keep")}>Keep all</Button>
-        <Button variant="outline" size="sm" onclick={() => chooseAll("take")}>Take all</Button>
+        <!-- They decide every conflict; while the search hides some, the buttons say how many. -->
+        {@const every = searching ? ` ${formatCount(p.conflict_count)}` : ""}
+        <Button variant="outline" size="sm" title={searching ? "Every conflict, also the ones the search hides" : undefined} onclick={() => chooseAll("keep")}>Keep all{every}</Button>
+        <Button variant="outline" size="sm" title={searching ? "Every conflict, also the ones the search hides" : undefined} onclick={() => chooseAll("take")}>Take all{every}</Button>
       {/snippet}
+      {#if p.conflicts.length > 10 || conflictQuery}
+        <Toolbar>
+          <InputGroup.Root class="sm:w-72">
+            <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+            <InputGroup.Input
+              bind:value={conflictQuery}
+              type="search"
+              autocomplete="off"
+              spellcheck={false}
+              placeholder={hasLabels ? "Search by path or tag" : "Search by path"}
+              aria-label={hasLabels ? "Search the conflicts by path or tag" : "Search the conflicts by path"}
+            />
+          </InputGroup.Root>
+          {#snippet end()}
+            {#if searching}
+              <p class="text-meta text-muted-foreground tabular-nums" aria-live="polite">
+                {formatCount(shownConflicts.length)} of {unlisted > 0 ? "the first " : ""}{count(p.conflicts.length, "conflict", "conflicts")}
+              </p>
+            {/if}
+          {/snippet}
+        </Toolbar>
+      {/if}
       <ItemList source={conflictSource} caption="Conflicts" key={(c) => c.path}>
         {#snippet leading()}<FileIcon class="size-5" />{/snippet}
         {#snippet title(c)}{#if c.kind === "label"}<Truncate text={c.title} />{:else}<Truncate text={c.path} copy />{/if}{/snippet}
@@ -168,6 +206,9 @@
               ]}
               bind:value={() => choiceOf(c.path) as NexusMergeChoice, (v) => (choices = { ...choices, [c.path]: v })}
             />
+        {/snippet}
+        {#snippet empty()}
+          <CompactEmpty icon={SearchXIcon} text="No conflict's {hasLabels ? 'path or tag' : 'path'} holds “{conflictQuery.trim()}”." />
         {/snippet}
       </ItemList>
       {#if unlisted > 0}

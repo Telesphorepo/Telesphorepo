@@ -1,7 +1,9 @@
 package docker
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
@@ -131,8 +133,9 @@ const idBatch = 1000
 
 // catalogOf returns at most n images of the repos ids, by full name after last. It walks the
 // repos of ids that hold an image in the order of "<name>/" (a repo name has no '/', so that is
-// the order of their full names) and reads each repo's images through the primary key: a page
-// reads one query per repo it lists from, and never a row of a repo outside ids.
+// the order of their full names) and reads their images through the primary key, n+1 repos per
+// query (CatalogPage; a repo after the first holds an image, so one query fills the page unless
+// a repo lost its images meanwhile), and never a row of a repo outside ids.
 func (f *Format) catalogOf(ctx context.Context, ids []int64, last string, n int) ([]string, error) {
 	out := []string{}
 	if n == 0 || len(ids) == 0 {
@@ -157,16 +160,34 @@ func (f *Format) catalogOf(ctx context.Context, ids []int64, last string, n int)
 	i := sort.Search(len(list), func(i int) bool {
 		return list[i].prefix > last || strings.HasPrefix(last, list[i].prefix)
 	})
-	for ; i < len(list) && len(out) < n; i++ {
-		after := ""
-		if image, ok := strings.CutPrefix(last, list[i].prefix); ok {
-			after = image
+	for i < len(list) && len(out) < n {
+		chunk := list[i:min(len(list), i+n+1)]
+		cursors := make([][2]any, len(chunk))
+		for k, r := range chunk {
+			after := ""
+			if image, ok := strings.CutPrefix(last, r.prefix); ok {
+				after = image
+			}
+			cursors[k] = [2]any{r.id, after}
 		}
-		names, err := f.q.ListRepoImages(ctx, dbq.ListRepoImagesParams{RepoID: list[i].id, After: after, Limit: int64(n - len(out))})
+		js, err := json.Marshal(cursors)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, names...)
+		rows, err := f.q.CatalogPage(ctx, string(js), int64(n-len(out)))
+		if err != nil {
+			return nil, err
+		}
+		slices.SortFunc(rows, func(a, b dbq.CatalogRow) int { return cmp.Compare(a.K, b.K) })
+		for _, row := range rows {
+			var names []string
+			if err := json.Unmarshal([]byte(row.Names), &names); err != nil {
+				return nil, err
+			}
+			slices.Sort(names) // one repo's full names: the order of its images
+			out = append(out, names[:min(len(names), n-len(out))]...)
+		}
+		i += len(chunk)
 	}
 	return out, nil
 }

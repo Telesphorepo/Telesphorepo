@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -81,29 +82,27 @@ func (s *Service) loadRules(ctx context.Context) error {
 	return s.reloadRulesLocked(ctx)
 }
 
-// reloadRulesLocked reads the allowed networks of every repo into memory and indexes them.
-// Caller holds rulesMu.
+// reloadRulesLocked reads the allowed networks of every repo into memory, a page of loadPage
+// rows per query in id order (entry order within a repo), and indexes them. Caller holds rulesMu.
 func (s *Service) reloadRulesLocked(ctx context.Context) error {
-	m := map[int64]*repoRules{}
+	lists := map[int64][]rule{}
 	var after int64
 	for {
-		id, err := s.rq.NextNetworkRepo(ctx, after)
-		if errors.Is(err, sql.ErrNoRows) {
-			break
-		}
+		rows, err := s.rq.ListNetworksAfter(ctx, dbq.ListNetworksAfterParams{After: after, Limit: loadPage})
 		if err != nil {
 			return fmt.Errorf("load allowed networks: %w", err)
 		}
-		rows, err := s.rq.ListRepoNetworks(ctx, id)
-		if err != nil {
-			return fmt.Errorf("load allowed networks of repo %d: %w", id, err)
-		}
-		list := make([]rule, 0, len(rows))
 		for _, r := range rows {
-			list = append(list, rule{cidr: r.Cidr.String, listID: r.ListID.Int64, note: r.Note})
+			lists[r.RepoID] = append(lists[r.RepoID], rule{cidr: r.Cidr.String, listID: r.ListID.Int64, note: r.Note})
 		}
+		if len(rows) < loadPage {
+			break
+		}
+		after = rows[len(rows)-1].ID
+	}
+	m := make(map[int64]*repoRules, len(lists))
+	for id, list := range lists {
 		m[id] = newRepoRules(list)
-		after = id
 	}
 	s.rules = m
 	s.reach.Store(buildReach(m))
@@ -238,10 +237,26 @@ func (s *Service) setRules(ctx context.Context, repo *repos.Repo, in Rules) (Rul
 		if err := q.DeleteRepoNetworks(ctx, repoID); err != nil {
 			return err
 		}
-		for _, r := range list {
-			if err := q.InsertRepoNetwork(ctx, dbq.InsertRepoNetworkParams{RepoID: repoID,
-				Cidr: sql.NullString{String: r.cidr, Valid: r.listID == 0}, ListID: sql.NullInt64{Int64: r.listID, Valid: r.listID != 0},
-				Note: r.note}); err != nil {
+		if len(list) > 0 {
+			type network struct {
+				CIDR   *string `json:"cidr"`
+				ListID *int64  `json:"list_id"`
+				Note   string  `json:"note"`
+			}
+			rows := make([]network, len(list))
+			for i, r := range list {
+				rows[i].Note = r.note
+				if r.listID != 0 {
+					rows[i].ListID = &r.listID
+				} else {
+					rows[i].CIDR = &r.cidr
+				}
+			}
+			js, err := json.Marshal(rows)
+			if err != nil {
+				return err
+			}
+			if err := q.InsertRepoNetworks(ctx, dbq.InsertRepoNetworksParams{RepoID: repoID, Networks: string(js)}); err != nil {
 				return err
 			}
 		}

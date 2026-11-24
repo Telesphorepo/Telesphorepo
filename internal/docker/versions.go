@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"path"
@@ -110,12 +111,30 @@ func (f *Format) versions(ctx context.Context, repo, from *repos.Repo, folder, a
 	if err != nil {
 		return nil, nil, "", err
 	}
+	// The tag assets of the page and their CI build records: two queries.
+	paths := make([]string, len(rows))
+	for i, t := range rows {
+		paths[i] = tagPath(image, t.Tag)
+	}
+	stored, err := f.h.Assets.GetMany(ctx, from.ID, paths)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	ids := make([]int64, 0, len(stored))
+	for _, a := range stored {
+		ids = append(ids, a.BuildID)
+	}
 	loader := f.h.Builds.Loader()
+	if err := loader.Load(ctx, ids); err != nil {
+		return nil, nil, "", err
+	}
 	out := make([]format.Version, 0, len(rows))
-	for _, t := range rows {
-		b, err := f.tagBuild(ctx, loader, from, image, t.Tag)
-		if err != nil {
-			return nil, nil, "", err
+	for i, t := range rows {
+		var b *ci.Build
+		if a := stored[paths[i]]; a != nil {
+			if b, err = loader.Get(ctx, a.BuildID); err != nil {
+				return nil, nil, "", err
+			}
 		}
 		out = append(out, format.Version{Version: t.Tag, Kind: format.VersionRelease, LatestBuild: shortDigest(t.Digest),
 			BuildsCount: 1, PublishedAt: time.Unix(t.UpdatedAt, 0).UTC(), CI: b})
@@ -125,6 +144,28 @@ func (f *Format) versions(ctx context.Context, repo, from *repos.Repo, folder, a
 		next = rows[len(rows)-1].Tag
 	}
 	return art, out, next, nil
+}
+
+// hasVersions returns which of tags the image of folder has in from (format.Spec HasVersions):
+// one query.
+func (f *Format) hasVersions(ctx context.Context, _, from *repos.Repo, folder string, tags []string) (map[string]bool, error) {
+	image := strings.Trim(folder, "/")
+	out := make(map[string]bool, len(tags))
+	if image == "" || len(tags) == 0 {
+		return out, nil
+	}
+	js, err := json.Marshal(tags)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := f.q.TagsIn(ctx, dbq.TagsInParams{RepoID: from.ID, Image: image, Tags: string(js)})
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range rows {
+		out[t] = true
+	}
+	return out, nil
 }
 
 // versionOrder is the order of versions: newest tag first (ListTagsRecent), by name for the same time.

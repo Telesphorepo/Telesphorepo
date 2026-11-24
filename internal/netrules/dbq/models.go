@@ -4,6 +4,10 @@
 
 package dbq
 
+import (
+	"database/sql"
+)
+
 type IpList struct {
 	ID          int64
 	Name        string
@@ -15,4 +19,12 @@ type IpList struct {
 	FetchedAt   int64
 	Error       string
 	CreatedAt   int64
+}
+
+type RepoNetwork struct {
+	ID     int64
+	RepoID int64
+	Cidr   sql.NullString
+	ListID sql.NullInt64
+	Note   string
 }

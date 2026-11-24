@@ -12,6 +12,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/namesearch"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -140,9 +141,21 @@ type keyJSON struct {
 	Repos []string `json:"repos"`
 }
 
-func (m *mod) out(r *http.Request, k Key) (keyJSON, error) {
-	used, err := m.keys.UsedBy(r.Context(), k.Name)
-	return keyJSON{k, used}, err
+// out returns keys with the repos that use them, read in one query for all of them.
+func (m *mod) out(r *http.Request, keys ...Key) ([]keyJSON, error) {
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = k.Name
+	}
+	used, err := m.keys.ReposOf(r.Context(), names)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]keyJSON, len(keys))
+	for i, k := range keys {
+		out[i] = keyJSON{k, used[k.Name]}
+	}
+	return out, nil
 }
 
 // fail maps a key error to a response. A key in use answers 409 with the extension member repos.
@@ -162,19 +175,25 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// list returns every key by name: [{name, fingerprint, public_key, created_at, error?, repos}].
-// It needs signing.manage, or repo.settings on a repository (the Signing tab of a repository picks a key
-// from this list).
+// list returns every key by name: [{name, fingerprint, public_key, created_at, error?, repos}];
+// ?q= keeps the keys whose name holds it in any case, or whose fingerprint holds it when it is a key
+// ID (Keys.Search). It needs signing.manage, or repo.settings on a repository (the Signing tab of a
+// repository picks a key from this list).
 func (m *mod) list(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	keys := m.keys.List()
-	out := make([]keyJSON, 0, len(keys))
-	for _, k := range keys {
-		x, err := m.out(r, k)
-		if err != nil {
+	var keys []Key
+	if q := namesearch.Text(r.URL.Query().Get("q")); q != "" {
+		var err error
+		if keys, err = m.keys.Search(r.Context(), q); err != nil {
 			route.Fail(w, r, err)
 			return
 		}
-		out = append(out, x)
+	} else {
+		keys = m.keys.List()
+	}
+	out, err := m.out(r, keys...)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -218,7 +237,7 @@ func (m *mod) get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	httpx.WriteJSON(w, http.StatusOK, out[0])
 }
 
 // delete deletes key {name}: 204, or 409 {error, repos} while repos use it.

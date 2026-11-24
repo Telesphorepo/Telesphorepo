@@ -104,7 +104,10 @@ func Module() module.Module {
 	return module.Module{
 		ID: name, Title: "Docker", Requires: []string{"network", "publish"},
 		Register: func(x *module.Extender) {
-			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries"), Extra: dbq.Extra,
+				Allow: map[string]string{
+					"CatalogPage": "the scans are of its own recursive CTE, a row per repo it reaches; every table read is a seek of the docker_images primary key",
+				}})
 			x.Settings(&settings.Group{ID: "docker", Label: "Docker", Perm: perm.SettingsGeneral,
 				Defs: []*settings.Def{DirectUploads.Def(), UploadURL.Def(), LinkGrace.Def()}, Validate: validate})
 			x.Init(func(ctx context.Context, h *module.Host) error {
@@ -144,6 +147,7 @@ func Module() module.Module {
 				Builds:        f.builds,
 				GroupVersions: format.GroupEach,
 				VersionOrder:  versionOrder,
+				HasVersions:   f.hasVersions,
 				Usage:         f.usage,
 				ArtifactUsage: f.artifactUsage,
 				Tools:         []format.Tool{f.dockerTool()},

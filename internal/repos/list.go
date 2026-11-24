@@ -223,6 +223,23 @@ func (s *Service) Named(ctx context.Context, names []string) ([]*Repo, error) {
 	return s.rows(as(func(r dbq.ListReposNamedRow) row { return row(r) })(dbq.New(s.db.R).ListReposNamed(ctx, names)))
 }
 
+// ByIDs returns the repos of ids that exist, by id: one query (the repos of a page of search
+// counts, the groups of a member).
+func (s *Service) ByIDs(ctx context.Context, ids []int64) (map[int64]*Repo, error) {
+	out := make(map[int64]*Repo, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	found, err := s.rows(dbq.New(s.db.R).ListReposByIDs(ctx, slices.Compact(slices.Sorted(slices.Values(ids)))))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range found {
+		out[r.ID] = r
+	}
+	return out, nil
+}
+
 // Largest returns the limit repos that store the most bytes, among every repo (ids nil) or the
 // repos of ids; a repo that stores nothing is left out.
 func (s *Service) Largest(ctx context.Context, ids []int64, limit int) ([]*Repo, error) {

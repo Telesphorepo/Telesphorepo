@@ -278,7 +278,8 @@ func (s *Service) ListUsers(ctx context.Context, text, after string, limit int) 
 // SetDisabled disables or enables every user of names in one transaction. It reads every name
 // first: an unknown name returns a *repos.MissingError and changes nothing. Disabling ends the
 // sessions of every user in the list. It records user.update for each user whose value changed,
-// and returns them.
+// and returns them. The users, the change, the events and the sessions are one statement each,
+// whatever the number of names.
 func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool) ([]*User, error) {
 	var changed []*User
 	var ids []int64
@@ -289,37 +290,48 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 		if err != nil {
 			return err
 		}
+		rows, err := q.ListUsersNamed(ctx, names)
+		if err != nil {
+			return err
+		}
+		byName := make(map[string]dbq.ListUsersNamedRow, len(rows))
+		for _, r := range rows {
+			byName[r.Username] = r
+		}
 		var all []*User
 		for _, name := range names {
-			r, err := q.GetUserByUsername(ctx, name)
-			if errors.Is(err, sql.ErrNoRows) {
+			r, ok := byName[name]
+			if !ok {
 				return &repos.MissingError{Kind: "user", Name: name}
-			}
-			if err != nil {
-				return err
 			}
 			all = append(all, s.mark(newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt)))
 		}
+		var flip []int64
+		var events []audit.Event
 		for _, u := range all {
 			if u.Disabled != disabled {
-				if err := q.SetUserDisabled(ctx, dbq.SetUserDisabledParams{Disabled: disabled, ID: u.ID}); err != nil {
-					return err
-				}
+				flip = append(flip, u.ID)
 				u.Disabled = disabled
 				changed = append(changed, u)
-				if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.UserUpdate, Target: u.Username, Detail: map[string]any{"disabled": disabled}}); err != nil {
-					return err
-				}
+				events = append(events, audit.Event{Action: audit.UserUpdate, Target: u.Username, Detail: map[string]any{"disabled": disabled}})
 			}
 			if disabled {
-				if err := q.DeleteUserSessions(ctx, u.ID); err != nil {
-					return err
-				}
 				ids = append(ids, u.ID)
 			}
 		}
+		if len(flip) > 0 {
+			if err := q.SetUsersDisabled(ctx, dbq.SetUsersDisabledParams{Disabled: disabled, Ids: flip}); err != nil {
+				return err
+			}
+		}
+		if err := s.audit.RecordAllTx(ctx, tx, events); err != nil {
+			return err
+		}
 		if !disabled {
 			return nil
+		}
+		if err := q.DeleteUsersSessions(ctx, ids); err != nil {
+			return err
 		}
 		if len(before) > 0 {
 			if after, err := enabledAdmins(ctx, q); err != nil {
@@ -523,6 +535,72 @@ func (s *Service) OIDCUser(ctx context.Context, issuer, subject string) (id int6
 		return 0, false, err
 	}
 	return row.ID, row.Disabled, nil
+}
+
+// UsersNamed returns the accounts of names that exist, by username: one query (the list of a bulk
+// change).
+func (s *Service) UsersNamed(ctx context.Context, names []string) (map[string]*User, error) {
+	out := make(map[string]*User, len(names))
+	if len(names) == 0 {
+		return out, nil
+	}
+	rows, err := s.rq.ListUsersNamed(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.Username] = s.mark(newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt))
+	}
+	return out, nil
+}
+
+// CoversEach is Covers for each user of targets, in their order: the grants of by and of every
+// target are read in two queries whatever their number.
+func (s *Service) CoversEach(ctx context.Context, by *Principal, targets []*User) ([]bool, error) {
+	out := make([]bool, len(targets))
+	allRepos := perm.Current().AllRepos(by.Perms)
+	var ids []int64
+	for i, t := range targets {
+		out[i] = by.Perms.Contains(t.Perms)
+		if out[i] && !allRepos {
+			ids = append(ids, t.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.rq.ListUsersGrants(ctx, slices.Compact(slices.Sorted(slices.Values(ids))))
+	if err != nil {
+		return nil, err
+	}
+	theirs := map[int64]map[int64]perm.Set{} // user -> repo -> set
+	for _, r := range rows {
+		if theirs[r.UserID] == nil {
+			theirs[r.UserID] = map[int64]perm.Set{}
+		}
+		theirs[r.UserID][r.RepoID] = theirs[r.UserID][r.RepoID].Union(perm.SetOf(perm.ID(r.Perm)).Of(perm.ScopeRepo))
+	}
+	var mine map[int64]perm.Set
+	for i, t := range targets {
+		if !out[i] || allRepos {
+			continue
+		}
+		for id, set := range theirs[t.ID] {
+			if set.Empty() {
+				continue
+			}
+			if mine == nil {
+				if mine, err = s.UserRepoPerms(ctx, by.UserID); err != nil {
+					return nil, err
+				}
+			}
+			if !mine[id].Contains(set) {
+				out[i] = false
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // Covers reports whether by holds every permission that target holds: each server permission,

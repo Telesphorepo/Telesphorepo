@@ -756,16 +756,25 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		out.Next = route.Cursor(strconv.FormatInt(next, 10))
 	}
 	if first {
-		repos := make([]searchRepoJSON, 0, len(counts))
+		ids := make([]int64, len(counts))
+		for i, n := range counts {
+			ids[i] = n.RepoID
+		}
+		byID, err := a.repos.ByIDs(ctx, ids)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		list := make([]searchRepoJSON, 0, len(counts))
 		for _, n := range counts {
-			repo, err := a.repos.ByID(ctx, n.RepoID)
-			if err != nil {
-				route.Fail(w, r, err)
+			repo, ok := byID[n.RepoID]
+			if !ok {
+				route.Fail(w, r, repos.ErrNotFound)
 				return
 			}
-			repos = append(repos, searchRepoJSON{repo.Name, repo.Format, n.Matches, n.Matches >= assets.SearchCountCap})
+			list = append(list, searchRepoJSON{repo.Name, repo.Format, n.Matches, n.Matches >= assets.SearchCountCap})
 		}
-		out.Repos = &repos
+		out.Repos = &list
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -221,6 +222,27 @@ func TestPublishGate(t *testing.T) {
 			t.Fatalf("manual session of a user without a second factor: body %s, want second_factor_required", b)
 		}
 	})
+
+	t.Run("publish log by repository and person", func(t *testing.T) {
+		s.MintSession(t, w, other)
+		type session struct {
+			Repo     string `json:"repo"`
+			Username string `json:"username"`
+		}
+		// The writer has sessions in both repos; the reader has none.
+		for _, c := range []struct {
+			query, repo string
+			any         bool
+		}{{"repo=" + other, other, true}, {"repo=" + repo + "&user=" + w, repo, true}, {"user=" + r, "", false}, {"repo=" + repo + "&user=" + r, "", false}} {
+			var log struct {
+				Items []session `json:"items"`
+			}
+			s.MustAPI(t, http.MethodGet, "/api/publish/log?"+c.query, nil, s.Admin(), &log)
+			if (len(log.Items) > 0) != c.any || slices.ContainsFunc(log.Items, func(it session) bool { return it != session{c.repo, w} }) {
+				t.Fatalf("GET /api/publish/log?%s: %+v, want only sessions of %s in %s", c.query, log.Items, w, c.repo)
+			}
+		}
+	})
 }
 
 // TestSecondFactorLogin covers the sign-in rule: a person with server permissions
@@ -407,6 +429,18 @@ func TestDeviceEnrollment(t *testing.T) {
 	s.MustAPI(t, http.MethodGet, "/api/devices", nil, sess, &devices)
 	if len(devices.Items) != 1 || devices.Items[0].ID != a.DeviceID || devices.Items[0].Name != "laptop" {
 		t.Fatalf("devices: %+v, want the laptop device", devices.Items)
+	}
+	// ?q= keeps the devices whose name or owner's username holds it, in any case: in the person's
+	// own list, and in every person's for a holder of People.
+	for _, c := range []struct {
+		as   Auth
+		q    string
+		want int
+	}{{sess, "APTO", 1}, {sess, "desk", 0}, {s.Admin(), strings.ToUpper(u[1:]), 1}, {s.Admin(), "desk", 0}} {
+		s.MustAPI(t, http.MethodGet, "/api/devices?q="+url.QueryEscape(c.q), nil, c.as, &devices)
+		if len(devices.Items) != c.want || c.want == 1 && devices.Items[0].ID != a.DeviceID {
+			t.Fatalf("GET /api/devices?q=%s: %+v, want %d of the laptop device", c.q, devices.Items, c.want)
+		}
 	}
 
 	d := &Device{ID: a.DeviceID, User: u, Key: key}

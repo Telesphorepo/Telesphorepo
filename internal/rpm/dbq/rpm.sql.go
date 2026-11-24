@@ -21,13 +21,33 @@ func (q *Queries) CountPackages(ctx context.Context, repoID int64) (int64, error
 	return count, err
 }
 
-const deletePackage = `-- name: DeletePackage :exec
-DELETE FROM rpm_packages WHERE id = ?
+const deletePackagesOfAssets = `-- name: DeletePackagesOfAssets :many
+DELETE FROM rpm_packages WHERE asset_id IN (SELECT value FROM json_each(?1)) RETURNING id
 `
 
-func (q *Queries) DeletePackage(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, deletePackage, id)
-	return err
+// Removes the packages of the deleted files of a remove batch (a JSON array of asset ids), their
+// parts with them, through rpm_packages_asset.
+func (q *Queries) DeletePackagesOfAssets(ctx context.Context, assetIds interface{}) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, deletePackagesOfAssets, assetIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const findUpload = `-- name: FindUpload :one

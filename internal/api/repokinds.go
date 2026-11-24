@@ -55,9 +55,15 @@ func timeOrNil(t time.Time) *time.Time {
 // writeRepo answers the repo JSON of repo for p, who holds perms on it, with the details of its
 // kind: the members of a group and the groups of a member (only those p can download from), and
 // the remote of a proxy (only for a holder of settings). A group's counters count each file that
-// it serves to p once (groupCounters).
+// it serves to p once (groupCounters). p's grants are read once (auth.Service.WithGrants) and the
+// members or the groups in one query, whatever their number.
 func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perms perm.Set) {
-	ctx := r.Context()
+	ctx, err := a.auth.WithGrants(repos.Remember(r.Context()), p)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	r = r.WithContext(ctx)
 	out := a.toRepoJSON(repo, perms)
 	readable := func(x *repos.Repo) (bool, error) {
 		set, err := a.access.RepoPerms(ctx, p, x)
@@ -81,10 +87,12 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 				out.Members = append(out.Members, memberJSON{m.Name, m.Format, m.Kind, m.AnonymousRead, set.Strings()})
 			}
 		}
-		if err := a.groupCounters(r, p, repo, &out); err != nil {
+		counts, err := a.groupCounters(r, p, []*repos.Repo{repo})
+		if err != nil {
 			route.Fail(w, r, err)
 			return
 		}
+		setCounters(&out, counts[repo.ID])
 	case repos.KindProxy:
 		if px, ok := a.repos.Proxy(repo.ID); ok && perms.Has(perm.RepoSettings) {
 			out.Proxy = &proxyJSON{
@@ -95,9 +103,15 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 		}
 	}
 	if repo.Kind != repos.KindGroup {
-		for _, id := range a.repos.GroupsOf(repo.ID) {
-			g, err := a.repos.ByID(ctx, id)
-			if err != nil {
+		ids := a.repos.GroupsOf(repo.ID)
+		groups, err := a.repos.ByIDs(ctx, ids)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		for _, id := range ids {
+			g, ok := groups[id]
+			if !ok {
 				continue // deleted after the copy was read
 			}
 			ok, err := readable(g)

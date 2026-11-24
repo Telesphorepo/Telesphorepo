@@ -1,12 +1,14 @@
 package nexus
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -98,8 +100,9 @@ type Service struct {
 	public map[string]publicCheck // "<source id>/<repo>" -> the last anonymous check
 
 	rehMu sync.RWMutex
-	reh   map[int64]int64 // rehearsal repo id -> the id of the repo it rehearses (repo_rehearsals)
-	moves map[int64]int64 // moving repo id -> the id of the repo it moves into (repo_moves)
+	reh   map[int64]int64  // rehearsal repo id -> the id of the repo it rehearses (repo_rehearsals)
+	moves map[int64]int64  // moving repo id -> the id of the repo it moves into (repo_moves)
+	names map[int64]string // the names of the repos that reh and moves name (the fields' values)
 
 	publish pipelines // the CI pipelines that a merge gives to its target; set before the API serves
 }
@@ -120,7 +123,8 @@ type publicCheck struct {
 func New(d *db.DB, set *settings.Service, rs *repos.Service, as *assets.Pipeline, os *ops.Service, formats *format.Registry,
 	au *audit.Log, log *slog.Logger, base context.Context, spawn func(name string, fn func(ctx context.Context))) *Service {
 	return &Service{db: d, settings: set, repos: rs, assets: as, ops: os, formats: formats, audit: au, log: log, base: base, spawn: spawn,
-		runs: map[int64]*runState{}, public: map[string]publicCheck{}, reh: map[int64]int64{}, moves: map[int64]int64{}}
+		runs: map[int64]*runState{}, public: map[string]publicCheck{}, reh: map[int64]int64{}, moves: map[int64]int64{},
+		names: map[int64]string{}}
 }
 
 // Source is a Nexus source as the API returns it. It never holds the credentials.
@@ -431,63 +435,96 @@ func (s *Service) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (
 	return s.Source(ctx, id)
 }
 
-// toSource converts a row, adds its newest sync and derives its status.
-func (s *Service) toSource(ctx context.Context, row dbq.NexusSource) (*Source, error) {
+// toSources converts rows, adds the newest sync of each and derives its status: one query each
+// for the newest syncs, their sums, their merges, the mapped repos and the switch-overs of every
+// row.
+func (s *Service) toSources(ctx context.Context, rows []dbq.NexusSource) ([]Source, error) {
+	out := make([]Source, 0, len(rows))
+	if len(rows) == 0 {
+		return out, nil
+	}
 	interval := s.interval()
-	src := &Source{ID: row.ID, Name: row.Name, BaseURL: row.BaseUrl, State: row.State,
-		CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), LastError: row.LastError,
-		CutoverSyncID: row.CutoverSyncID, CutoverFailed: row.CutoverFailed,
-		SyncInterval: int64(interval / time.Second)}
 	q := dbq.New(s.db.R)
-	last, err := q.GetLatestNexusSync(ctx, row.ID)
-	switch {
-	case err == nil:
-		if src.LastSync, err = s.toSync(ctx, dbq.GetNexusSyncRow(last), false); err != nil {
-			return nil, err
-		}
-	case !errors.Is(err, sql.ErrNoRows):
-		return nil, err
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
 	}
-	mapped, err := q.ListNexusSourceRepos(ctx, row.ID)
+	latest, err := q.ListLatestNexusSyncs(ctx, idsJSON(ids))
 	if err != nil {
 		return nil, err
 	}
-	src.RepoCount = len(mapped)
-	switched, err := q.ListNexusSwitchOvers(ctx, row.ID)
+	lastRows := make([]dbq.GetNexusSyncRow, len(latest))
+	for i, l := range latest {
+		lastRows[i] = dbq.GetNexusSyncRow(l)
+	}
+	syncs, err := s.toSyncs(ctx, lastRows, true)
 	if err != nil {
 		return nil, err
 	}
-	src.SwitchedOver = len(switched)
+	lastOf := make(map[int64]*Sync, len(syncs))
+	for i := range syncs {
+		lastOf[syncs[i].SourceID] = &syncs[i]
+	}
+	mapped, err := q.CountNexusSourceRepos(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, err
+	}
+	mappedOf := make(map[int64]dbq.CountNexusSourceReposRow, len(mapped))
 	for _, m := range mapped {
-		if m.Kind == TypeHosted {
-			src.Copying++
+		mappedOf[m.SourceID] = m
+	}
+	switched, err := q.CountNexusSwitchOvers(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, err
+	}
+	switchedOf := make(map[int64]int64, len(switched))
+	for _, sw := range switched {
+		switchedOf[sw.SourceID] = sw.Switched
+	}
+	for _, row := range rows {
+		src := Source{ID: row.ID, Name: row.Name, BaseURL: row.BaseUrl, State: row.State,
+			CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), LastError: row.LastError,
+			CutoverSyncID: row.CutoverSyncID, CutoverFailed: row.CutoverFailed,
+			SyncInterval: int64(interval / time.Second), LastSync: lastOf[row.ID]}
+		m := mappedOf[row.ID]
+		src.RepoCount = int(m.Repos)
+		src.SwitchedOver = int(switchedOf[row.ID])
+		src.Copying = int(m.Hosted) - src.SwitchedOver
+		// One sync runs at a time per source, so a running sync is the newest one.
+		if src.LastSync != nil && src.LastSync.State == SyncRunning {
+			src.RunningSyncID = src.LastSync.ID
 		}
-	}
-	src.Copying -= len(switched)
-	// One sync runs at a time per source, so a running sync is the newest one.
-	if src.LastSync != nil && src.LastSync.State == SyncRunning {
-		src.RunningSyncID = src.LastSync.ID
-	}
-	switch {
-	case row.State == StateCutOver:
-		src.Status = StatusCutOver
-	case src.RunningSyncID != 0:
-		src.Status = StatusSyncing
-	case len(mapped) == 0:
-		src.Status = StatusNoRepos
-	case row.LastError != "":
-		src.Status = StatusFailed
-	default:
-		src.Status = StatusUpToDate
-	}
-	if row.State == StateMirroring && len(mapped) > 0 && src.RunningSyncID == 0 {
-		next := time.Now().UTC()
-		if row.LastSyncAt > 0 {
-			next = time.Unix(row.LastSyncAt, 0).Add(interval).UTC()
+		switch {
+		case row.State == StateCutOver:
+			src.Status = StatusCutOver
+		case src.RunningSyncID != 0:
+			src.Status = StatusSyncing
+		case m.Repos == 0:
+			src.Status = StatusNoRepos
+		case row.LastError != "":
+			src.Status = StatusFailed
+		default:
+			src.Status = StatusUpToDate
 		}
-		src.NextSyncAt = &next
+		if row.State == StateMirroring && m.Repos > 0 && src.RunningSyncID == 0 {
+			next := time.Now().UTC()
+			if row.LastSyncAt > 0 {
+				next = time.Unix(row.LastSyncAt, 0).Add(interval).UTC()
+			}
+			src.NextSyncAt = &next
+		}
+		out = append(out, src)
 	}
-	return src, nil
+	return out, nil
+}
+
+// toSource is toSources of one row.
+func (s *Service) toSource(ctx context.Context, row dbq.NexusSource) (*Source, error) {
+	out, err := s.toSources(ctx, []dbq.NexusSource{row})
+	if err != nil {
+		return nil, err
+	}
+	return &out[0], nil
 }
 
 // Source returns source id.
@@ -506,13 +543,8 @@ func (s *Service) Sources(ctx context.Context, after string, limit int) (out []S
 	if err != nil {
 		return nil, "", err
 	}
-	out = make([]Source, 0, len(rows))
-	for _, row := range rows {
-		src, err := s.toSource(ctx, row)
-		if err != nil {
-			return nil, "", err
-		}
-		out = append(out, *src)
+	if out, err = s.toSources(ctx, rows); err != nil {
+		return nil, "", err
 	}
 	if len(rows) == limit && limit > 0 {
 		next = rows[len(rows)-1].Name
@@ -537,15 +569,15 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	targets := make(map[string]*repos.Repo, len(mapped))
+	targets, err := s.targetsOf(ctx, mapped)
+	if err != nil {
+		return nil, err
+	}
 	sourceOf := make(map[int64]string, len(mapped)) // target repo id -> Nexus repo name
 	for _, m := range mapped {
-		t, err := s.repos.ByID(ctx, m.TargetRepoID)
-		if err != nil {
-			return nil, err
+		if t := targets[m.SourceRepo]; t != nil {
+			sourceOf[t.ID] = m.SourceRepo
 		}
-		targets[m.SourceRepo] = t
-		sourceOf[t.ID] = m.SourceRepo
 	}
 
 	var listed []Repository
@@ -604,6 +636,27 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 	if err != nil {
 		return nil, err
 	}
+	// What the targets have, in one query each for all of them: the rehearsals, the moving repos
+	// and the newest merge of the hosted ones, and the names of the members of the groups.
+	var hosted, members []int64
+	membersOf := map[int64][]int64{} // group target id -> its member ids (in memory)
+	for _, t := range targets {
+		switch t.Kind {
+		case repos.KindHosted:
+			hosted = append(hosted, t.ID)
+		case repos.KindGroup:
+			membersOf[t.ID] = s.repos.Members(t.ID)
+			members = append(members, membersOf[t.ID]...)
+		}
+	}
+	rehearsals, moving, merges, err := s.hostedTargets(ctx, hosted)
+	if err != nil {
+		return nil, err
+	}
+	memberNames, err := s.repoNames(ctx, members)
+	if err != nil {
+		return nil, err
+	}
 	for i := range d.Repos {
 		r := &d.Repos[i]
 		r.Rehearsals = []string{}
@@ -615,26 +668,20 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		r.Target = t.Name
 		r.SwitchOver = switched[r.Name]
 		if t.Kind == repos.KindHosted {
-			if r.Rehearsals, err = s.rehearsalsOf(ctx, t.ID); err != nil {
-				return nil, err
-			}
-			if r.Moving, err = s.movingInto(ctx, t.ID); err != nil {
-				return nil, err
-			}
-			if r.MergeID, err = s.activeMerge(ctx, t.ID); err != nil {
-				return nil, err
-			}
+			r.Rehearsals = append(r.Rehearsals, rehearsals[t.ID]...)
+			r.Moving = append(r.Moving, moving[t.ID]...)
+			r.MergeID = merges[t.ID]
 		}
 		if t.Kind == repos.KindGroup {
-			members, err := s.repos.MemberRepos(ctx, t)
-			if err != nil {
-				return nil, err
-			}
-			r.TargetMembers = make([]string, 0, len(members))
-			for _, m := range members {
-				name, ok := sourceOf[m.ID]
+			ids := membersOf[t.ID]
+			r.TargetMembers = make([]string, 0, len(ids))
+			for _, m := range ids {
+				name, ok := memberNames[m]
 				if !ok {
-					name = m.Name
+					continue // a member deleted after the copy was read is gone
+				}
+				if n, ok := sourceOf[m]; ok {
+					name = n
 				}
 				r.TargetMembers = append(r.TargetMembers, name)
 			}
@@ -653,6 +700,127 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		return strings.Compare(a.Name, b.Name)
 	})
 	return d, nil
+}
+
+// targetsOf returns the target repo of each of the mapping rows, by Nexus repo name: their repos
+// in one query per idsPage targets (repos.Service.ByIDs). A target that is gone is
+// repos.ErrNotFound.
+func (s *Service) targetsOf(ctx context.Context, mapped []dbq.NexusSourceRepo) (map[string]*repos.Repo, error) {
+	ids := make([]int64, len(mapped))
+	for i, m := range mapped {
+		ids[i] = m.TargetRepoID
+	}
+	byID, err := s.reposByID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*repos.Repo, len(mapped))
+	for _, m := range mapped {
+		t := byID[m.TargetRepoID]
+		if t == nil {
+			return nil, repos.ErrNotFound
+		}
+		out[m.SourceRepo] = t
+	}
+	return out, nil
+}
+
+// idsPage is how many ids or names one lookup of repos.Service.ByIDs or ByNames reads.
+const idsPage = 500
+
+// reposByID returns the repos of ids that exist, by id (repos.Service.ByIDs, a query per
+// idsPage ids).
+func (s *Service) reposByID(ctx context.Context, ids []int64) (map[int64]*repos.Repo, error) {
+	out := make(map[int64]*repos.Repo, len(ids))
+	for chunk := range slices.Chunk(ids, idsPage) {
+		page, err := s.repos.ByIDs(ctx, chunk)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(out, page)
+	}
+	return out, nil
+}
+
+// reposByName returns the repos of names that exist, by the name asked, as ByName reads each
+// (repos.Service.ByNames, a lookup per idsPage names).
+func (s *Service) reposByName(ctx context.Context, names []string) (map[string]*repos.Repo, error) {
+	out := make(map[string]*repos.Repo, len(names))
+	for chunk := range slices.Chunk(names, idsPage) {
+		page, err := s.repos.ByNames(ctx, chunk)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(out, page)
+	}
+	return out, nil
+}
+
+// hostedTargets returns, for the hosted repos of ids, the names of their rehearsal repos and of
+// their moving repos, each by creation, and the newest merge into each that runs or failed (as
+// activeMerge): one query each.
+func (s *Service) hostedTargets(ctx context.Context, ids []int64) (rehearsals, moving map[int64][]string, merges map[int64]int64, err error) {
+	rehearsals, moving, merges = map[int64][]string{}, map[int64][]string{}, map[int64]int64{}
+	if len(ids) == 0 {
+		return rehearsals, moving, merges, nil
+	}
+	q := dbq.New(s.db.R)
+	type named struct {
+		id   int64
+		name string
+	}
+	byCreation := func(m map[int64][]named) map[int64][]string {
+		out := make(map[int64][]string, len(m))
+		for k, rs := range m {
+			slices.SortFunc(rs, func(a, b named) int { return cmp.Compare(a.id, b.id) })
+			for _, r := range rs {
+				out[k] = append(out[k], r.name)
+			}
+		}
+		return out
+	}
+	rs, err := q.ListRehearsalsOf(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	reh := map[int64][]named{}
+	for _, r := range rs {
+		reh[r.ForRepoID] = append(reh[r.ForRepoID], named{r.RepoID, r.Name})
+	}
+	ms, err := q.ListMovesOf(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	mov := map[int64][]named{}
+	for _, m := range ms {
+		mov[m.IntoRepoID] = append(mov[m.IntoRepoID], named{m.RepoID, m.Name})
+	}
+	gs, err := q.ListLatestNexusMergesOf(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, g := range gs {
+		if g.State == MergeRunning || g.State == MergeFailed {
+			merges[g.TargetRepoID] = g.ID
+		}
+	}
+	return byCreation(reh), byCreation(mov), merges, nil
+}
+
+// repoNames returns the names of the repos of ids that exist, by id, in one query.
+func (s *Service) repoNames(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := dbq.New(s.db.R).ListRepoNamesIn(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Name
+	}
+	return out, nil
 }
 
 // checkPublic sets Public of each supported repo from an anonymous request to Nexus, at most
@@ -803,15 +971,36 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 	if err != nil {
 		return nil, err
 	}
+	keptRows := make([]dbq.NexusSourceRepo, 0, len(kept))
+	for _, k := range kept {
+		keptRows = append(keptRows, k)
+	}
+	keptRepos, err := s.targetsOf(ctx, keptRows)
+	if err != nil {
+		return nil, err
+	}
 	keptTargets := map[int64]string{} // target repo id -> target name
 	targetOf := map[string]string{}   // source repo -> target name
-	for name, k := range kept {
-		t, err := s.repos.ByID(ctx, k.TargetRepoID)
-		if err != nil {
-			return nil, err
-		}
+	for name, t := range keptRepos {
 		keptTargets[t.ID], targetOf[name] = t.Name, t.Name
 		seen[name] = true
+	}
+	// The targets that exist, and the sources they mirror, in one lookup each.
+	names := make([]string, 0, len(maps))
+	for _, m := range maps {
+		names = append(names, m.Target)
+	}
+	existing, err := s.reposByName(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	existingIDs := make([]int64, 0, len(existing))
+	for _, t := range existing {
+		existingIDs = append(existingIDs, t.ID)
+	}
+	mirrors, err := s.mirrorsOf(ctx, q, existingIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check every mapping before creating any repo.
@@ -832,9 +1021,8 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		}
 		p := plan{m: m, src: r}
 		p.f = s.formats.Importer(r.Format)
-		t, err := s.repos.ByName(ctx, m.Target)
-		switch {
-		case err == nil:
+		switch t := existing[m.Target]; {
+		case t != nil:
 			if t.Kind != r.Type {
 				return nil, fmt.Errorf("%w: %s is a %s repository here; the Nexus repository %s is a %s", ErrInvalid, t.Name, t.Kind, r.Name, r.Type)
 			}
@@ -844,19 +1032,13 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 			if name, ok := keptTargets[t.ID]; ok {
 				return nil, fmt.Errorf("%w: %s has switched over; copy the Nexus repository %s into another repository", ErrInvalid, name, r.Name)
 			}
-			if other, err := q.GetNexusSourceByTarget(ctx, t.ID); err == nil && other.ID != id {
+			if other, ok := mirrors[t.ID]; ok && other.ID != id {
 				return nil, fmt.Errorf("%w: target repo %q already mirrors Nexus source %s", ErrInvalid, t.Name, other.Name)
-			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return nil, err
 			}
 			p.target = t
 			p.f = s.formats.Get(t.Format)
-		case errors.Is(err, repos.ErrNotFound):
-			if !m.Create {
-				return nil, fmt.Errorf("%w: target repo %q does not exist", ErrInvalid, m.Target)
-			}
-		default:
-			return nil, err
+		case !m.Create:
+			return nil, fmt.Errorf("%w: target repo %q does not exist", ErrInvalid, m.Target)
 		}
 		if err := p.planTarget(ctx); err != nil {
 			return nil, err
@@ -946,28 +1128,49 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		}
 		var old []dbq.NexusSourceRepo
 		for _, o := range all {
-			if _, ok := kept[o.SourceRepo]; ok {
-				continue
+			if _, ok := kept[o.SourceRepo]; !ok {
+				old = append(old, o)
 			}
-			old = append(old, o)
-			if err := q.DeleteNexusSourceRepo(ctx, dbq.DeleteNexusSourceRepoParams{SourceID: id, SourceRepo: o.SourceRepo}); err != nil {
-				return err
-			}
+		}
+		// The switch-overs are those of kept (checked above), so this deletes the rows of old.
+		if err := q.DeleteUnswitchedNexusSourceRepos(ctx, id); err != nil {
+			return err
 		}
 		keep := map[int64]bool{}
+		planned := make([]int64, 0, len(plans))
 		for _, p := range plans {
-			if other, err := q.GetNexusSourceByTarget(ctx, p.target.ID); err == nil {
-				return fmt.Errorf("%w: target repo %q already mirrors Nexus source %s", ErrInvalid, p.target.Name, other.Name)
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
 			keep[p.target.ID] = true
+			planned = append(planned, p.target.ID)
+		}
+		mirrors, err := s.mirrorsOf(ctx, q, planned)
+		if err != nil {
+			return err
 		}
 		for _, p := range plans {
-			if err := q.InsertNexusSourceRepo(ctx, dbq.InsertNexusSourceRepoParams{SourceID: id,
-				SourceRepo: p.src.Name, SourceFormat: p.src.Format, Kind: p.src.Type, TargetRepoID: p.target.ID}); err != nil {
+			if other, ok := mirrors[p.target.ID]; ok {
+				return fmt.Errorf("%w: target repo %q already mirrors Nexus source %s", ErrInvalid, p.target.Name, other.Name)
+			}
+		}
+		if len(plans) > 0 {
+			type mapping struct {
+				SourceRepo   string `json:"source_repo"`
+				SourceFormat string `json:"source_format"`
+				Kind         string `json:"kind"`
+				TargetRepoID int64  `json:"target_repo_id"`
+			}
+			rows := make([]mapping, len(plans))
+			for i, p := range plans {
+				rows[i] = mapping{p.src.Name, p.src.Format, p.src.Type, p.target.ID}
+			}
+			js, err := json.Marshal(rows)
+			if err != nil {
 				return err
 			}
+			if err := q.InsertNexusSourceRepos(ctx, dbq.InsertNexusSourceReposParams{SourceID: id, Repos: string(js)}); err != nil {
+				return err
+			}
+		}
+		for _, p := range plans {
 			if p.src.Type == TypeHosted {
 				if err := s.hold(ctx, tx, p.target, id, userID); err != nil {
 					return err
@@ -1000,6 +1203,31 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		s.record(ctx, ActionSyncStart, row.Name, map[string]any{"source_id": id, "sync_id": syncID, "trigger": TriggerSave})
 	}
 	return s.Detail(ctx, id)
+}
+
+// sourceRef is a Nexus source by id and name.
+type sourceRef struct {
+	ID   int64
+	Name string
+}
+
+// mirrorsOf returns the source that each repo of ids mirrors (a target mirrors at most one), by
+// repo id, in one query of q; a repo that mirrors none is not in the map.
+func (s *Service) mirrorsOf(ctx context.Context, q *dbq.Queries, ids []int64) (map[int64]sourceRef, error) {
+	out := map[int64]sourceRef{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.ListNexusSourcesByTargets(ctx, idsJSON(ids))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if _, ok := out[r.TargetRepoID]; !ok {
+			out[r.TargetRepoID] = sourceRef{r.ID, r.Name}
+		}
+	}
+	return out, nil
 }
 
 // prepare finds or creates the target of a hosted or proxy plan. Two Nexus repos may share a

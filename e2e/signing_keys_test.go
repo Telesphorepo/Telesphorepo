@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -122,6 +123,17 @@ func TestSigningKeys(t *testing.T) {
 	}
 	if st, b := s.API(t, http.MethodPost, "/api/signing-keys", map[string]any{"name": "junk", "armored": "not a key"}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("import junk: status %d, want 400: %s", st, b)
+	}
+
+	// ?q= keeps the keys whose name holds it in any case; a key ID, as gpg groups it, finds its key
+	// by the fingerprint.
+	id := imported.Fingerprint[len(imported.Fingerprint)-16:]
+	for q, want := range map[string]string{"EA": "team", id[:4] + " " + id[4:8] + " " + id[8:12] + " " + id[12:]: "imported"} {
+		var found []signingKey
+		s.MustAPI(t, http.MethodGet, "/api/signing-keys?q="+url.QueryEscape(q), nil, s.Admin(), &found)
+		if len(found) != 1 || found[0].Name != want {
+			t.Fatalf("GET /api/signing-keys?q=%s: %d keys (%+v), want the key %s only", q, len(found), found, want)
+		}
 	}
 
 	// No private key material leaves the server; public.asc is the public key.

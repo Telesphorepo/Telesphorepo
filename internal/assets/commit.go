@@ -216,6 +216,14 @@ func (p *Pipeline) admit(ctx context.Context, repo *repos.Repo, ws []Write) ([]*
 	hooks := p.Hooks(repo.Format)
 	results := make([]*Result, len(ws))
 	var stored []*Result
+	paths := make([]string, len(ws))
+	for i := range ws {
+		paths[i] = string(ws[i].Path)
+	}
+	have, err := getAll(ctx, q, repo.ID, paths) // the existing rows of every write: one query
+	if err != nil {
+		return nil, nil, err
+	}
 	for i := range ws {
 		w := &ws[i]
 		if w.ContentType == "" || w.Kind == "" {
@@ -233,10 +241,7 @@ func (p *Pipeline) admit(ctx context.Context, repo *repos.Repo, ws []Write) ([]*
 				w.Kind = d.Kind
 			}
 		}
-		existing, err := get(ctx, q, repo.ID, string(w.Path))
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return nil, nil, err
-		}
+		existing := have[string(w.Path)]
 		if err := w.Precondition.check(w.Path, existing); err != nil {
 			return nil, nil, err
 		}

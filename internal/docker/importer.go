@@ -2,7 +2,6 @@ package docker
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
-	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
@@ -214,24 +212,36 @@ func (run *importRun) blobs(cs []child) error {
 		fetch     bool
 		sp        *assets.Spooled
 	}
+	// The links the image has and the blobs other images of the repo link: two queries.
+	var lps, missing []string
+	for _, c := range cs {
+		if c.kind != "manifest" {
+			lps = append(lps, linkPath(run.image, c.hex))
+		}
+	}
+	have, err := run.f.existing(run.ctx, run.repo, lps, run.batch)
+	if err != nil {
+		return err
+	}
+	for _, c := range cs {
+		if c.kind != "manifest" && !have[linkPath(run.image, c.hex)] {
+			missing = append(missing, c.hex)
+		}
+	}
+	linked, err := run.f.repoLinked(run.ctx, run.repo, missing)
+	if err != nil {
+		return err
+	}
 	var links []*link
 	for _, c := range cs {
 		if c.kind == "manifest" {
 			continue
 		}
 		lp := linkPath(run.image, c.hex)
-		if ok, err := run.has(lp); err != nil {
-			return err
-		} else if ok {
+		if have[lp] {
 			continue
 		}
-		l := &link{hex: c.hex, path: lp}
-		if _, err := run.f.q.RepoLinkOf(run.ctx, dbq.RepoLinkOfParams{RepoID: run.repo.ID, Digest: c.hex}); errors.Is(err, sql.ErrNoRows) {
-			l.fetch = true
-		} else if err != nil {
-			return err
-		}
-		links = append(links, l)
+		links = append(links, &link{hex: c.hex, path: lp, fetch: !linked[c.hex]})
 	}
 
 	// The first failed fetch stops the others.
