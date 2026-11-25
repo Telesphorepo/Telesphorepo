@@ -313,16 +313,34 @@ func StartDind(t testing.TB, insecure ...string) *Dind {
 	for _, h := range insecure {
 		args = append(args, "--insecure-registry="+h)
 	}
-	return StartDindArgs(t, args...)
+	return startDind(t, nil, args...)
 }
 
 // StartDindArgs starts a Docker engine with the dockerd flags args and waits until "docker info"
 // answers.
 func StartDindArgs(t testing.TB, args ...string) *Dind {
 	t.Helper()
+	return startDind(t, nil, args...)
+}
+
+// StartDindFile is StartDind with the local file src at dst in the container, copied in before
+// the engine starts: Podman 6.1.4's API panics (pgzip, in joinMountAndExec) on a large copy into
+// a running container, and takes every other request of the run down with it.
+func StartDindFile(t testing.TB, src, dst string, mode int64, insecure ...string) *Dind {
+	t.Helper()
+	var args []string
+	for _, h := range insecure {
+		args = append(args, "--insecure-registry="+h)
+	}
+	return startDind(t, []testcontainers.ContainerFile{{HostFilePath: src, ContainerFilePath: dst, FileMode: mode}}, args...)
+}
+
+func startDind(t testing.TB, files []testcontainers.ContainerFile, args ...string) *Dind {
+	t.Helper()
 	alias := RandName("dind")
 	c, err := testcontainers.Run(context.Background(), dindImage,
 		e2eContainer,
+		testcontainers.WithFiles(files...),
 		testcontainers.WithEnv(map[string]string{"DOCKER_TLS_CERTDIR": ""}),
 		testcontainers.WithCmd(args...),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }),
@@ -358,14 +376,6 @@ func (d *Dind) MustExec(t testing.TB, what, script string) string {
 		t.Fatalf("%s: exit %d:\n%s", what, code, out)
 	}
 	return out
-}
-
-// CopyFile copies the local file src into the Docker engine's container at dst with mode.
-func (d *Dind) CopyFile(t testing.TB, src, dst string, mode int64) {
-	t.Helper()
-	if err := d.c.CopyFileToContainer(context.Background(), src, dst, mode); err != nil {
-		t.Fatalf("copy %s into docker in docker: %v", dst, err)
-	}
 }
 
 // DockerScratchImage returns shell commands that write a build context in the new folder dir:

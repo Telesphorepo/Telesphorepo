@@ -31,8 +31,7 @@ func TestCLIDocker(t *testing.T) {
 		s.SetPerms(t, own, "builder", "repo.download", "repo.publish")
 
 		t.Run("docker", func(t *testing.T) {
-			d := StartDind(t, host)
-			d.CopyFile(t, c.bin, cliPath, 0o755)
+			d := StartDindFile(t, c.bin, cliPath, 0o755, host)
 			out := d.MustExec(t, "setup", fmt.Sprintf("set -e\nln -sf telesphorepo /usr/local/bin/docker-credential-telesphorepo\nmkdir -p /work\ncd /work\ntelesphorepo setup '%s' 2>&1\nls -A /work\n",
 				s.NewSetupCode(t, "builder", own).Link))
 			line := `"credHelpers": {"` + host + `": "telesphorepo"}`
