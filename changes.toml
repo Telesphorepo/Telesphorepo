@@ -28,14 +28,14 @@
 
 [[change]]
 id      = "nuget-resumable-push"
-version = "dev"
+version = "v1.0.0"
 scope   = "publish/nuget"
 needs   = "server"
 summary = "telesphorepo publish sends a .nupkg of 64 MiB or more in chunks, which the NuGet push of the server finishes"
 
 [[change]]
 id      = "conditional-put"
-version = "dev"
+version = "v1.0.0"
 scope   = "publish/raw"
 needs   = "server"
 summary = "telesphorepo publish --if-match and --if-new send a precondition, which the server checks before it stores the file"
