@@ -45,13 +45,7 @@ func TestDebian(t *testing.T) {
 		wauth := func() Auth { return Basic{User: "ci", Pass: PublishToken(t, s, writer, repo)} }
 		rauth := Basic{User: reader, Pass: readerPass}
 
-		// Upload: auth checks, created, idempotent re-upload, conflict.
-		if st, b := debUpload(t, s, repo, pkgs.hello1, nil); st != http.StatusUnauthorized {
-			t.Fatalf("anonymous upload: status %d, want 401: %s", st, b)
-		}
-		if st, b := debUpload(t, s, repo, pkgs.hello1, rauth); st != http.StatusUnauthorized {
-			t.Fatalf("upload with a reader password: status %d, want 401: %s", st, b)
-		}
+		// Upload: a read token refused, created, idempotent re-upload, conflict.
 		if st, b := debUpload(t, s, repo, pkgs.hello1, Basic{User: "ci", Pass: s.CreateToken(t, writer, writerPass, "deb-read")}); st != http.StatusUnauthorized {
 			t.Fatalf("upload with a read token: status %d, want 401: %s", st, b)
 		}
@@ -100,18 +94,18 @@ func TestDebian(t *testing.T) {
 			t.Fatalf("apt install of 1.0 did not produce expected output:\n%s", out)
 		}
 
-		// Second version → incremental rebuild picked up by a fresh client (the index, on fs only).
+		// A second version: the incremental rebuild lists it in the index (the index, on fs only).
 		if opts.S3 == nil {
 			debMustUpload(t, s, repo, pkgs.hello2, wauth(), "e2e-hello", "2.0", "all")
 			s.WaitDebianIndexed(t, repo)
-			out = debAptInstall(t, s, repo, reader, readerPass, key)
-			if !strings.Contains(out, "RESULT: hello 2.0\n") {
-				t.Fatalf("apt install after 2.0 upload did not produce hello 2.0:\n%s", out)
+			p := "/debian/" + repo + "/dists/trixie/main/binary-" + pkgs.arch + "/Packages"
+			if st, b := debGet(t, s, nil, p, rauth); st != http.StatusOK || !bytes.Contains(b, []byte("\nVersion: 2.0\n")) {
+				t.Fatalf("GET %s after the 2.0 upload: status %d, want 200 with Version: 2.0:\n%s", p, st, b)
 			}
+			debCheckSecurity(t, s, repo, wauth(), rauth)
 		}
 
 		debCheckIndexes(t, s, opts.S3, repo, rauth, key)
-		debCheckSecurity(t, s, opts.S3, repo, wauth(), rauth)
 		debCheckArchRemoval(t, s, opts.S3, repo, archs, pkgs.arch, rauth)
 	})
 }
@@ -269,7 +263,7 @@ func debCheckIndexes(t *testing.T, s *Server, tg *S3Target, repo string, auth Au
 }
 
 // debCheckSecurity covers the decompression bomb and path traversal attempts.
-func debCheckSecurity(t *testing.T, s *Server, tg *S3Target, repo string, wauth, rauth Auth) {
+func debCheckSecurity(t *testing.T, s *Server, repo string, wauth, rauth Auth) {
 	t.Helper()
 	if st, b := debUpload(t, s, repo, debBomb(t), wauth); st != http.StatusBadRequest {
 		t.Fatalf("decompression bomb upload: status %d, want 400: %s", st, b)

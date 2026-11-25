@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -13,23 +12,6 @@ import (
 
 // Versions, builds and artifact snippets of a Debian package: a
 // ~SNAPSHOT version groups its timestamped builds, like a Maven snapshot.
-
-// debVersionsScript builds the urn packages with dpkg-deb into /out/<n>.deb, n counting the
-// lines of debVersionsBuilds from 1. The names are plain because Podman cannot copy a path
-// with "~" out of a container.
-const debVersionsScript = `#!/bin/sh
-set -e
-mkdir -p /out
-n=0
-while read -r version arch; do
-	n=$((n+1))
-	d=/build/$version-$arch
-	mkdir -p "$d/DEBIAN" "$d/usr/share/urn"
-	printf 'Package: urn\nVersion: %s\nArchitecture: %s\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: telesphorepo e2e versions package\n' "$version" "$arch" > "$d/DEBIAN/control"
-	printf '%s %s\n' "$version" "$arch" > "$d/usr/share/urn/version"
-	dpkg-deb --root-owner-group -Zgzip --build "$d" "/out/$n.deb"
-done < /builds
-`
 
 // The versions of urn: two snapshot versions, one of them with a build for two architectures,
 // and a release.
@@ -43,25 +25,11 @@ var debVersionsBuilds = [][2]string{
 
 func TestDebianVersions(t *testing.T) {
 	t.Parallel()
-	var list strings.Builder
-	for _, b := range debVersionsBuilds {
-		list.WriteString(b[0] + " " + b[1] + "\n")
-	}
-	r := RunClientResult(t, debImage, ClientOpts{
-		Cmd: []string{"sh", "/build.sh"},
-		Files: []ContainerFile{
-			{Content: debVersionsScript, Path: "/build.sh", Mode: 0o755},
-			{Content: list.String(), Path: "/builds"},
-		},
-	})
-	if r.ExitCode != 0 {
-		t.Fatalf("building the urn packages failed (exit %d):\n%s", r.ExitCode, r.Output)
-	}
 	debs := make([][]byte, len(debVersionsBuilds))
-	for i := range debVersionsBuilds {
-		debs[i] = r.ReadFile(t, fmt.Sprintf("/out/%d.deb", i+1))
+	for i, b := range debVersionsBuilds {
+		debs[i] = goDeb(t, debMember{"./control", []byte("Package: urn\nVersion: " + b[0] + "\nArchitecture: " + b[1] +
+			"\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: telesphorepo e2e versions package\n")})
 	}
-
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("debv")

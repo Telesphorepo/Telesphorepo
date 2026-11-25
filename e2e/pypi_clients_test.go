@@ -37,8 +37,8 @@ func pyIndex(s *Server, repo, user, pass string) string {
 	return u.JoinPath("pypi", repo, "simple").String() + "/"
 }
 
-// pySetuptoolsProject is a project at dir that python -m build, uv build and twine take: module
-// mod with MSG = msg.
+// pySetuptoolsProject is a project at dir that python -m build and twine take: module mod with
+// MSG = msg.
 func pySetuptoolsProject(dir, name, mod, version, msg string) []ContainerFile {
 	return []ContainerFile{
 		{Path: dir + "/pyproject.toml", Content: fmt.Sprintf(`[build-system]

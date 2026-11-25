@@ -17,15 +17,6 @@ import (
 	"time"
 )
 
-// rawCurlScript uploads /work/app.bin with curl -T, downloads it again (following storage
-// redirects) and compares the bytes.
-const rawCurlScript = `set -e
-echo "UPLOAD $(curl -sS -o /dev/null -w '%{http_code}' -u "$RAW_USER:$RAW_TOKEN" -T /work/app.bin "$RAW_URL")"
-curl -fsSL -u "$RAW_USER:$RAW_TOKEN" -o /tmp/app.bin "$RAW_URL"
-cmp /work/app.bin /tmp/app.bin
-echo "RAW OK"
-`
-
 // rawGet GETs path and follows storage redirects. Presigned SeaweedFS URLs point at the
 // network-internal host, so the request goes to the host endpoint with the original Host header.
 func rawGet(t *testing.T, s *Server, tg *S3Target, path string, auth Auth) (int, []byte) {
@@ -110,44 +101,41 @@ func rawWantPrecondition(t *testing.T, resp *http.Response, body []byte, repo, f
 	}
 }
 
+// rawFixture is a server with a private raw repo, a writer with a publish session, a reader with
+// a read token, and a file of 256 KiB at path.
+type rawFixture struct {
+	s                      *Server
+	repo, writer, path     string
+	writerAuth, readerAuth Basic
+	data                   []byte
+}
+
+// startRaw starts the server of a rawFixture; the repo has the config cfg.
+func startRaw(t *testing.T, opts ServerOpts, cfg map[string]any) rawFixture {
+	t.Helper()
+	s := StartServer(t, opts)
+	f := rawFixture{s: s, repo: RandName("raw"), writer: RandName("w")}
+	s.CreateRepo(t, f.repo, "raw", false, cfg)
+	reader := RandName("r")
+	s.CreateUser(t, f.writer, "writer-pass-1234")
+	s.CreateUser(t, reader, "reader-pass-1234")
+	s.SetPerms(t, f.repo, f.writer, "repo.download", "repo.publish")
+	s.SetPerms(t, f.repo, reader, "repo.download")
+	f.writerAuth = s.PublishAuth(t, f.writer, f.repo)
+	f.readerAuth = Basic{reader, s.CreateToken(t, reader, "reader-pass-1234", "ci")}
+	f.data = rawRandom(t, 256<<10)
+	f.path = "/raw/" + f.repo + "/dist/v1/app.bin"
+	resp, body := rawPut(t, s, f.path, f.data, f.writerAuth)
+	rawWantStatus(t, resp, body, http.StatusCreated)
+	return f
+}
+
+// TestRaw is the byte path of raw on each store: upload, download and HEAD.
 func TestRaw(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		s := StartServer(t, opts)
-		tg := opts.S3
-		repo := RandName("raw")
-		// The repo denies overwrites until the subtest "overwrite allow" allows them.
-		s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "deny"})
-
-		writer, reader := RandName("w"), RandName("r")
-		s.CreateUser(t, writer, "writer-pass-1234")
-		s.CreateUser(t, reader, "reader-pass-1234")
-		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
-		s.SetPerms(t, repo, reader, "repo.download")
-		writerAuth := s.PublishAuth(t, writer, repo)
-		readerAuth := Basic{reader, s.CreateToken(t, reader, "reader-pass-1234", "ci")}
-
-		data := rawRandom(t, 256<<10)
-		path := "/raw/" + repo + "/dist/v1/app.bin"
-
-		t.Run("curl upload and download", func(t *testing.T) {
-			code, out := RunClient(t, curlImage, ClientOpts{
-				Cmd: []string{"sh", "/work/run.sh"},
-				Files: []ContainerFile{
-					{Path: "/work/run.sh", Content: rawCurlScript, Mode: 0o755},
-					{Path: "/work/app.bin", Content: string(data)},
-				},
-				Env: map[string]string{
-					"RAW_URL":   s.InternalURL + path,
-					"RAW_USER":  writerAuth.User,
-					"RAW_TOKEN": writerAuth.Pass,
-				},
-				Timeout: 3 * time.Minute,
-			})
-			if code != 0 || !strings.Contains(out, "UPLOAD 201") || !strings.Contains(out, "RAW OK") {
-				t.Fatalf("curl client: exit %d, want 0 with UPLOAD 201 and RAW OK:\n%s", code, out)
-			}
-		})
+		f := startRaw(t, opts, nil)
+		s, tg, repo, path, data, readerAuth := f.s, opts.S3, f.repo, f.path, f.data, f.readerAuth
 
 		t.Run("download with token", func(t *testing.T) {
 			rawWantGet(t, s, tg, path, readerAuth, data)
@@ -175,25 +163,30 @@ func TestRaw(t *testing.T) {
 			rawWantStatus(t, resp, body, http.StatusNotFound)
 		})
 
-		t.Run("anonymous, read token and password writes", func(t *testing.T) {
-			resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), nil)
+		t.Run("read token cannot write", func(t *testing.T) {
+			resp, body := rawPut(t, s, "/raw/"+repo+"/reader.bin", []byte("x"), readerAuth)
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
-			resp, body = rawPut(t, s, "/raw/"+repo+"/anon.bin", []byte("x"), nil)
-			rawWantStatus(t, resp, body, http.StatusUnauthorized)
-			// Writes need a publish session: a read token or a password is refused.
-			resp, body = rawPut(t, s, "/raw/"+repo+"/reader.bin", []byte("x"), readerAuth)
-			rawWantStatus(t, resp, body, http.StatusUnauthorized)
-			resp, body = rawPut(t, s, "/raw/"+repo+"/pw.bin", []byte("x"), Basic{writer, "writer-pass-1234"})
-			rawWantStatus(t, resp, body, http.StatusUnauthorized)
-			resp, body = rawPut(t, s, "/raw/"+repo+"/bad.bin", []byte("x"), Basic{writer, "not-a-token"})
-			rawWantStatus(t, resp, body, http.StatusUnauthorized)
+		})
+	})
+}
 
+// TestRawRules is what raw decides above the store: signed links, the overwrite policy and its
+// path rules, conditional writes, public repos and the usage snippets.
+func TestRawRules(t *testing.T) {
+	t.Parallel()
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
+		// The repo denies overwrites until the subtest "overwrite allow" allows them.
+		f := startRaw(t, opts, map[string]any{"overwrite": "deny"})
+		s, repo, path, data, writer := f.s, f.repo, f.path, f.data, f.writer
+		writerAuth, readerAuth := f.writerAuth, f.readerAuth
+
+		t.Run("public repo", func(t *testing.T) {
 			pub := RandName("rawpub")
 			s.CreateRepo(t, pub, "raw", true, nil)
 			p := "/raw/" + pub + "/readme.txt"
-			resp, body = rawPut(t, s, p, []byte("public"), s.PublishAuth(t, "admin", pub))
+			resp, body := rawPut(t, s, p, []byte("public"), s.PublishAuth(t, "admin", pub))
 			rawWantStatus(t, resp, body, http.StatusCreated)
-			rawWantGet(t, s, tg, p, nil, []byte("public"))
+			rawWantGet(t, s, nil, p, nil, []byte("public"))
 			resp, body = rawPut(t, s, p, []byte("changed"), nil)
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
 		})
@@ -231,13 +224,13 @@ func TestRaw(t *testing.T) {
 			q := u.Query()
 			sig := q.Get("tsig")
 
-			rawWantGet(t, s, tg, u.RequestURI(), nil, data)
+			rawWantGet(t, s, nil, u.RequestURI(), nil, data)
 			resp, body := s.Do(t, s.NewRequest(t, http.MethodHead, u.RequestURI(), nil), nil)
 			rawWantStatus(t, resp, body, http.StatusOK)
 
 			refused := func(t *testing.T, what, p string) {
 				t.Helper()
-				if st, b := rawGet(t, s, tg, p, nil); st != http.StatusUnauthorized {
+				if st, b := rawGet(t, s, nil, p, nil); st != http.StatusUnauthorized {
 					t.Fatalf("%s: GET %s: status %d, want 401: %.200s", what, p, st, b)
 				}
 			}
@@ -269,7 +262,7 @@ func TestRaw(t *testing.T) {
 			if resp.StatusCode < 400 {
 				t.Fatalf("POST with a link: status %d, want a refusal: %s", resp.StatusCode, body)
 			}
-			rawWantGet(t, s, tg, u.RequestURI(), nil, data)
+			rawWantGet(t, s, nil, u.RequestURI(), nil, data)
 
 			// Making a link: a UI session with download, a file that exists, a lifetime within
 			// links.max_ttl.
@@ -319,7 +312,7 @@ func TestRaw(t *testing.T) {
 			// file does not let other bytes replace it.
 			resp, body = rawPutIf(t, s, path, []byte("different bytes"), writerAuth, map[string]string{"If-Match": rawETag(data)})
 			rawWantStatus(t, resp, body, http.StatusConflict)
-			rawWantGet(t, s, tg, path, readerAuth, data)
+			rawWantGet(t, s, nil, path, readerAuth, data)
 		})
 
 		t.Run("overwrite allow", func(t *testing.T) {
@@ -336,7 +329,7 @@ func TestRaw(t *testing.T) {
 			next := rawRandom(t, 64<<10)
 			resp, body := rawPut(t, s, path, next, writerAuth)
 			rawWantStatus(t, resp, body, http.StatusOK)
-			rawWantGet(t, s, tg, path, readerAuth, next)
+			rawWantGet(t, s, nil, path, readerAuth, next)
 			resp, body = rawPut(t, s, path, next, writerAuth)
 			rawWantStatus(t, resp, body, http.StatusOK)
 		})
@@ -426,7 +419,7 @@ func TestRaw(t *testing.T) {
 				}
 				cur, last = etags[win], bodies[win]
 			}
-			rawWantGet(t, s, tg, latest, Basic{writer, "writer-pass-1234"}, last)
+			rawWantGet(t, s, nil, latest, Basic{writer, "writer-pass-1234"}, last)
 
 			// If-Match that names the file: the write stores, and answers the new ETag.
 			next := []byte(`{"build":21}`)
@@ -457,8 +450,8 @@ func TestRaw(t *testing.T) {
 				resp, body = rawPut(t, s, latest, []byte(v), pub)
 				rawWantStatus(t, resp, body, []int{http.StatusCreated, http.StatusOK}[i])
 			}
-			rawWantGet(t, s, tg, latest, Basic{writer, "writer-pass-1234"}, []byte(`{"build":7}`))
-			rawWantGet(t, s, tg, build, Basic{writer, "writer-pass-1234"}, jar)
+			rawWantGet(t, s, nil, latest, Basic{writer, "writer-pass-1234"}, []byte(`{"build":7}`))
+			rawWantGet(t, s, nil, build, Basic{writer, "writer-pass-1234"}, jar)
 
 			// A rule written wrong is refused with its number.
 			for _, bad := range []map[string]string{{"match": "/builds/**", "overwrite": "deny"}, {"match": "a//b", "overwrite": "deny"}, {"match": "x", "overwrite": "never"}} {

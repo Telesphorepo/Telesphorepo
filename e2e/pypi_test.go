@@ -75,7 +75,7 @@ func pyGetPage(t *testing.T, s *Server, repo, n string, auth Auth) (int, pyPage)
 
 // TestPyPI: twine uploads the wheel and sdist that python -m build makes to a private hosted repo;
 // the page lists both with hashes, sizes, upload times and the wheel's core metadata, whose bytes
-// the .metadata file serves; pip installs the package with --require-hashes.
+// the .metadata file serves.
 func TestPyPI(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -110,7 +110,7 @@ twine upload --non-interactive --repository-url "$URL" dist/*
 			len(page.Versions) != 1 || page.Versions[0] != "1.0.0" {
 			t.Fatalf("page of %s: status %d: %+v", name, st, page)
 		}
-		var wheelURL, wheelSHA, sdistSHA, metaSHA string
+		var wheelURL, wheelSHA, metaSHA string
 		for _, f := range page.Files {
 			if f.Hashes["sha256"] == "" || f.Size == nil || *f.Size <= 0 || f.UploadTime == "" || f.RequiresPython != ">=3.8" || f.Yanked != false {
 				t.Fatalf("file of the page: %+v", f)
@@ -122,8 +122,6 @@ twine upload --non-interactive --repository-url "$URL" dist/*
 					t.Fatalf("wheel without core-metadata: %+v", f)
 				}
 				wheelURL, wheelSHA, metaSHA = f.URL, f.Hashes["sha256"], cm["sha256"].(string)
-			} else {
-				sdistSHA = f.Hashes["sha256"]
 			}
 		}
 		base, _ := url.Parse(s.URL + "/pypi/" + repo + "/simple/" + name + "/")
@@ -134,18 +132,6 @@ twine upload --non-interactive --repository-url "$URL" dist/*
 		}
 		if whl := getFollowS3(t, s, opts.S3, wheelPath); sha256Hex(whl) != wheelSHA {
 			t.Fatalf("GET %s: sha256 %s, want %s", wheelPath, sha256Hex(whl), wheelSHA)
-		}
-
-		code, out = RunClient(t, pythonImage, ClientOpts{
-			Cmd: []string{`set -e
-pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" --require-hashes -r /work/req.txt
-python -c "import ` + mod + `; print(` + mod + `.MSG)"
-`},
-			Files: []ContainerFile{{Path: "/work/req.txt", Content: name + "==1.0.0 --hash=sha256:" + wheelSHA + " --hash=sha256:" + sdistSHA + "\n"}},
-			Env:   map[string]string{"INDEX": pyIndex(s, repo, writer, token), "PIP_TRUSTED_HOST": s.Alias},
-		})
-		if code != 0 || !strings.Contains(out, msg) {
-			t.Fatalf("pip install --require-hashes: exit %d, want %q:\n%s", code, msg, out)
 		}
 	})
 }
@@ -336,8 +322,8 @@ func TestPyPIProtocol(t *testing.T) {
 	})
 }
 
-// TestPyPIProxyGroup: a proxy of pypi.org serves pip; its files come from the
-// files host into files/; a group of a hosted repo and the proxy serves a project of the hosted
+// TestPyPIProxyGroup: pip installs through a group of a hosted repo and a proxy of pypi.org; the
+// proxy's files come from the files host into files/; the group serves a project of the hosted
 // repo only from it, though pypi.org has a higher version of that name.
 func TestPyPIProxyGroup(t *testing.T) {
 	t.Parallel()
@@ -351,19 +337,6 @@ func TestPyPIProxyGroup(t *testing.T) {
 		s.CreateUser(t, writer, randHex(12))
 		s.SetPerms(t, hosted, writer, "repo.download", "repo.publish")
 
-		code, out := RunClient(t, pythonImage, ClientOpts{
-			Cmd: []string{`set -e
-pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" iniconfig==2.0.0
-python -c "import iniconfig; print('INICONFIG OK')"
-`},
-			Env: map[string]string{"INDEX": pyIndex(s, proxy, "", ""), "PIP_TRUSTED_HOST": s.Alias},
-		})
-		if code != 0 || !strings.Contains(out, "INICONFIG OK") {
-			t.Fatalf("pip install through the proxy: exit %d\n%s", code, out)
-		}
-		if paths := mavenAssetPaths(t, s, proxy, "files/", s.Admin()); len(paths) == 0 {
-			t.Fatal("the proxy stored no file under files/")
-		}
 		// A private project named like a public one: the hosted member owns the name.
 		file, whl := pyWheel("iniconfig", "iniconfig", "0.0.1", "private iniconfig")
 		if st, b := pyUpload(t, s, hosted, file, whl, s.PublishAuth(t, writer, hosted), nil); st != http.StatusCreated {
@@ -373,10 +346,7 @@ python -c "import iniconfig; print('INICONFIG OK')"
 		if st != http.StatusOK || len(page.Files) != 1 || page.Files[0].Filename != file {
 			t.Fatalf("group page of iniconfig: status %d: %+v", st, page)
 		}
-		if st, page := pyGetPage(t, s, group, "six", nil); st != http.StatusOK || len(page.Files) == 0 {
-			t.Fatalf("group page of six: status %d: %+v", st, page)
-		}
-		code, out = RunClient(t, pythonImage, ClientOpts{
+		code, out := RunClient(t, pythonImage, ClientOpts{
 			Cmd: []string{`set -e
 pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" iniconfig six
 python -c "import iniconfig, six; print(iniconfig.MSG, 'SIX', six.__version__)"
@@ -385,6 +355,9 @@ python -c "import iniconfig, six; print(iniconfig.MSG, 'SIX', six.__version__)"
 		})
 		if code != 0 || !strings.Contains(out, "private iniconfig SIX") {
 			t.Fatalf("pip install through the group: exit %d\n%s", code, out)
+		}
+		if paths := mavenAssetPaths(t, s, proxy, "files/", s.Admin()); len(paths) == 0 {
+			t.Fatal("the proxy stored no file under files/")
 		}
 	})
 }

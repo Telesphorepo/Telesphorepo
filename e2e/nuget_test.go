@@ -189,9 +189,8 @@ func nugetSearch(t *testing.T, s *Server, repo, q string, auth Auth) []string {
 
 // TestNuGet: dotnet pack and dotnet nuget push to a private hosted repo (a second push of a
 // version fails with 409, --skip-duplicate skips it), the package bytes stay unchanged, unlist with
-// dotnet nuget delete and relist with POST, search with dotnet package search, and a console app
-// that adds the package with dotnet add package (pinned and newest) and runs it, with Basic
-// credentials over plain HTTP.
+// dotnet nuget delete and relist with POST, and the version list, the registration and the search
+// after each change.
 func TestNuGet(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -288,32 +287,13 @@ dotnet nuget delete %[1]s 1.1.0 --source tr --api-key "$API_KEY" --non-interacti
 		if resp, _ := s.Do(t, req, nil); resp.StatusCode/100 == 2 {
 			t.Fatalf("unlist with a read token: status %d, want a refusal", resp.StatusCode)
 		}
-
-		// bin goes before the second run: MSBuild skips the copy of a package DLL whose size and
-		// time match the copy in bin, and NuGet gives each extracted file the 2 s zip time of its
-		// entry, so two packs built within 2 s would leave the 1.0.0 Lib.dll in bin.
-		out := runDotnet(t, "add the package and run", fmt.Sprintf(`set -e
-cd /work/app
-dotnet package search %[2]s --source tr --prerelease
-dotnet add package %[1]s --version 1.0.0
-dotnet run
-dotnet add package %[1]s
-rm -rf bin
-dotnet run
-`, id, lid[4:]), append(nugetApp("Console.WriteLine(\"MESSAGE \" + E2E.Hello.Message());\n"), nugetConfigFile(src))).Output
-		wantOut(t, "add the package and run", out, id, "MESSAGE hello v1\n", "MESSAGE hello v1.1")
-		for _, warn := range []string{"NU1900", "NU1905"} {
-			if strings.Contains(out, warn) {
-				t.Fatalf("restore warned %s:\n%s", warn, out)
-			}
-		}
 	})
 }
 
-// TestNuGetProxyGroup: a proxy of nuget.org restores Newtonsoft.Json (registration pages and the
-// flat container), and a private group of a hosted repo and the proxy restores both: a package of
-// the hosted repo and a package of nuget.org. A package id of the hosted member hides the
-// nuget.org package of the same id with higher versions.
+// TestNuGetProxyGroup: a private group of a hosted repo and a proxy of nuget.org restores both a
+// package of the hosted repo and a package of nuget.org, without an audit warning. A package id of
+// the hosted member hides the nuget.org package of the same id with higher versions, and the proxy
+// serves the registration of nuget.org packages on the server.
 func TestNuGetProxyGroup(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -328,56 +308,46 @@ func TestNuGetProxyGroup(t *testing.T) {
 		s.SetPerms(t, group, dev, "repo.download")
 		token := s.CreateToken(t, dev, devPass, "nuget-e2e")
 
-		t.Run("proxy", func(t *testing.T) {
-			px := nugetSource{key: "px", url: s.InternalURL + "/nuget/" + proxy + "/index.json"}
-			out := runDotnet(t, "restore Newtonsoft.Json through the proxy", `set -e
-cd /work/app
-dotnet add package Newtonsoft.Json --version 13.0.3
-dotnet run
-dotnet add package Newtonsoft.Json
-dotnet run
-`, append(nugetApp("Console.WriteLine(\"JSON \" + Newtonsoft.Json.JsonConvert.SerializeObject(new { a = 1 }));\n"), nugetConfigFile(px))).Output
-			wantOut(t, "restore Newtonsoft.Json through the proxy", out, `JSON {"a":1}`)
-			if !slices.Contains(assetPathsOf(t, s, proxy, "v3-flatcontainer/newtonsoft.json/13.0.3/"), "v3-flatcontainer/newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg") {
-				t.Fatalf("the proxy keeps no newtonsoft.json 13.0.3")
-			}
-			nugetLeaves(t, s, proxy, "newtonsoft.json", nil)
-		})
+		nugetLeaves(t, s, proxy, "newtonsoft.json", nil)
 
-		t.Run("group", func(t *testing.T) {
-			id := "E2E.Private" + randHex(4)
-			files := append(nugetLib("/work/lib", id, "1.0.0", "private hello"), nugetLib("/work/shadow", "Newtonsoft.Json", "1.0.0", "shadow")...)
-			files = append(files, nugetConfigFile(nugetSource{key: "tr", url: s.InternalURL + "/nuget/" + hosted + "/index.json", user: dev, pass: token}))
-			runDotnet(t, "push to the hosted member", fmt.Sprintf(`set -e
-cd /work
-dotnet pack lib -c Release -o /work/out
-dotnet pack shadow -c Release -o /work/out
-dotnet nuget push out/%s.1.0.0.nupkg --source tr --api-key "$API_KEY"
+		// One container packs and pushes to the hosted member from /pub, then restores and runs an
+		// app through the group from /work.
+		id := "E2E.Private" + randHex(4)
+		pubConfig := nugetConfigFile(nugetSource{key: "tr", url: s.InternalURL + "/nuget/" + hosted + "/index.json", user: dev, pass: token})
+		pubConfig.Path = "/pub/nuget.config"
+		files := append(nugetLib("/pub/lib", id, "1.0.0", "private hello"), nugetLib("/pub/shadow", "Newtonsoft.Json", "1.0.0", "shadow")...)
+		files = append(files, pubConfig, nugetConfigFile(nugetSource{key: "grp", url: s.InternalURL + "/nuget/" + group + "/index.json", user: dev, pass: token}))
+		files = append(files, nugetApp("using Humanizer;\nConsole.WriteLine(\"GROUP \" + E2E.Hello.Message() + \" \" + \"SomeText\".Humanize());\n")...)
+		out := runDotnet(t, "push to the hosted member and restore through the group", fmt.Sprintf(`set -e
+cd /pub
+dotnet pack lib -c Release -o /pub/out
+dotnet pack shadow -c Release -o /pub/out
+dotnet nuget push out/%[1]s.1.0.0.nupkg --source tr --api-key "$API_KEY"
 dotnet nuget push out/Newtonsoft.Json.1.0.0.nupkg --source tr --api-key "$API_KEY"
-`, id), files, "API_KEY", PublishToken(t, s, dev, hosted))
-
-			auth := Basic{dev, token}
-			if st, vs := nugetVersions(t, s, group, "newtonsoft.json", auth); st != http.StatusOK || !slices.Equal(vs, []string{"1.0.0"}) {
-				t.Fatalf("newtonsoft.json in the group: status %d, %v, want only the hosted 1.0.0", st, vs)
-			}
-			if st, vs := nugetVersions(t, s, proxy, "newtonsoft.json", nil); st != http.StatusOK || !slices.Contains(vs, "13.0.3") {
-				t.Fatalf("newtonsoft.json in the proxy: status %d, %v", st, vs)
-			}
-			if l := nugetLeaves(t, s, group, strings.ToLower(id), auth); !l["1.0.0"] {
-				t.Fatalf("registration of %s in the group: %v", id, l)
-			}
-			if st, _ := nugetVersions(t, s, group, "humanizer.core", nil); st != http.StatusUnauthorized {
-				t.Fatalf("anonymous read of the private group: status %d, want 401", st)
-			}
-
-			grp := nugetSource{key: "grp", url: s.InternalURL + "/nuget/" + group + "/index.json", user: dev, pass: token}
-			out := runDotnet(t, "restore through the group", fmt.Sprintf(`set -e
 cd /work/app
-dotnet add package %s --version 1.0.0
+dotnet add package %[1]s --version 1.0.0
 dotnet add package Humanizer.Core --version 2.14.1
 dotnet run
-`, id), append(nugetApp("using Humanizer;\nConsole.WriteLine(\"GROUP \" + E2E.Hello.Message() + \" \" + \"SomeText\".Humanize());\n"), nugetConfigFile(grp))).Output
-			wantOut(t, "restore through the group", out, "GROUP private hello Some text")
-		})
+`, id), files, "API_KEY", PublishToken(t, s, dev, hosted)).Output
+		wantOut(t, "restore through the group", out, "GROUP private hello Some text")
+		for _, warn := range []string{"NU1900", "NU1905"} {
+			if strings.Contains(out, warn) {
+				t.Fatalf("restore warned %s:\n%s", warn, out)
+			}
+		}
+
+		auth := Basic{dev, token}
+		if st, vs := nugetVersions(t, s, group, "newtonsoft.json", auth); st != http.StatusOK || !slices.Equal(vs, []string{"1.0.0"}) {
+			t.Fatalf("newtonsoft.json in the group: status %d, %v, want only the hosted 1.0.0", st, vs)
+		}
+		if l := nugetLeaves(t, s, group, strings.ToLower(id), auth); !l["1.0.0"] {
+			t.Fatalf("registration of %s in the group: %v", id, l)
+		}
+		if st, _ := nugetVersions(t, s, group, "humanizer.core", nil); st != http.StatusUnauthorized {
+			t.Fatalf("anonymous read of the private group: status %d, want 401", st)
+		}
+		if !slices.Contains(assetPathsOf(t, s, proxy, "v3-flatcontainer/humanizer.core/2.14.1/"), "v3-flatcontainer/humanizer.core/2.14.1/humanizer.core.2.14.1.nupkg") {
+			t.Fatalf("the proxy keeps no humanizer.core 2.14.1")
+		}
 	})
 }

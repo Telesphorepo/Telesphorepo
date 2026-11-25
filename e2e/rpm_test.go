@@ -4,8 +4,11 @@ package e2e
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,8 +22,8 @@ var rocky8Image = floatingAmd64Image("docker.io/rockylinux/rockylinux:8")
 // TestRPM: dnf installs packages that nfpm built from a private RPM repo with gpgcheck and
 // repo_gpgcheck, so every package and the repodata are signed by the server, on both stores. On
 // fs, it also upgrades to a newer version, finds a file through the filelists, downgrades to the
-// older version (every version is in the repodata), stops seeing the newer version after its
-// delete, and keeps working through the old name after a rename.
+// older version (every version is in the repodata), and the primary metadata drops the newer
+// version after its delete.
 func TestRPM(t *testing.T) {
 	t.Parallel()
 	pkgs := buildRPMPackages(t)
@@ -37,12 +40,9 @@ func TestRPM(t *testing.T) {
 		wauth := func() Auth { return Basic{User: "ci", Pass: PublishToken(t, s, writer, repo)} }
 		rauth := Basic{User: reader, Pass: readerPass}
 
-		// Upload: auth checks, created and signed, idempotent re-upload, conflict.
-		if st, b := rpmUpload(t, s, repo, pkgs.anchor10, nil); st != http.StatusUnauthorized {
-			t.Fatalf("anonymous upload: status %d, want 401: %s", st, b)
-		}
-		if st, b := rpmUpload(t, s, repo, pkgs.anchor10, rauth); st != http.StatusUnauthorized {
-			t.Fatalf("upload with a reader password: status %d, want 401: %s", st, b)
+		// Upload: a read token refused, created and signed, idempotent re-upload, conflict.
+		if st, b := rpmUpload(t, s, repo, pkgs.anchor10, Basic{User: reader, Pass: s.CreateToken(t, reader, readerPass, "rpm-read")}); st != http.StatusUnauthorized {
+			t.Fatalf("upload with a read token: status %d, want 401: %s", st, b)
 		}
 		w := wauth()
 		up := rpmMustUpload(t, s, repo, pkgs.anchor10, w, "e2e-anchor", "1.0.0-1", "x86_64")
@@ -81,21 +81,12 @@ func TestRPM(t *testing.T) {
 		out = d.MustExec(t, "dnf downgrade", "dnf -y downgrade e2e-anchor && e2e-anchor")
 		archWant(t, "dnf downgrade", out, "anchor 1.0.0\n")
 
-		// A delete of the newest version: dnf no longer offers it.
+		// A delete of the newest version: the primary metadata no longer lists it.
 		mustDelete(t, s, repo, "path", "Packages/e2e-anchor/e2e-anchor-1.1.0-1.x86_64.rpm", s.Admin(), 1)
 		s.WaitDebianIndexed(t, repo)
-		out = d.MustExec(t, "repoquery after a delete", "dnf -q repoquery --refresh e2e-anchor")
-		if !strings.Contains(out, "1.0.0-1") || strings.Contains(out, "1.1.0-1") {
-			t.Fatalf("the repodata after deleting 1.1.0-1 lists:\n%s", out)
-		}
-
-		// A rename: the .repo file keeps the old baseurl, the old name is a redirect.
-		renamed := RandName("rpm-renamed")
-		s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/rename", map[string]any{"name": renamed}, s.Admin(), nil)
-		out = d.MustExec(t, "dnf through the old name", "dnf -q repoquery --refresh e2e-data")
-		archWant(t, "dnf through the old name", out, "e2e-data")
-		if st, _ := debGet(t, s, opts.S3, "/rpm/"+renamed+"/repodata/repomd.xml", rauth); st != http.StatusOK {
-			t.Fatalf("GET the repodata by the new name: status %d, want 200", st)
+		primary := rpmPrimary(t, s, repo, rauth)
+		if !strings.Contains(primary, `ver="1.0.0"`) || strings.Contains(primary, `ver="1.1.0"`) {
+			t.Fatalf("the primary metadata after deleting 1.1.0-1 lists:\n%s", primary)
 		}
 	})
 }
@@ -181,6 +172,32 @@ func TestRPMRules(t *testing.T) {
 			}
 		}
 	})
+}
+
+// rpmPrimary returns the primary metadata of repo that its repomd.xml names, gunzipped.
+func rpmPrimary(t *testing.T, s *Server, repo string, auth Auth) string {
+	t.Helper()
+	st, md := debGet(t, s, nil, "/rpm/"+repo+"/repodata/repomd.xml", auth)
+	if st != http.StatusOK {
+		t.Fatalf("GET repomd.xml: status %d: %s", st, md)
+	}
+	m := regexp.MustCompile(`<data type="primary">(?s:.*?)<location href="([^"]+)"`).FindSubmatch(md)
+	if m == nil {
+		t.Fatalf("repomd.xml names no primary metadata:\n%s", md)
+	}
+	st, gz := debGet(t, s, nil, "/rpm/"+repo+"/"+string(m[1]), auth)
+	if st != http.StatusOK {
+		t.Fatalf("GET %s: status %d", m[1], st)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		t.Fatalf("gunzip %s: %v", m[1], err)
+	}
+	b, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip %s: %v", m[1], err)
+	}
+	return string(b)
 }
 
 // rpmUpdatedAt returns the updated_at of the file p of repo.

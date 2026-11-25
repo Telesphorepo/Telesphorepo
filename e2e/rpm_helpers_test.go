@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,19 +65,32 @@ type rpmPackages struct {
 	anchor10, anchor11, anchor10Conflict, data []byte
 }
 
-// buildRPMPackages builds the test packages with nfpm.
+// rpmBuild holds the test packages that the first caller of buildRPMPackages builds for the
+// tests of the run.
+var rpmBuild struct {
+	once sync.Once
+	pkgs *rpmPackages
+}
+
+// buildRPMPackages builds the test packages with nfpm, once per run of the tests.
 func buildRPMPackages(t *testing.T) *rpmPackages {
 	t.Helper()
-	r := RunClientResult(t, nfpmImage, ClientOpts{Cmd: []string{nfpmRPMScript}})
-	if r.ExitCode != 0 {
-		t.Fatalf("building RPM packages with nfpm failed (exit %d):\n%s", r.ExitCode, r.Output)
+	rpmBuild.once.Do(func() {
+		r := RunClientResult(t, nfpmImage, ClientOpts{Cmd: []string{nfpmRPMScript}})
+		if r.ExitCode != 0 {
+			t.Fatalf("building RPM packages with nfpm failed (exit %d):\n%s", r.ExitCode, r.Output)
+		}
+		rpmBuild.pkgs = &rpmPackages{
+			anchor10:         r.ReadFile(t, "/out/anchor10"),
+			anchor11:         r.ReadFile(t, "/out/anchor11"),
+			anchor10Conflict: r.ReadFile(t, "/out/anchor10c"),
+			data:             r.ReadFile(t, "/out/data"),
+		}
+	})
+	if rpmBuild.pkgs == nil {
+		t.Fatal("building the RPM packages with nfpm failed in another test")
 	}
-	return &rpmPackages{
-		anchor10:         r.ReadFile(t, "/out/anchor10"),
-		anchor11:         r.ReadFile(t, "/out/anchor11"),
-		anchor10Conflict: r.ReadFile(t, "/out/anchor10c"),
-		data:             r.ReadFile(t, "/out/data"),
-	}
+	return rpmBuild.pkgs
 }
 
 // goRPM is a package written here for the server's checks (dnf does not install it): the lead,
