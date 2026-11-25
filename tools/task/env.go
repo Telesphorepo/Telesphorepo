@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/changelog"
 )
 
 const (
@@ -225,13 +227,23 @@ func depsStale() bool {
 	return false
 }
 
-// gitVersion is "git describe --tags --always --dirty", or "dev" without git/history.
+// gitVersion is the release tag when HEAD is a release tag and the work tree is clean, and "dev"
+// for any other build. A release version is only ever a release: "git describe" past a tag
+// ("v1.0.0-3-gabc1234") reads as a pre-release of that tag, older than it, and the CLI and the
+// server would compare it as one.
 func gitVersion(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, "git", "describe", "--tags", "--always", "--dirty").Output()
-	if v := strings.TrimSpace(string(out)); err == nil && v != "" {
-		return v
+	out, err := exec.CommandContext(ctx, "git", "describe", "--tags", "--exact-match", "HEAD").Output()
+	tag := strings.TrimSpace(string(out))
+	if err != nil || tag == "" {
+		return "dev"
 	}
-	return "dev"
+	if _, err := changelog.ParseVersion(tag); err != nil {
+		return "dev"
+	}
+	if st, err := exec.CommandContext(ctx, "git", "status", "--porcelain", "--untracked-files=no").Output(); err != nil || len(strings.TrimSpace(string(st))) > 0 {
+		return "dev"
+	}
+	return tag
 }
 
 func exe(p string) string {

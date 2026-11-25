@@ -49,15 +49,15 @@ const usage = `Usage: go tool task <command>
   test scale       run the scale zone alone on a quiet machine: 100k and 1M seeded assets, each request
                    at most twice as slow at 1M (verdict PASS, FAIL, NOISY: exit 3, INCONCLUSIVE: exit 4)
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
-                   (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
+                   (the version defaults to the release tag at HEAD, else dev; skipped while cmd/telesphorepo does not exist).
                    A given release version needs a changes.toml with no "dev" entry
-  edge [version]   bundle the edge Worker of the version (default git describe) into the folder that
+  edge [version]   bundle the edge Worker of the version (default: the release tag at HEAD, else dev) into the folder that
                    the server hands out at /api/edge/worker.zip (internal/edgedist/dist); needs bun
   tag <version>    make a release: write the version into each "dev" entry of changes.toml, commit
                    it, and create the tag v<version> (e.g. go tool task tag 1.2.3); push it yourself
   release [version]  build the UI once, then bin/release/<program>_<version>_<os>_<arch> archives
                    (.tar.gz, .zip on Windows) for linux, darwin and windows on amd64 and arm64,
-                   plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3).
+                   plus SHA256SUMS; the version defaults to the release tag at HEAD, else dev (e.g. go tool task release 1.2.3).
                    A given version needs a changes.toml with no "dev" entry
   gen              regenerate the sqlc query code for every internal/**/sqlc.yaml
   migration <folder> <name>  create the next migration internal/<folder>/migrations/NNNN_<name>.sql
