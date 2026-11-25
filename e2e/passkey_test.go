@@ -89,7 +89,7 @@ func (k *securityKey) signInOK(t *testing.T, s *Server, user string) *Session {
 	return sess
 }
 
-// A passkey signs in after a sign-out, also with a counter that did not go up (a security key
+// A passkey signs in again and again, also with a counter that did not go up (a security key
 // keeps one counter per protocol, and a phone may use the other one), and with an extension output
 // the server did not request (Safari on iOS adds "appid" to a security key's answer).
 func TestPasskeySignIn(t *testing.T) {

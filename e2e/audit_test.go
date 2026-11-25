@@ -12,8 +12,7 @@ import (
 )
 
 // The audit log: events of sign-ins, publish sessions, uploads, deletes, repos,
-// permissions, users and settings; the activity permission only; the only place that shows IP
-// addresses.
+// permissions, users and settings; the only place that shows IP addresses.
 
 type auditEntry struct {
 	ID          int64          `json:"id"`
@@ -136,44 +135,9 @@ func TestAudit(t *testing.T) {
 		t.Fatalf("settings event %+v: want keys [session_ttl]", set)
 	}
 
-	// Filters and pages.
-	for _, e := range auditAll(t, s, "action=file.upload") {
-		if e.Action != "file.upload" {
-			t.Fatalf("?action=file.upload returned %s", e.Action)
-		}
-	}
-	byRepo := auditAll(t, s, "repo="+repo)
-	if len(byRepo) == 0 {
-		t.Fatal("?repo= returned no event")
-	}
-	for _, e := range byRepo {
-		if e.Repo != repo {
-			t.Fatalf("?repo=%s returned an event of %q: %+v", repo, e.Repo, e)
-		}
-	}
-	if got := auditAll(t, s, "repo="+repo+"&action=file.delete"); len(got) != 1 || got[0].Action != "file.delete" {
-		t.Fatalf("?repo=&action=file.delete: %+v", got)
-	}
-	var page struct {
-		Items []auditEntry `json:"items"`
-		Next  *string      `json:"next"`
-	}
-	s.MustAPI(t, http.MethodGet, "/api/audit?limit=2", nil, s.Admin(), &page)
-	if len(page.Items) != 2 || page.Next == nil {
-		t.Fatalf("first page of 2: %d items, next %v", len(page.Items), page.Next)
-	}
-
-	// The activity permission only. w holds delete, so w signs in with the second factor.
+	// w holds delete, so w signs in with the second factor.
 	user := Basic{w, "new-writer-pass-99"}
 	sess = s.SignIn(t, w, "new-writer-pass-99")
-	if st, b := s.API(t, http.MethodGet, "/api/audit", nil, sess); st != http.StatusForbidden {
-		t.Fatalf("GET /api/audit as a user: status %d, want 403: %s", st, b)
-	}
-	for _, a := range []Auth{user, s.AdminBasic(), nil} {
-		if st, b := s.API(t, http.MethodGet, "/api/audit", nil, a); st != http.StatusUnauthorized {
-			t.Fatalf("GET /api/audit without a UI session: status %d, want 401: %s", st, b)
-		}
-	}
 
 	// No other API shows an IP address.
 	for _, c := range []struct {

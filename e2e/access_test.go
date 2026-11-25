@@ -565,13 +565,32 @@ func TestLastPeople(t *testing.T) {
 	st, b := s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people from the last holder", st, b, http.StatusConflict)
 
-	// A second holder: one of the two can give it up.
+	// A second holder: one of the two can give it up. A username is taken once; an unknown
+	// permission is refused.
 	boss := RandName("boss")
-	s.CreateUser(t, boss, "boss-password-1", "people.manage")
+	newBoss := map[string]any{"username": boss, "password": "boss-password-1", "permissions": []string{"people.manage"}}
+	var created struct {
+		Username    string   `json:"username"`
+		Permissions []string `json:"permissions"`
+	}
+	s.MustAPI(t, http.MethodPost, "/api/users", newBoss, s.Admin(), &created)
+	if created.Username != boss || !slices.Equal(created.Permissions, []string{"people.manage"}) {
+		t.Fatalf("POST /api/users answered %+v, want %s with people.manage", created, boss)
+	}
+	st, b = s.API(t, http.MethodPost, "/api/users", newBoss, s.Admin())
+	wantAPIStatus(t, "create a person with a taken username", st, b, http.StatusConflict)
+	st, b = s.API(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("x"), "password": "x-password-1", "permissions": []string{"bogus"}}, s.Admin())
+	wantAPIStatus(t, "create a person with an unknown permission", st, b, http.StatusBadRequest)
 	st, b = s.API(t, http.MethodPut, "/api/users/"+boss+"/permissions", map[string]any{"permissions": []string{}}, s.Admin())
 	wantAPIStatus(t, "remove people from one of two holders", st, b, http.StatusOK)
 	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people from the last holder again", st, b, http.StatusConflict)
+
+	// The server permissions route takes only server permission IDs.
+	for _, bad := range []string{"people.nope", "repo.download"} {
+		st, b := s.API(t, http.MethodPut, "/api/users/"+boss+"/permissions", map[string]any{"permissions": []string{bad}}, s.Admin())
+		wantAPIStatus(t, "PUT the server permission "+bad, st, b, http.StatusBadRequest)
+	}
 
 	// A person with people changes only the permissions they hold.
 	s.SetServerPerms(t, boss, "people.manage")

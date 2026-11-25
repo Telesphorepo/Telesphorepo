@@ -15,74 +15,86 @@ import (
 // picker (GET /api/people).
 
 // permRoute is a route that one server permission reaches. body returns a new request body for
-// each call (nil for none); ok are the answers of a holder.
+// each call (nil for none); ok are the answers of a holder, and problem the problem type of that
+// answer ("" for any).
 type permRoute struct {
 	method, path string
 	body         func() any
 	ok           []int
+	problem      string
 }
 
 // TestServerPermissions gives each server permission to its own person. The holder reaches the
-// routes of the permission; every other holder gets 403 there.
+// routes of the permission; every other holder gets 403 there, and the admin's password 401 with
+// the refusal code session.
 func TestServerPermissions(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("perm")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	none := func() any { return nil }
+	logo := pngOf(t, 8, 8)
 	cases := []struct {
 		perm     string
 		routes   []permRoute
 		settings bool // GET /api/settings answers 200
 	}{
 		{"repositories.all", []permRoute{
-			{http.MethodPost, "/api/repos", func() any { return map[string]any{"name": RandName("new"), "format": "raw"} }, []int{http.StatusCreated}},
-			{http.MethodGet, "/api/repos/" + repo + "/grants", none, []int{http.StatusOK}},
+			{http.MethodPost, "/api/repos", func() any { return map[string]any{"name": RandName("new"), "format": "raw"} }, []int{http.StatusCreated}, ""},
+			{http.MethodGet, "/api/repos/" + repo + "/grants", none, []int{http.StatusOK}, ""},
 		}, false},
 		{"people.manage", []permRoute{
-			{http.MethodGet, "/api/users", none, []int{http.StatusOK}},
-			{http.MethodGet, "/api/users/" + s.AdminUser + "/access", none, []int{http.StatusOK}},
+			{http.MethodGet, "/api/users", none, []int{http.StatusOK}, ""},
+			{http.MethodGet, "/api/users/" + s.AdminUser + "/access", none, []int{http.StatusOK}, ""},
 			{http.MethodPost, "/api/users", func() any {
 				return map[string]any{"username": RandName("new"), "password": "new-password-1", "permissions": []string{"people.manage"}}
-			}, []int{http.StatusCreated}},
+			}, []int{http.StatusCreated}, ""},
 		}, false},
 		{"signin.manage", []permRoute{
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"oidc.session_ttl": "11h"} }, []int{http.StatusOK}},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"oidc.session_ttl": "11h"} }, []int{http.StatusOK}, ""},
 		}, true},
 		{"storage.manage", []permRoute{
-			{http.MethodGet, "/api/storage/moves/current", none, []int{http.StatusOK, http.StatusNotFound}},
+			{http.MethodGet, "/api/storage/moves/current", none, []int{http.StatusNotFound}, ""}, // no move yet
 		}, true},
 		{"backup.manage", []permRoute{
-			{http.MethodGet, "/api/backup", none, []int{http.StatusOK}},
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"backup.keep": 5} }, []int{http.StatusOK}},
+			{http.MethodGet, "/api/backup", none, []int{http.StatusOK}, ""},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"backup.keep": 5} }, []int{http.StatusOK}, ""},
 		}, true},
 		{"network.manage", []permRoute{
 			// The list route also serves repo.settings on a repo (which repositories.all holds); one list needs network.manage.
-			{http.MethodGet, "/api/ip-lists/github-actions", none, []int{http.StatusOK}},
-			{http.MethodGet, "/api/network/proxy-candidates", none, []int{http.StatusOK}},
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"trusted_proxies": []string{"192.0.2.1"}} }, []int{http.StatusOK}},
+			{http.MethodGet, "/api/ip-lists/github-actions", none, []int{http.StatusOK}, ""},
+			{http.MethodGet, "/api/network/proxy-candidates", none, []int{http.StatusOK}, ""},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"trusted_proxies": []string{"192.0.2.1"}} }, []int{http.StatusOK}, ""},
 		}, true},
 		{"signing.manage", []permRoute{
-			{http.MethodGet, "/api/signing-keys/default", none, []int{http.StatusOK}},
-			{http.MethodPost, "/api/signing-keys", func() any { return map[string]any{"name": RandName("key")} }, []int{http.StatusCreated}},
+			{http.MethodGet, "/api/signing-keys/default", none, []int{http.StatusOK}, ""},
+			{http.MethodPost, "/api/signing-keys", func() any { return map[string]any{"name": RandName("key")} }, []int{http.StatusCreated}, ""},
 		}, false},
 		{"edge.manage", []permRoute{
-			{http.MethodGet, "/api/edge/status", none, []int{http.StatusOK}},
-			// The server runs on the local disk, so the download answers edge-not-configured.
-			{http.MethodGet, "/api/edge/worker.zip", none, []int{http.StatusConflict}},
-			{http.MethodPost, "/api/edge/deploy", none, []int{http.StatusConflict}},
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"edge.access_ttl": "45s"} }, []int{http.StatusOK}},
+			{http.MethodGet, "/api/edge/status", none, []int{http.StatusOK}, ""},
+			// The server runs on the local disk, so the routes that need edge delivery answer
+			// edge-not-configured.
+			{http.MethodGet, "/api/edge/worker.zip", none, []int{http.StatusConflict}, "edge-not-configured"},
+			{http.MethodPost, "/api/edge/check", none, []int{http.StatusConflict}, "edge-not-configured"},
+			{http.MethodGet, "/api/edge/speedtest", none, []int{http.StatusOK}, ""},
+			{http.MethodPost, "/api/edge/speedtest", none, []int{http.StatusConflict}, "edge-not-configured"},
+			{http.MethodPost, "/api/edge/deploy", none, []int{http.StatusConflict}, "edge-deploy-refused"},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"edge.access_ttl": "45s"} }, []int{http.StatusOK}, ""},
 		}, true},
 		{"nexus.manage", []permRoute{
-			{http.MethodGet, "/api/nexus/sources", none, []int{http.StatusOK}},
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"nexus.sync_interval": "20m"} }, []int{http.StatusOK}},
+			{http.MethodGet, "/api/nexus/sources", none, []int{http.StatusOK}, ""},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"nexus.sync_interval": "20m"} }, []int{http.StatusOK}, ""},
 		}, true},
 		{"settings.general", []permRoute{
-			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"session_ttl": "100h"} }, []int{http.StatusOK}},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"session_ttl": "100h"} }, []int{http.StatusOK}, ""},
+			{http.MethodPut, "/api/identity/logo", func() any { return logo }, []int{http.StatusOK}, ""},
+			{http.MethodDelete, "/api/identity/logo", none, []int{http.StatusOK}, ""},
 		}, true},
 		{"activity.read", []permRoute{
-			{http.MethodGet, "/api/audit", none, []int{http.StatusOK}},
-			{http.MethodGet, "/api/publish/log", none, []int{http.StatusOK}},
+			{http.MethodGet, "/api/audit", none, []int{http.StatusOK}, ""},
+			{http.MethodGet, "/api/audit/people", none, []int{http.StatusOK}, ""},
+			{http.MethodGet, "/api/stats", none, []int{http.StatusOK}, ""},
+			{http.MethodGet, "/api/publish/log", none, []int{http.StatusOK}, ""},
 		}, false},
 	}
 	var covered []string
@@ -105,7 +117,12 @@ func TestServerPermissions(t *testing.T) {
 			holder := sessions[c.perm]
 			for _, r := range c.routes {
 				st, b := s.API(t, r.method, r.path, r.body(), holder)
-				wantAPIStatus(t, fmt.Sprintf("%s %s with %s", r.method, r.path, c.perm), st, b, r.ok...)
+				what := fmt.Sprintf("%s %s with %s", r.method, r.path, c.perm)
+				if r.problem != "" {
+					wantProblem(t, what, st, b, r.ok[0], r.problem)
+				} else {
+					wantAPIStatus(t, what, st, b, r.ok...)
+				}
 				for _, o := range cases {
 					if o.perm == c.perm {
 						continue
@@ -113,9 +130,11 @@ func TestServerPermissions(t *testing.T) {
 					st, b := s.API(t, r.method, r.path, r.body(), sessions[o.perm])
 					wantAPIStatus(t, fmt.Sprintf("%s %s with %s only", r.method, r.path, o.perm), st, b, http.StatusForbidden)
 				}
-				// A password reaches no permission route.
+				// A password reaches no permission route: they need a UI session.
 				st, b = s.API(t, r.method, r.path, r.body(), s.AdminBasic())
-				wantAPIStatus(t, fmt.Sprintf("%s %s with the admin's password", r.method, r.path), st, b, http.StatusUnauthorized)
+				if st != http.StatusUnauthorized || RefusalCode(b) != "session" {
+					t.Fatalf("%s %s with the admin's password: status %d, want 401 with the refusal code session: %s", r.method, r.path, st, b)
+				}
 			}
 			want := http.StatusForbidden
 			if c.settings {
@@ -124,6 +143,9 @@ func TestServerPermissions(t *testing.T) {
 			st, b := s.API(t, http.MethodGet, "/api/settings", nil, holder)
 			wantAPIStatus(t, "GET /api/settings with "+c.perm, st, b, want)
 		})
+	}
+	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, s.AdminBasic()); st != http.StatusUnauthorized || RefusalCode(b) != "session" {
+		t.Fatalf("GET /api/settings with the admin's password: status %d, want 401 with the refusal code session: %s", st, b)
 	}
 }
 
