@@ -257,6 +257,16 @@ func TestScale(t *testing.T) {
 		if q := "/api/repos?limit=50&q=" + url.QueryEscape(repoText); !strings.Contains(string(scaleGet(t, s, q)), `"`+mvn+`"`) {
 			t.Fatalf("%s at %s does not find %s", q, s.name, mvn)
 		}
+		// search-common, rpm-versions and tree-page (its first page) answer rows, so their timings
+		// are of a real answer.
+		for _, q := range []string{ops[4].path(s), ops[9].path(s), ops[10].path(s)} {
+			var answer struct {
+				Items []json.RawMessage `json:"items"`
+			}
+			if b := scaleGet(t, s, q); json.Unmarshal(b, &answer) != nil || len(answer.Items) == 0 {
+				t.Fatalf("%s at %s answers no items: %s", q, s.name, b)
+			}
+		}
 	}
 	t.Logf("maven repo %s, sample %s at every size, common term %q, shared folder %q", mvn, sample.Path, common, shared)
 

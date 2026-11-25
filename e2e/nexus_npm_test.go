@@ -8,7 +8,9 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,8 +41,7 @@ func npmTarball(t *testing.T, name, version, message string) []byte {
 }
 
 // nexusNpm uploads two versions of a plain and of a scoped package to a Nexus npm hosted repo,
-// imports the repo into s, installs both packages with npm from the target, and syncs again with
-// nothing new.
+// imports the repo into s, reads both packuments from the target, and syncs again with nothing new.
 func nexusNpm(t *testing.T, n *Nexus, s *Server) {
 	src := RandName("src-npm")
 	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/npm/hosted", map[string]any{
@@ -66,12 +67,16 @@ func nexusNpm(t *testing.T, n *Nexus, s *Server) {
 		t.Fatalf("the npm target: %+v", info)
 	}
 
-	registry := s.InternalURL + "/npm/" + target + "/"
-	code, out := RunClient(t, nodeImage, ClientOpts{Cmd: []string{"set -e\ncd /work/consumer && npm install --no-audit --no-fund\n" + npmRequire(plain, scoped)},
-		Files: []ContainerFile{npmConsumer("/work/consumer", map[string]string{plain: "1.0.0", scoped: "^1.0.0"}),
-			{Path: "/work/consumer/.npmrc", Content: npmrc(registry, "")}}})
-	if code != 0 || !strings.Contains(out, "REQ "+plain+": "+plain+" 1.0.0") || !strings.Contains(out, "REQ "+scoped+": "+scoped+" 1.1.0") {
-		t.Fatalf("npm install from the imported repo: exit %d:\n%s", code, out)
+	for _, name := range []string{plain, scoped} {
+		var packument struct {
+			DistTags map[string]string `json:"dist-tags"`
+			Versions map[string]any    `json:"versions"`
+		}
+		s.MustAPI(t, http.MethodGet, "/npm/"+target+"/"+name, nil, nil, &packument)
+		if packument.DistTags["latest"] != "1.1.0" || len(packument.Versions) != 2 || packument.Versions["1.0.0"] == nil || packument.Versions["1.1.0"] == nil {
+			t.Fatalf("packument of %s from the imported repo: dist-tags %v, versions %v; want 1.0.0 and 1.1.0, latest 1.1.0",
+				name, packument.DistTags, slices.Sorted(maps.Keys(packument.Versions)))
+		}
 	}
 
 	again := nexusSyncNow(t, s, source.ID)

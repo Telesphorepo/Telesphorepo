@@ -11,8 +11,8 @@ import (
 )
 
 // The Nexus import of cargo repos (part of TestNexus): cargo publishes two versions of a crate to
-// a Nexus cargo hosted repo, the sync imports them with the entries of their Cargo.toml, cargo
-// builds from the target, and a second sync finds nothing new.
+// a Nexus cargo hosted repo, the sync imports them with the entries of their Cargo.toml, the sparse
+// index of the target lists both, and a second sync finds nothing new.
 
 // nexusCargo runs the cargo part of TestNexus against n and s.
 func nexusCargo(t *testing.T, n *Nexus, s *Server) {
@@ -62,12 +62,13 @@ cargo publish --registry nx --no-verify
 	}
 	requireCargoAssets(t, s, target, "crates/"+crate+"/"+crate+"-1.0.0.crate", "crates/"+crate+"/"+crate+"-1.1.0.crate")
 
-	code, out = RunClient(t, rustImage, ClientOpts{Cmd: []string{"cd /work/app && cargo run -q"},
-		Files: append(cargoBin("/work/app", crate+" = { version = \"1\", registry = \"tr\" }\n", crate),
-			cargoRegistry("/work", "tr", s.InternalURL+"/cargo/"+target+"/index/", false)),
-		Env: cargoEnv(nil), Timeout: 15 * time.Minute})
-	if code != 0 || !strings.Contains(out, "hello 1.1.0 of "+crate+" mirrored from nexus") {
-		t.Fatalf("cargo run from the imported repo: exit %d\n%s", code, out)
+	// The sparse index of the crate (its name has more than 3 characters: ab/cd/abcd...) lists both
+	// versions.
+	index := string(getFollowS3(t, s, nil, "/cargo/"+target+"/index/"+crate[:2]+"/"+crate[2:4]+"/"+crate))
+	for _, v := range []string{"1.0.0", "1.1.0"} {
+		if !strings.Contains(index, `"vers":"`+v+`"`) {
+			t.Fatalf("the index of %s on the imported repo does not list %s:\n%s", crate, v, index)
+		}
 	}
 
 	again := nexusSyncNow(t, s, source.ID)

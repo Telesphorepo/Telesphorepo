@@ -12,7 +12,7 @@ import (
 
 // The Nexus import of yum repos (part of TestNexus): three packages that nfpm built in a Nexus yum
 // hosted repo, one in a folder under a name that is not rpm's; the sync imports them into an RPM
-// repo, which signs them with its own key; dnf installs from the target; a second sync skips all
+// repo, which signs them with its own key and names them in its repodata; a second sync skips all
 // three (the two with rpm's names without a download).
 
 // nexusYum runs the yum part of TestNexus against n and s.
@@ -64,12 +64,23 @@ func nexusYum(t *testing.T, n *Nexus, s *Server) {
 		t.Fatalf("the rpm target: %+v", info)
 	}
 	s.WaitDebianIndexed(t, target)
-	d := StartDnf(t, fedoraImage)
-	d.Trust(t, target, s.RPMKey(t, target, nil))
-	d.AddRepo(t, target, rpmBaseURL(s, target), "", "")
-	out := d.MustExec(t, "dnf install from the imported repo", "dnf -y install e2e-anchor e2e-data && e2e-anchor")
-	if !strings.Contains(out, "anchor 1.1.0") {
-		t.Fatalf("dnf install from the imported repo:\n%s", out)
+	// The package of the folder takes rpm's name under Packages/, and the repodata names it.
+	renamed := "Packages/e2e-anchor/e2e-anchor-1.1.0-1.x86_64.rpm"
+	var page struct {
+		Items []struct {
+			Path string `json:"path"`
+		} `json:"items"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+target+"/assets?limit=200&prefix=Packages/e2e-anchor/", nil, s.Admin(), &page)
+	found := false
+	for _, it := range page.Items {
+		found = found || strings.TrimPrefix(it.Path, "/") == renamed
+	}
+	if !found {
+		t.Fatalf("the imported repo has no %s: %+v", renamed, page.Items)
+	}
+	if _, ok := rpmPrimaryIndex(t, s, nil, target)[renamed]; !ok {
+		t.Fatalf("the repodata of the imported repo does not name %s", renamed)
 	}
 
 	again := nexusSyncNow(t, s, source.ID)

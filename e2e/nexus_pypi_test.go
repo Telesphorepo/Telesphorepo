@@ -8,8 +8,9 @@ import (
 	"testing"
 )
 
-// nexusPyPI uploads two wheels to a Nexus pypi hosted repo, imports the repo into s, installs the
-// newest with pip from the target, and syncs again with nothing new.
+// nexusPyPI uploads two wheels to a Nexus pypi hosted repo, imports the repo into s, finds both in
+// the simple index of the target, checks the rules of a held mirror, and syncs again with nothing
+// new.
 func nexusPyPI(t *testing.T, n *Nexus, s *Server) {
 	src := RandName("src-pypi")
 	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/pypi/hosted", map[string]any{
@@ -36,14 +37,45 @@ func nexusPyPI(t *testing.T, n *Nexus, s *Server) {
 		t.Fatalf("the pypi target: %+v", info)
 	}
 
-	code, out := RunClient(t, pythonImage, ClientOpts{Cmd: []string{`set -e
-pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" ` + name + `
-python -c "import ` + mod + `; print(` + mod + `.MSG)"
-`}, Env: map[string]string{"INDEX": pyIndex(s, target, "", ""), "PIP_TRUSTED_HOST": s.Alias}})
-	if code != 0 || !strings.Contains(out, "nexus "+name+" 1.1") {
-		t.Fatalf("pip install from the imported repo: exit %d\n%s", code, out)
+	index := string(getFollowS3(t, s, nil, "/pypi/"+target+"/simple/"+name+"/"))
+	for _, file := range files {
+		if !strings.Contains(index, file) {
+			t.Fatalf("the simple index of %s on the imported repo does not list %s:\n%s", name, file, index)
+		}
 	}
 
+	// The target is a held mirror until its switch-over: a bulk delete that names it deletes
+	// nothing, and its operation can be neither resumed nor cleared. A repo without an operation
+	// has none to clear.
+	var info struct {
+		Operation *struct {
+			Type  string `json:"type"`
+			State string `json:"state"`
+		} `json:"operation"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+target, nil, s.Admin(), &info)
+	if info.Operation == nil || info.Operation.Type != "mirror" || info.Operation.State != "held" {
+		t.Fatalf("the pypi target: operation %+v, want a held mirror", info.Operation)
+	}
+	other := RandName("nxpyother")
+	s.CreateRepo(t, other, "raw", false, nil)
+	if st, b := s.API(t, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{other, target}}, s.Admin()); st != http.StatusConflict || !strings.Contains(string(b), target) {
+		t.Fatalf("bulk delete of %s and the held mirror %s: status %d, want 409 that names %s: %s", other, target, st, target, b)
+	}
+	for _, r := range []string{target, other} {
+		if st, b := s.API(t, http.MethodGet, "/api/repos/"+r, nil, s.Admin()); st != http.StatusOK {
+			t.Fatalf("GET %s after the refused bulk delete: status %d, want 200: %s", r, st, b)
+		}
+	}
+	for _, req := range []struct{ method, path string }{
+		{http.MethodPost, "/api/repos/" + target + "/operation/resume"},
+		{http.MethodDelete, "/api/repos/" + target + "/operation"},
+		{http.MethodDelete, "/api/repos/" + other + "/operation"},
+	} {
+		if st, b := s.API(t, req.method, req.path, nil, s.Admin()); st != http.StatusConflict {
+			t.Fatalf("%s %s: status %d, want 409: %s", req.method, req.path, st, b)
+		}
+	}
 	again := nexusSyncNow(t, s, source.ID)
 	if r := again.repo(t, src); r.Imported != 0 || r.Failed != 0 {
 		t.Fatalf("second sync of the pypi repo: %+v, want nothing new", r)

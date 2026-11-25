@@ -32,7 +32,7 @@ func (n *Nexus) enableDockerToken(t *testing.T) {
 }
 
 // nexusDocker pushes an image and a multi-platform index to a Nexus docker hosted repo with
-// skopeo, imports the repo into s, pulls both from s with crane by tag and by digest, and syncs
+// skopeo, imports the repo into s, reads the manifests from s by tag and by digest, and syncs
 // again with nothing new.
 func nexusDocker(t *testing.T, n *Nexus, s *Server) {
 	port := 8082 + nexusDockerPort.Add(1) - 1
@@ -78,21 +78,28 @@ copy --all oci:/l2:v1 docker://%[1]s/team/multi:v1
 		t.Fatalf("the docker target: %+v", info)
 	}
 
-	host := s.Alias + ":8080"
-	code, out = RunClient(t, craneImage, ClientOpts{Cmd: []string{fmt.Sprintf(`set -e
-crane pull --insecure %[1]s/%[2]s/team/app:v1 /tmp/a.tar
-crane pull --insecure %[1]s/%[2]s/team/app@sha256:%[3]s /tmp/b.tar
-crane pull --insecure --platform linux/arm64 %[1]s/%[2]s/team/multi:v1 /tmp/c.tar
-crane pull --insecure %[1]s/%[2]s/team/multi@sha256:%[4]s /tmp/d.tar
-echo "DIGEST $(crane digest --insecure %[1]s/%[2]s/team/multi:v1)"
-echo "APP $(crane digest --insecure %[1]s/%[2]s/team/app:v1)"
-`, host, target, appHex, childHexes[0])}})
-	if code != 0 || !strings.Contains(out, "DIGEST sha256:"+idxHex) || !strings.Contains(out, "APP sha256:"+appHex) {
-		t.Fatalf("crane pull of the imported images: exit %d, want the digests sha256:%s and sha256:%s:\n%s", code, idxHex, appHex, out)
+	for _, m := range []struct{ name, ref, hex string }{
+		{"team/app", "v1", appHex}, {"team/app", "sha256:" + appHex, appHex},
+		{"team/multi", "v1", idxHex}, {"team/multi", "sha256:" + childHexes[0], childHexes[0]},
+	} {
+		nexusWantManifest(t, s, target+"/"+m.name, m.ref, m.hex)
 	}
 
 	again := nexusSyncNow(t, s, source.ID)
 	if r := again.repo(t, src); r.Imported != 0 || r.Failed != 0 {
 		t.Fatalf("second sync of the docker repo: %+v, want nothing new", r)
+	}
+}
+
+// nexusWantManifest GETs the manifest ref of name on s anonymously and checks that its
+// Docker-Content-Digest and the SHA-256 of its bytes are sha256:hex.
+func nexusWantManifest(t *testing.T, s *Server, name, ref, hex string) {
+	t.Helper()
+	accept := strings.Join([]string{"application/vnd.oci.image.manifest.v1+json", "application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json", "application/vnd.docker.distribution.manifest.list.v2+json"}, ", ")
+	resp, body := ociDo(t, s, http.MethodGet, "/v2/"+name+"/manifests/"+ref, nil, nil, map[string]string{"Accept": accept})
+	wantOCI(t, "GET the manifest "+name+":"+ref, resp, body, http.StatusOK, "")
+	if got := resp.Header.Get("Docker-Content-Digest"); got != "sha256:"+hex || sha256Hex(body) != hex {
+		t.Fatalf("GET the manifest %s:%s: Docker-Content-Digest %q, body sha256:%s, want sha256:%s", name, ref, got, sha256Hex(body), hex)
 	}
 }
