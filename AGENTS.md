@@ -31,8 +31,8 @@ Linux. Use bun, not npm.
   failure: fix it, commit, and run the failed tests once more. `go tool task test` holds this:
   it refuses a run too soon after the last run on the computer, and a run of code that has
   already been tested. A refusal means the work is not batched yet, so carry on with the next
-  part of the work and test it all together later. Waiting the cooldown out gains nothing: each
-  refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start
+  part of the work and test it all together later. **Never, under any circumstances, wait the
+  cooldown out** (no sleep, no retry loop, no polling): each refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start
   the e2e zones only through `go tool task test` (a plain `go test` of them refuses to start),
   and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
   the person at the terminal can skip it, with `--now` for one run or `--pause` for a while; when

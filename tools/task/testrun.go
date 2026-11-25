@@ -133,7 +133,8 @@ func resume() error {
 }
 
 const cooldownRefusal = `the e2e tests ran on this computer too recently. Running them this often means the work is not batched.
-Do not wait for the cooldown: no sleep, no retry loop, no polling. Every refused start, this one too, starts the cooldown again.
+Under no circumstances wait the cooldown out: no sleep, no retry loop, no polling, no "try again later". Every refused start,
+this one too, starts the cooldown again, so waiting never gets a run through sooner.
 Go on with the next part of the work without running tests. Run the tests once, when a batch of changes is done and committed,
 and name every zone that batch needs in that one run (e.g. go tool task test core clients).
 The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
