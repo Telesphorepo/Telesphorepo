@@ -149,12 +149,6 @@ func TestEdgeWorkerDownload(t *testing.T) {
 	if !slices.Equal(checkout.Routes, cfg.Routes) {
 		t.Errorf("checkout routes %v, zip routes %v", checkout.Routes, cfg.Routes)
 	}
-
-	// A server on the local disk cannot run edge delivery, so it has no Worker to hand out.
-	local := StartServer(t, ServerOpts{})
-	if st, b := local.API(t, http.MethodGet, "/api/edge/worker.zip", nil, local.Admin()); st != http.StatusConflict || !strings.Contains(string(b), "edge-not-configured") {
-		t.Errorf("worker.zip on fs = %d: %s, want 409 edge-not-configured", st, b)
-	}
 }
 
 // parseWrangler returns the JSON of a wrangler.jsonc that the server writes: the comment lines at

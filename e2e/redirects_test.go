@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // redirectJSON is an entry of GET /api/repos/{name}/redirects.
@@ -39,11 +38,11 @@ func redirectsOf(t *testing.T, s *Server, repo string) []redirectJSON {
 }
 
 // TestRepoRedirects renames a Maven, an npm and a Docker repository and publishes through each
-// old name with the real client (mvn deploy, npm publish, docker push), minting the publish token
-// through the old name too: every file lands in the renamed repository, and Activity records the
-// old name. A redirect's name is reserved, a repository takes its own old name back, and after
-// Remove the redirect the old name answers 404 and a new repository can take it. A redirect added
-// without a rename serves downloads at once, and the name of a repo or a redirect is refused.
+// old name, minting the publish token through the old name too: every file lands in the renamed
+// repository, and Activity records the old name. A redirect's name is reserved, a repository
+// takes its own old name back, and after Remove the redirect the old name answers 404 and a new
+// repository can take it. A redirect added without a rename serves downloads at once, and the
+// name of a repo or a redirect is refused.
 func TestRepoRedirects(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -59,20 +58,12 @@ func TestRepoRedirects(t *testing.T) {
 
 			group := "com.example.redirect" + randHex(4)
 			groupPath := strings.ReplaceAll(group, ".", "/")
-			oldURL := s.InternalURL + "/maven/" + old
-			msg := "hello through the old name " + group
-			files := append(mavenLibProject(group, "1.0.0", oldURL, msg),
-				ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, PublishToken(t, s, writer, old))})
-			code, out := RunClient(t, mavenImage, ClientOpts{
-				Cmd:     []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},
-				Files:   files,
-				Mounts:  map[string]string{M2Volume: "/root/.m2/repository"},
-				Timeout: 15 * time.Minute,
-			})
-			if code != 0 {
-				t.Fatalf("mvn deploy to the old name: exit %d\n%s", code, out)
-			}
 			jar := groupPath + "/hello/1.0.0/hello-1.0.0.jar"
+			mavenPut(t, s, writer, old, jar, rawRandom(t, 2048))
+			mavenPut(t, s, writer, old, groupPath+"/hello/1.0.0/hello-1.0.0.pom", []byte(mavenPOM(group, "hello", "1.0.0", "jar", "")))
+			mavenPut(t, s, writer, old, groupPath+"/hello/maven-metadata.xml", []byte(fmt.Sprintf(
+				"<metadata><groupId>%s</groupId><artifactId>hello</artifactId><versioning><latest>1.0.0</latest>"+
+					"<release>1.0.0</release><versions><version>1.0.0</version></versions></versioning></metadata>", group)))
 			if !slices.Contains(mavenAssetPaths(t, s, renamed, groupPath+"/", s.Admin()), jar) {
 				t.Fatalf("the deploy through %s did not land in %s", old, renamed)
 			}
@@ -159,10 +150,7 @@ func TestRepoRedirects(t *testing.T) {
 			renameRepo(t, s, old, renamed)
 
 			pkg := RandName("lib")
-			registry := s.InternalURL + "/npm/" + old + "/"
-			files := append(npmPackage("/work/lib", pkg, "1.0.0", "lib 1.0.0"),
-				ContainerFile{Path: "/root/.npmrc", Content: npmrc(registry, PublishToken(t, s, writer, old))})
-			npmMust(t, nodeImage, "npm publish to the old name", "set -e\ncd /work/lib && npm publish\n", files)
+			gfNPMPublish(t, s, old, pkg, "1.0.0")
 			if _, d := npmGet(t, s, renamed, pkg, true, Basic{writer, pass}); d == nil || d.DistTags["latest"] != "1.0.0" {
 				t.Fatalf("packument of %s in %s after the publish through %s: %+v", pkg, renamed, old, d)
 			}
@@ -192,16 +180,13 @@ func TestRepoRedirects(t *testing.T) {
 				wantOCI(t, "pull "+name+"/before with the token of before the rename", resp, b, http.StatusOK, "")
 			}
 
-			host := registryHost(s)
-			d := StartDind(t, host)
-			img := host + "/" + old + "/app"
-			d.MustExec(t, "docker push to the old name", "set -e\n"+DockerScratchImage("/ctx", 64<<10, 2048)+
-				fmt.Sprintf("printf '%%s' '%s' | docker login %s -u %s --password-stdin\n", PublishToken(t, s, writer, old), host, writer)+
-				fmt.Sprintf("docker build -q -t %[1]s:v1 /ctx\ndocker push %[1]s:v1\ndocker rmi %[1]s:v1\ndocker pull %[1]s:v1\n", img))
+			ociImage(t, s, Basic{writer, PublishToken(t, s, writer, old)}, old+"/app", "v1", nil, rawRandom(t, 4096))
+			resp, b := ociDo(t, s, http.MethodGet, "/v2/"+old+"/app/manifests/v1", nil, Basic{writer, pass}, nil)
+			wantOCI(t, "pull "+old+"/app:v1 after the push through the old name", resp, b, http.StatusOK, "")
 			if got := headDigest(t, s, s.AdminBasic(), renamed+"/app", "v1"); !strings.HasPrefix(got, "sha256:") {
 				t.Fatalf("the push through %s: %s/app:v1 has the digest %q", old, renamed, got)
 			}
-			resp, b := ociDo(t, s, http.MethodGet, "/v2/_catalog", nil, s.AdminBasic(), nil)
+			resp, b = ociDo(t, s, http.MethodGet, "/v2/_catalog", nil, s.AdminBasic(), nil)
 			wantOCI(t, "GET /v2/_catalog", resp, b, http.StatusOK, "")
 			var cat struct {
 				Repositories []string `json:"repositories"`

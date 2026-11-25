@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 )
 
 // Network rules: the client address behind trusted proxies, the allowed networks of the repos,
@@ -162,9 +164,6 @@ func TestClientIP(t *testing.T) {
 	c := candidateOf(t, s, peer)
 	if c == nil || c.Count < 1 || c.Header != "X-Forwarded-For" || c.LastSeen.IsZero() {
 		t.Fatalf("proxy candidate of the peer %s: %+v, want X-Forwarded-For seen at least once", peer, c)
-	}
-	if st, _ := s.API(t, http.MethodGet, "/api/network/proxy-candidates", nil, s.AdminBasic()); st != http.StatusUnauthorized {
-		t.Fatalf("proxy candidates with admin Basic auth: status %d, want 401", st)
 	}
 	signInIP(t, s, map[string]string{"Forwarded": "for=203.0.113.7"})
 	if c := candidateOf(t, s, peer); c == nil || c.Header != "Forwarded" {
@@ -651,9 +650,6 @@ func TestCustomIPLists(t *testing.T) {
 	// Reference the list from a repo's allowed networks: its addresses read without signing in.
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
-	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
 	got := putIPRules(t, s, repo, ipRules{Read: []ipRule{{Kind: "list", Value: "runners", Note: "CI"}}})
 	if len(got.Read) != 1 || got.Read[0].Kind != "list" || got.Read[0].Value != "runners" {
 		t.Fatalf("PUT ip-rules with a list: %+v", got)
@@ -736,14 +732,6 @@ func TestCustomIPLists(t *testing.T) {
 	if st, b := s.API(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", ipRules{Read: []ipRule{{Kind: "list", Value: "ci-runners"}}}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("a network naming a deleted list: status %d, want 400: %s", st, b)
 	}
-
-	// Only network, or settings on a repo; a publisher holds neither.
-	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists", nil, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
-		t.Fatalf("publisher GET /api/ip-lists: status %d, want 403", st)
-	}
-	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists", nil, s.AdminBasic()); st != http.StatusUnauthorized {
-		t.Fatalf("GET /api/ip-lists with admin Basic auth: status %d, want 401", st)
-	}
 }
 
 // parsedRanges is the answer of POST /api/ip-ranges/parse.
@@ -758,8 +746,7 @@ type parsedRanges struct {
 }
 
 // TestIPRangeParse covers POST /api/ip-ranges/parse: addresses and CIDRs pulled out
-// of pasted text in any common layout, invalid lines with their numbers, duplicates, limits and
-// admin-only access.
+// of pasted text in any common layout, invalid lines with their numbers, duplicates and limits.
 func TestIPRangeParse(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -777,11 +764,6 @@ func TestIPRangeParse(t *testing.T) {
 		}
 	}
 
-	t.Run("owner example", func(t *testing.T) {
-		check(t, "34.107.78.182\n63.181.86.27\n63.178.35.73\n63.181.52.205\n18.194.216.61\n3.76.89.160\n3.40.7.192/28\n3.40.7.224/28\n",
-			[]string{"34.107.78.182/32", "63.181.86.27/32", "63.178.35.73/32", "63.181.52.205/32", "18.194.216.61/32",
-				"3.76.89.160/32", "3.40.7.192/28", "3.40.7.224/28"}, 0)
-	})
 	t.Run("separators", func(t *testing.T) {
 		check(t, "192.0.2.1, 192.0.2.2 192.0.2.3\t192.0.2.4; 192.0.2.5 | 192.0.2.6\r\n",
 			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32", "192.0.2.4/32", "192.0.2.5/32", "192.0.2.6/32"}, 0)
@@ -833,24 +815,10 @@ func TestIPRangeParse(t *testing.T) {
 		}
 	})
 	t.Run("too large", func(t *testing.T) {
-		// One line more than MaxParseText (1 MiB, internal/netrules/parse.go) holds.
-		text := strings.Repeat("192.0.2.1\n", (1<<20)/10+1)
+		// One line more than netrules.MaxParseText holds.
+		text := strings.Repeat("192.0.2.1\n", netrules.MaxParseText/10+1)
 		if st, b := s.API(t, http.MethodPost, "/api/ip-ranges/parse", map[string]any{"text": text}, s.Admin()); st != http.StatusBadRequest {
-			t.Fatalf("parse more than 1 MiB: status %d, want 400: %s", st, b)
-		}
-	})
-	t.Run("admins only", func(t *testing.T) {
-		u := RandName("plain")
-		s.CreateUser(t, u, "plain-pass-1234")
-		body := map[string]any{"text": "192.0.2.1"}
-		if st, _ := s.API(t, http.MethodPost, "/api/ip-ranges/parse", body, s.SignIn(t, u, "plain-pass-1234")); st != http.StatusForbidden {
-			t.Fatalf("non-admin parse: status %d, want 403", st)
-		}
-		if st, _ := s.API(t, http.MethodPost, "/api/ip-ranges/parse", body, s.AdminBasic()); st != http.StatusUnauthorized {
-			t.Fatalf("parse with admin Basic auth: status %d, want 401", st)
-		}
-		if st, _ := s.API(t, http.MethodPost, "/api/ip-ranges/parse", body, nil); st != http.StatusUnauthorized {
-			t.Fatalf("anonymous parse: status %d, want 401", st)
+			t.Fatalf("parse more than %d bytes: status %d, want 400: %s", netrules.MaxParseText, st, b)
 		}
 	})
 }

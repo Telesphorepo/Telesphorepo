@@ -85,15 +85,15 @@ func remoteGetCount(t testing.TB, s *Server, prefix string) map[string]int {
 	return out
 }
 
-// caddyRedirectConf answers every request on redir:8080 with a redirect to the host recorder
-// (port 8081). The recorder serves the file only to a request without an Authorization header,
-// and answers 403 to a request with one.
+// caddyRedirectConf answers every request on redir:8080 with a redirect to port 8081 of the same host
+// name, which serves the file only to a request without an Authorization header and answers 403 to a
+// request with one.
 const caddyRedirectConf = `{
 	admin off
 	auto_https off
 }
 :8080 {
-	redir http://recorder:8081{uri} 302
+	redir http://redir:8081{uri} 302
 }
 :8081 {
 	@auth header Authorization *
@@ -102,10 +102,10 @@ const caddyRedirectConf = `{
 }
 `
 
-// startRedirector starts Caddy with the network aliases redir and recorder.
+// startRedirector starts Caddy with the network alias redir.
 func startRedirector(t *testing.T) {
 	t.Helper()
-	startCaddy(t, caddyRedirectConf, "Caddy redirector", "redir", "recorder")
+	startCaddy(t, caddyRedirectConf, "Caddy redirector", "redir")
 }
 
 // proxyServesRemote checks that GET proxyPath on s answers the bytes of GET remotePath on remote.
@@ -120,7 +120,6 @@ func proxyServesRemote(t *testing.T, s, remote *Server, proxyPath, remotePath st
 
 func TestProxy(t *testing.T) {
 	t.Parallel()
-	debs := buildDebPackages(t)
 	rpms := buildRPMPackages(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		// The remote is a second server on the fs store, so its access log shows each request
@@ -286,8 +285,9 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("test the remote of %s: status %d, want 200: %s", withCreds, st, b)
 		}
 
-		// A redirect to another host does not carry the credentials: the recorder answers 403 to a
-		// request with an Authorization header.
+		// A redirect to another port of the remote's host name does not carry the credentials (Go's
+		// client alone would carry them: it compares host names, not ports); port 8081 answers 403
+		// to a request with an Authorization header.
 		startRedirector(t)
 		redirected := RandName("redirected")
 		s.CreateProxy(t, redirected, "maven", true, map[string]any{"remote_url": "http://redir:8080/m2/", "username": "someone", "password": "s3cret-e2e"}, false)
@@ -299,12 +299,10 @@ func TestProxy(t *testing.T) {
 		upDeb := RandName("upstream-deb")
 		remote.CreateRepo(t, upDeb, "debian", true, nil)
 		remote.SetPerms(t, upDeb, uploader, "repo.download", "repo.publish")
-		debAuth := remote.PublishAuth(t, uploader, upDeb)
-		for _, deb := range [][]byte{debs.hello1, debs.native} {
-			req := remote.NewRequest(t, http.MethodPut, "/debian/"+upDeb+"/upload/stable/main", strings.NewReader(string(deb)))
-			if resp, b := remote.Do(t, req, debAuth); resp.StatusCode/100 != 2 {
-				t.Fatalf("upload a .deb to the remote: status %d: %s", resp.StatusCode, b)
-			}
+		deb := goDeb(t, debMember{"./control", []byte("Package: e2e-proxied\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: proxied\n")})
+		req := remote.NewRequest(t, http.MethodPut, "/debian/"+upDeb+"/upload/stable/main", bytes.NewReader(deb))
+		if resp, b := remote.Do(t, req, remote.PublishAuth(t, uploader, upDeb)); resp.StatusCode/100 != 2 {
+			t.Fatalf("upload a .deb to the remote: status %d: %s", resp.StatusCode, b)
 		}
 		remote.WaitDebianIndexed(t, upDeb)
 		debProxy := RandName("deb-proxy")
