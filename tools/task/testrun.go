@@ -132,15 +132,18 @@ func resume() error {
 	return nil
 }
 
+// neverWait ends every refusal of the gate.
+const neverWait = `
+NEVER WAIT THE COOLDOWN OUT, UNDER ANY CIRCUMSTANCES: no sleep, no retry loop, no polling, no "try again later".
+Every refused start, this one too, starts the cooldown again, so waiting never gets a run through sooner.`
+
 const cooldownRefusal = `the e2e tests ran on this computer too recently. Running them this often means the work is not batched.
-Under no circumstances wait the cooldown out: no sleep, no retry loop, no polling, no "try again later". Every refused start,
-this one too, starts the cooldown again, so waiting never gets a run through sooner.
 Go on with the next part of the work without running tests. Run the tests once, when a batch of changes is done and committed,
 and name every zone that batch needs in that one run (e.g. go tool task test core clients).
 The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
 When the work is finished (every change committed, nothing left to do), go tool task test --final <zones> runs those whole
 zones once without the cooldown. It is refused while anything is uncommitted, with -run or --shard, and right after another final run.
-The person at the terminal can pause the gate for a while (go tool task test --pause); an agent cannot.`
+The person at the terminal can pause the gate for a while (go tool task test --pause); an agent cannot.` + neverWait
 
 // The cooldown is a new random length after every run and every refused start, and the ledger
 // keeps only when it ends: so work is batched (finish a change, then test it once), and nothing in
@@ -155,7 +158,7 @@ func cooldownEnd() time.Time {
 
 const unchangedRefusal = `this code has already been tested on this computer (the same commit and the same uncommitted changes):
 running the same code again tests nothing new. Change the code first, commit it, then run the tests once.
-A flaky test is a bug to find and fix, not a reason to run the tests again.`
+A flaky test is a bug to find and fix, not a reason to run the tests again.` + neverWait
 
 // openGate passes a run through the gate, or says why not. now skips the cooldown and the check
 // for changes after the person at the terminal confirms it. final skips the cooldown when the
@@ -257,7 +260,7 @@ func (g *gate) lock(dir, root string) error {
 		}
 		if r, err := e2erun.ReadRunning(); err == nil && r.PID != os.Getpid() && processAlive(r.PID) {
 			return fmt.Errorf("an e2e run is already going on this computer (pid %d in %s, since %s). One run at a time: "+
-				"go on with your work and run the tests once that run has ended", r.PID, r.Root, r.Started.Format(time.TimeOnly))
+				"go on with your work and run the tests once that run has ended"+neverWait, r.PID, r.Root, r.Started.Format(time.TimeOnly))
 		}
 		_ = os.Remove(f)
 	}
@@ -287,7 +290,7 @@ func (g *gate) setBudget(calibration, budget time.Duration) error {
 func finalAllowed(ctx context.Context, l ledger) error {
 	if l.LastFinal {
 		return errors.New("--final: the last run on this computer was a final run, so this one waits for the cooldown like any other run. " +
-			"A final run that failed means the work is not finished: fix it, commit, and test the batch once after the cooldown")
+			"A final run that failed means the work is not finished: fix it, commit, and test the batch once after the cooldown" + neverWait)
 	}
 	out, err := exec.CommandContext(ctx, "git", "status", "--porcelain").Output()
 	if err != nil {
