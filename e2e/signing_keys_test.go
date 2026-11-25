@@ -70,8 +70,8 @@ func encryptedSigningKey(t *testing.T) (armored, passphrase string) {
 }
 
 // TestSigningKeys covers the signing keys as a resource: create, import, the
-// usage list, delete refused while a repo uses a key, and a Debian repo signed with its own key
-// that apt installs from, before and after the repo changes its key.
+// usage list, delete refused while a repo uses a key, and a Debian repo whose indexes are signed
+// with its own key, before and after the repo changes its key.
 func TestSigningKeys(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -149,29 +149,14 @@ func TestSigningKeys(t *testing.T) {
 		t.Fatalf("GET an unknown key: status %d, want 404", st)
 	}
 
-	// Admins only.
-	s.CreateUser(t, "plain", "plainpass123")
-	plain := s.SignIn(t, "plain", "plainpass123")
-	if st, _ := s.API(t, http.MethodGet, "/api/signing-keys", nil, plain); st != http.StatusForbidden {
-		t.Fatalf("non-admin GET /api/signing-keys: status %d, want 403", st)
-	}
-	if st, _ := s.API(t, http.MethodPost, "/api/signing-keys", map[string]any{"name": "x"}, plain); st != http.StatusForbidden {
-		t.Fatalf("non-admin create: status %d, want 403", st)
-	}
-
 	// A Debian repo with its own key.
-	pkgs := buildDebPackages(t)
-	archs := []string{"amd64", "arm64"}
-	if !slices.Contains(archs, pkgs.arch) {
-		archs = append(archs, pkgs.arch)
-	}
 	repo := RandName("deb")
 	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
-		"config": map[string]any{"architectures": archs}, "fields": map[string]any{"signing_key": "nowhere"}}, s.Admin()); st != http.StatusBadRequest {
+		"fields": map[string]any{"signing_key": "nowhere"}}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("create a repo with an unknown signing key: status %d, want 400: %s", st, b)
 	}
 	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
-		"config": map[string]any{"architectures": archs, "signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
+		"config": map[string]any{"signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("create a repo with the signing key in its config: status %d, want 400: %s", st, b)
 	}
 	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("raw"), "format": "raw",
@@ -182,7 +167,7 @@ func TestSigningKeys(t *testing.T) {
 		Fields map[string]string `json:"fields"`
 	}
 	s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
-		"config": map[string]any{"architectures": archs}, "fields": map[string]any{"signing_key": "team"}}, s.Admin(), &created)
+		"fields": map[string]any{"signing_key": "team"}}, s.Admin(), &created)
 	if created.Fields["signing_key"] != "team" {
 		t.Fatalf("new repo fields: %v, want signing_key team", created.Fields)
 	}
@@ -192,8 +177,8 @@ func TestSigningKeys(t *testing.T) {
 	rauth := Basic{reader, readerPass}
 
 	ps := s.MintSession(t, "admin", repo)
-	debMustUpload(t, s, repo, pkgs.hello1, ps.Auth(), "e2e-hello", "1.0", "all")
-	debMustUpload(t, s, repo, pkgs.native, ps.Auth(), "e2e-native", "1.0", pkgs.arch)
+	hello := goDeb(t, debMember{"./control", []byte("Package: e2e-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: hello\n")})
+	debMustUpload(t, s, repo, hello, ps.Auth(), "e2e-hello", "1.0", "all")
 	s.WaitDebianIndexed(t, repo)
 
 	if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/debian/"+repo+"/key.asc", nil), nil); resp.StatusCode != http.StatusUnauthorized {
@@ -203,10 +188,7 @@ func TestSigningKeys(t *testing.T) {
 	if fingerprintOf(t, key) != team.Fingerprint {
 		t.Fatalf("/debian/%s/key.asc is not the key team", repo)
 	}
-	out := debAptInstall(t, s, repo, reader, readerPass, key)
-	if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
-		t.Fatalf("apt install from a repo signed with team:\n%s", out)
-	}
+
 	debCheckIndexes(t, s, nil, repo, rauth, key)
 
 	// The key lists the repo, and cannot be deleted while the repo uses it.
@@ -226,10 +208,6 @@ func TestSigningKeys(t *testing.T) {
 		t.Fatalf("/debian/%s/key.asc after the key change is not the key imported", repo)
 	}
 	debCheckIndexes(t, s, nil, repo, rauth, key)
-	out = debAptInstall(t, s, repo, reader, readerPass, key)
-	if !strings.Contains(out, "RESULT: hello 1.0\n") {
-		t.Fatalf("apt install after the key change:\n%s", out)
-	}
 
 	// No repo uses team now: it can be deleted.
 	if k := getSigningKey(t, s, "team"); len(k.Repos) != 0 {

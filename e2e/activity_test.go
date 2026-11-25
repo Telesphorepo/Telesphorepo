@@ -143,13 +143,6 @@ func TestDownloadStats(t *testing.T) {
 		t.Fatalf("after the delete of %s: %+v", priv, st)
 	}
 
-	// activity.read only, with a UI session.
-	if code, b := s.API(t, http.MethodGet, "/api/stats", nil, s.SignIn(t, w, pw)); code != http.StatusForbidden {
-		t.Fatalf("GET /api/stats without activity.read: status %d, want 403: %s", code, b)
-	}
-	if code, b := s.API(t, http.MethodGet, "/api/stats", nil, s.AdminBasic()); code != http.StatusUnauthorized {
-		t.Fatalf("GET /api/stats without a UI session: status %d, want 401: %s", code, b)
-	}
 }
 
 type timedAudit struct {
@@ -271,7 +264,7 @@ func TestAuditFilters(t *testing.T) {
 	check("since="+since+"&actor="+p1+"&repo="+r2+"&action=file.upload", p1+" "+r2)
 	check("until="+since+"&actor="+p1+"&repo="+r2, p1+" "+r2)
 	check("since="+since+"&repo="+r1+"&action=file.upload", p1+" "+r1)
-	check("since="+since+"&until="+since)
+	check("since=" + since + "&until=" + since)
 	future := url.QueryEscape(time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 	check("since=" + future)
 	if got := auditPages(t, s, "until="+future); len(got) == 0 {
@@ -300,7 +293,5 @@ func TestAuditFilters(t *testing.T) {
 	if !found {
 		t.Fatalf("GET /api/audit/people?q=%s: %+v, want %s", p1[:5], people.Items, p1)
 	}
-	if code, b := s.API(t, http.MethodGet, "/api/audit/people", nil, s.SignIn(t, p2, pw)); code != http.StatusForbidden {
-		t.Fatalf("GET /api/audit/people without activity.read: status %d, want 403: %s", code, b)
-	}
+
 }

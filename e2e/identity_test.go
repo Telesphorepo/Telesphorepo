@@ -44,8 +44,7 @@ func pngOf(t *testing.T, w, h int) []byte {
 
 // TestIdentity: the identity is public and starts at its default; an admin sets the name through
 // the settings, uploads a PNG that everyone fetches with its type and ETag, and removes it again.
-// The server refuses an SVG, an oversize file and an image too large on its long side, and a
-// person without settings.general cannot change the logo.
+// The server refuses an SVG, an oversize file and an image too large on its long side.
 func TestIdentity(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -111,7 +110,7 @@ func TestIdentity(t *testing.T) {
 	}
 
 	// Refusals: an SVG (the type comes from the bytes, whatever the request says), a file far over
-	// the limit, an image too large on its long side, a person without settings.general.
+	// the limit, an image too large on its long side.
 	svg := `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`
 	req = s.NewRequest(t, http.MethodPut, "/api/identity/logo", strings.NewReader(svg))
 	req.Header.Set("Content-Type", "image/png")
@@ -126,14 +125,6 @@ func TestIdentity(t *testing.T) {
 	}
 	if st, b := s.API(t, http.MethodPut, "/api/identity/logo", pngOf(t, 4096, 1), s.Admin()); st != http.StatusBadRequest {
 		t.Errorf("PUT of a 4096 × 1 PNG: status %d, want 400: %s", st, b)
-	}
-	s.CreateUser(t, "plain", "plainpass123")
-	plain := s.SignIn(t, "plain", "plainpass123")
-	if st, b := s.API(t, http.MethodPut, "/api/identity/logo", pngOf(t, 8, 8), plain); st != http.StatusForbidden {
-		t.Errorf("PUT by a person without settings.general: status %d, want 403: %s", st, b)
-	}
-	if st, b := s.API(t, http.MethodDelete, "/api/identity/logo", nil, plain); st != http.StatusForbidden {
-		t.Errorf("DELETE by a person without settings.general: status %d, want 403: %s", st, b)
 	}
 	if id := getIdentity(t, s); id.Logo == nil || *id.Logo != *up.Logo {
 		t.Fatalf("identity after the refusals: %+v, want the logo %s still", id, *up.Logo)

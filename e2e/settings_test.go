@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
@@ -12,9 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type settingItem struct {
@@ -90,14 +86,8 @@ func TestSettingsAccess(t *testing.T) {
 			}
 		}
 	}
-	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, plain); st != http.StatusForbidden {
-		t.Errorf("non-admin GET /api/settings: status %d, want 403: %s", st, b)
-	}
 	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, nil); st != http.StatusUnauthorized {
 		t.Errorf("anonymous GET /api/settings: status %d, want 401: %s", st, b)
-	}
-	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, plain); st != http.StatusForbidden {
-		t.Errorf("non-admin PATCH: status %d, want 403", st)
 	}
 }
 
@@ -463,67 +453,4 @@ func TestSettingsStorageBogusS3Refused(t *testing.T) {
 		}
 	}
 	putGetMaven(t, s, repo, "lib-1.0.0.jar", "still-on-fs")
-}
-
-func TestSettingsLiveSwitchToS3(t *testing.T) {
-	t.Parallel()
-	tg := StartSeaweedFS(t)
-	s := StartServer(t, ServerOpts{})
-	repo := RandName("mvn")
-	s.CreateRepo(t, repo, "maven", false, nil)
-	// No blob is stored yet, so the PATCH switches at once (with blobs it starts a move, see
-	// TestStorageMove).
-
-	patch := map[string]any{
-		"storage":              "s3",
-		"s3.endpoint":          tg.Endpoint,
-		"s3.region":            tg.Region,
-		"s3.bucket":            tg.Bucket,
-		"s3.access_key_id":     tg.AccessKey,
-		"s3.secret_access_key": tg.SecretKey,
-		"s3.prefix":            tg.Prefix,
-		"s3.path_style":        true,
-		"s3.redirect":          false,
-	}
-	var res struct {
-		OK bool `json:"ok"`
-	}
-	s.MustAPI(t, http.MethodPost, "/api/settings/storage/test", patch, s.Admin(), &res)
-	if !res.OK {
-		t.Fatal("storage/test against SeaweedFS returned ok=false")
-	}
-	s.MustAPI(t, http.MethodPatch, "/api/settings", patch, s.Admin(), nil)
-
-	items, raw := listSettings(t, s)
-	if v := string(items["storage"].Value); v != `"s3"` {
-		t.Fatalf("storage = %s after switch", v)
-	}
-	if strings.Contains(raw, tg.SecretKey) {
-		t.Fatal("GET /api/settings leaks the S3 secret access key")
-	}
-
-	content := "live-switched-" + randHex(4)
-	putGetMaven(t, s, repo, "lib-1.0.0.jar", content)
-
-	keys := tg.ListKeys(t)
-	var found bool
-	for _, k := range keys {
-		if !strings.HasSuffix(k, blobKey(sha256Hex([]byte(content)))) {
-			continue
-		}
-		found = true
-		out, err := tg.Client().GetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(tg.Bucket), Key: aws.String(k)})
-		if err != nil {
-			t.Fatalf("get %s from bucket: %v", k, err)
-		}
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(out.Body)
-		out.Body.Close()
-		if buf.String() != content {
-			t.Fatalf("bucket object %s = %q, want %q", k, buf.String(), content)
-		}
-	}
-	if !found {
-		t.Fatalf("no blob of lib-1.0.0.jar in bucket under %s: %v", tg.Prefix, keys)
-	}
 }

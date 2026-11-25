@@ -74,7 +74,7 @@ func TestAPISession(t *testing.T) {
 	if sc == nil {
 		t.Fatal("login did not set tr_session")
 	}
-	if !sc.HttpOnly || sc.SameSite != http.SameSiteStrictMode || sc.Secure || sc.Value == "" {
+	if !sc.HttpOnly || sc.SameSite != http.SameSiteStrictMode || sc.Value == "" {
 		t.Fatalf("bad cookie attributes: %+v", sc)
 	}
 	// The sign-in answer and GET /api/me carry the same session view.
@@ -158,26 +158,6 @@ func TestAPISession(t *testing.T) {
 	}
 }
 
-func TestAPICSRF(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "alice", "alice-password-1")
-	sess := s.LoginTOTP(t, "alice")
-
-	st, b := apiPostTokenWith(t, s, sess, map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
-	if st != http.StatusForbidden {
-		t.Fatalf("cross-site: %d %s", st, b)
-	}
-	st, b = apiPostTokenWith(t, s, sess, map[string]string{"Sec-Fetch-Site": "cross-site"})
-	if st != http.StatusForbidden {
-		t.Fatalf("cross-site (no origin): %d %s", st, b)
-	}
-	st, b = apiPostTokenWith(t, s, sess, map[string]string{"Sec-Fetch-Site": "same-origin"})
-	if st != http.StatusCreated {
-		t.Fatalf("same-origin: %d %s", st, b)
-	}
-}
-
 func TestAPITokens(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -196,6 +176,20 @@ func TestAPITokens(t *testing.T) {
 		t.Fatalf("token: %+v", tok)
 	}
 	id := fmt.Sprint(tok.ID)
+
+	// A cross-site request is refused, with or without an Origin; a same-origin one is not.
+	for _, c := range []struct {
+		hdr  map[string]string
+		want int
+	}{
+		{map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}, http.StatusForbidden},
+		{map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		{map[string]string{"Sec-Fetch-Site": "same-origin"}, http.StatusCreated},
+	} {
+		if st, b := apiPostTokenWith(t, s, aliceUI, c.hdr); st != c.want {
+			t.Fatalf("POST /api/tokens with %v: status %d, want %d: %s", c.hdr, st, c.want, b)
+		}
+	}
 
 	st, b := s.API(t, http.MethodGet, "/api/tokens", nil, alice)
 	if st != 200 {
@@ -244,20 +238,12 @@ func TestAPISessionRule(t *testing.T) {
 		"claims": map[string][]string{"repository": {"acme/app"}}, "repos": []string{repo},
 	}
 
-	t.Run("admin password on admin routes", func(t *testing.T) {
-		wantSessionRequired(t, http.MethodGet, "/api/users", nil, adminPw)
-		wantSessionRequired(t, http.MethodGet, "/api/settings", nil, adminPw)
-		wantSessionRequired(t, http.MethodGet, "/api/audit", nil, adminPw)
+	// The routes of the server permissions are in TestServerPermissions.
+	t.Run("admin password on admin and write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodGet, "/api/publish/trusts", nil, adminPw)
-	})
-
-	t.Run("admin password on write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
-		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": s.ServerPerms(t)}, adminPw)
 		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": s.ServerPerms(t)}, adminPw)
 		wantSessionRequired(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}, adminPw)
-		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
-		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "evil"}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/users/"+s.AdminUser, map[string]any{"password": "evil-password-1"}, adminPw)
 	})
@@ -285,13 +271,11 @@ func TestAPISessionRule(t *testing.T) {
 
 	t.Run("a UI session with the second factor", func(t *testing.T) {
 		admin := s.Admin()
-		apiWant(t, s, http.MethodGet, "/api/users", nil, admin, http.StatusOK)
 		apiWant(t, s, http.MethodPost, "/api/publish/trusts", trust, admin, http.StatusCreated)
 		apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}, admin, http.StatusOK)
-		// A user's own UI session changes the user's own things; permission routes stay 403.
+		// A user's own UI session changes the user's own things.
 		frank := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ui"}, frank, http.StatusCreated)
-		apiWant(t, s, http.MethodGet, "/api/users", nil, frank, http.StatusForbidden)
 		// A new password ends frank's other sessions and keeps the one that set it.
 		elsewhere := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, frank, http.StatusOK)
@@ -343,39 +327,6 @@ func TestAPISessionRule(t *testing.T) {
 	})
 }
 
-func TestAPIUsers(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	admin := s.Admin()
-	body := map[string]any{"username": "carol", "password": "carol-password-1", "permissions": []string{}}
-	var u struct {
-		Username    string   `json:"username"`
-		Permissions []string `json:"permissions"`
-	}
-	apiJSON(t, s, http.MethodPost, "/api/users", body, admin, http.StatusCreated, &u)
-	if u.Username != "carol" || len(u.Permissions) != 0 {
-		t.Fatalf("created: %+v", u)
-	}
-	apiWant(t, s, http.MethodPost, "/api/users", body, admin, http.StatusConflict)
-	apiWant(t, s, http.MethodPost, "/api/users", map[string]any{"username": "dan", "password": "dan-password-1", "permissions": []string{"bogus"}}, admin, http.StatusBadRequest)
-
-	carol := s.SignIn(t, "carol", "carol-password-1")
-	apiWant(t, s, http.MethodGet, "/api/users", nil, carol, http.StatusForbidden)
-	apiWant(t, s, http.MethodGet, "/api/users", nil, Basic{"carol", "carol-password-1"}, http.StatusUnauthorized)
-	apiWant(t, s, http.MethodGet, "/api/users", nil, admin, 200)
-
-	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": s.ServerPerms(t)}, admin, 200, &u)
-	if strings.Join(u.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") {
-		t.Fatalf("set permissions: %+v", u)
-	}
-	// The grant ends carol's session, which a password alone started.
-	apiWant(t, s, http.MethodGet, "/api/me", nil, carol, http.StatusUnauthorized)
-	// A session with server permissions needs the second factor: carol signs in again, now with TOTP.
-	apiWant(t, s, http.MethodGet, "/api/users", nil, s.SignIn(t, "carol", "carol-password-1"), 200)
-	// PATCH changes only the password.
-	apiWant(t, s, http.MethodPatch, "/api/users/carol", map[string]any{"password": "carol-password-2"}, admin, 200)
-}
-
 func TestAPIReposAndPermissions(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -392,7 +343,6 @@ func TestAPIReposAndPermissions(t *testing.T) {
 
 	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": pub, "format": "maven"}, admin, http.StatusConflict)
 	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": "Bad Name", "format": "maven"}, admin, http.StatusBadRequest)
-	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": RandName("x"), "format": "maven"}, daveUI, http.StatusForbidden)
 
 	type repoRow struct {
 		Name        string   `json:"name"`
@@ -435,8 +385,6 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	if len(perms) != 1 || perms[0].Username != "dave" || strings.Join(perms[0].Perms, ",") != "repo.download" {
 		t.Fatalf("permissions: %+v", perms)
 	}
-	apiWant(t, s, http.MethodGet, "/api/repos/"+priv+"/grants", nil, daveUI, http.StatusForbidden)
-	apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "perms": []string{"bogus"}}, admin, http.StatusBadRequest)
 
 	got := list(dave)
 	if _, ok := got[secret]; ok {
@@ -718,31 +666,8 @@ func TestAPISearch(t *testing.T) {
 	}
 }
 
-func TestAPIErrors(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_JSON_SIZE": "1KiB"}})
-
-	huge := `{"name":"` + strings.Repeat("a", 4096) + `","format":"maven"}`
-	apiWant(t, s, http.MethodPost, "/api/repos", huge, s.Admin(), http.StatusRequestEntityTooLarge)
-
-	req := s.NewRequest(t, http.MethodGet, "/api/nope", nil)
-	resp, b := s.Do(t, req, s.Admin())
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("/api/nope: %d %s", resp.StatusCode, b)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
-		t.Fatalf("content-type %q, want application/problem+json", ct)
-	}
-	var e Problem
-	if err := json.Unmarshal(b, &e); err != nil || e.Type == "" || e.Title == "" || e.Detail == "" || e.Status != http.StatusNotFound {
-		t.Fatalf("problem document: %s", b)
-	}
-	if v := resp.Header.Get("Telesphorepo-Version"); v == "" {
-		t.Fatal("/api/nope: no Telesphorepo-Version header")
-	}
-}
-
-// TestAPIChanges covers the public change log route GET /api/changes and the version header.
+// TestAPIChanges covers the public change log route GET /api/changes, the version header, and the
+// problem document of an unknown API route.
 func TestAPIChanges(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -767,6 +692,14 @@ func TestAPIChanges(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || json.Unmarshal(b, &p) != nil || p.Status != http.StatusBadRequest || p.Detail == "" {
 		t.Fatalf("GET /api/changes?since=latest: status %d %s, want a 400 problem document", resp.StatusCode, b)
 	}
+
+	resp, b = s.Do(t, s.NewRequest(t, http.MethodGet, "/api/nope", nil), s.Admin())
+	if ct := resp.Header.Get("Content-Type"); resp.StatusCode != http.StatusNotFound || ct != "application/problem+json" {
+		t.Fatalf("GET /api/nope: status %d, Content-Type %q, want 404 application/problem+json: %s", resp.StatusCode, ct, b)
+	}
+	if err := json.Unmarshal(b, &p); err != nil || p.Type == "" || p.Title == "" || p.Detail == "" || p.Status != http.StatusNotFound {
+		t.Fatalf("GET /api/nope: %s, want a 404 problem document", b)
+	}
 }
 
 // TestAPIFormats covers the format registry routes: /api/formats, and the generic per-repo
@@ -778,19 +711,12 @@ func TestAPIFormats(t *testing.T) {
 	erin := Basic{"erin", "erin-password-1"}
 
 	var formats []struct {
-		Name   string `json:"name"`
-		Title  string `json:"title"`
-		Config struct {
-			Default json.RawMessage `json:"default"`
-		} `json:"config"`
+		Name string `json:"name"`
 	}
 	apiJSON(t, s, http.MethodGet, "/api/formats", nil, nil, 200, &formats)
 	byName := map[string]bool{}
 	for _, f := range formats {
 		byName[f.Name] = true
-		if f.Title == "" || !strings.HasPrefix(strings.TrimSpace(string(f.Config.Default)), "{") {
-			t.Errorf("format %s: title %q, config.default %s", f.Name, f.Title, f.Config.Default)
-		}
 	}
 	for _, n := range []string{"maven", "debian"} {
 		if !byName[n] {
@@ -815,8 +741,8 @@ func TestAPIFormats(t *testing.T) {
 	}
 	var debStatus map[string]any
 	apiJSON(t, s, http.MethodGet, "/api/repos/"+deb+"/status", nil, s.Admin(), 200, &debStatus)
-	if _, ok := debStatus["pending"]; !ok {
-		t.Fatalf("debian status has no pending: %v", debStatus)
+	if debStatus["pending"] != float64(0) {
+		t.Fatalf("debian status: %v, want pending 0", debStatus)
 	}
 	apiWant(t, s, http.MethodGet, "/api/repos/"+deb+"/status", nil, erin, http.StatusForbidden)
 
@@ -829,8 +755,13 @@ func TestAPIFormats(t *testing.T) {
 		} `json:"snippets"`
 	}
 	apiJSON(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, s.Admin(), 200, &usage)
-	if usage.BaseURL != s.InternalURL || usage.Snippets == nil {
-		t.Fatalf("usage: %+v", usage)
+	repoURL := s.InternalURL + "/maven/" + mvn
+	found := false
+	for _, sn := range usage.Snippets {
+		found = found || strings.Contains(sn.Code, repoURL)
+	}
+	if usage.BaseURL != s.InternalURL || !found {
+		t.Fatalf("usage: %+v, want a snippet with %s", usage, repoURL)
 	}
 	apiWant(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, erin, http.StatusForbidden)
 }

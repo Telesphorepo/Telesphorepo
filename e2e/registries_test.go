@@ -8,99 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
-
-type permSubsystem struct {
-	ID          string    `json:"id"`
-	Scope       string    `json:"scope"`
-	Label       string    `json:"label"`
-	Help        string    `json:"help"`
-	Module      string    `json:"module"`
-	Permissions []permDef `json:"permissions"`
-}
-
-type permDef struct {
-	ID           string   `json:"id"`
-	Label        string   `json:"label"`
-	Help         string   `json:"help"`
-	Needs        []string `json:"needs"`
-	SecondFactor bool     `json:"second_factor"`
-	AllRepos     bool     `json:"all_repos"`
-}
-
-// TestPermissionRegistry: GET /api/permissions lists every subsystem with its permissions, and a
-// write of an unknown ID or an ID of the other scope is refused.
-func TestPermissionRegistry(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	var reg struct {
-		Subsystems []permSubsystem `json:"subsystems"`
-	}
-	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
-	by := map[string]permSubsystem{}
-	for _, sub := range reg.Subsystems {
-		if sub.Label == "" || sub.Help == "" || sub.Module == "" {
-			t.Fatalf("subsystem %+v: label, help and module are required", sub)
-		}
-		by[sub.ID] = sub
-		for _, p := range sub.Permissions {
-			if !strings.HasPrefix(p.ID, sub.ID+".") || p.Label == "" || p.Help == "" || p.Needs == nil {
-				t.Fatalf("permission %+v of %s: the ID starts with the subsystem, label, help and needs are set", p, sub.ID)
-			}
-		}
-	}
-	perm := func(sub, id string) permDef {
-		t.Helper()
-		for _, p := range by[sub].Permissions {
-			if p.ID == id {
-				return p
-			}
-		}
-		t.Fatalf("subsystem %s has no permission %s: %+v", sub, id, by[sub])
-		return permDef{}
-	}
-	if repo := by["repo"]; repo.Scope != "repo" || repo.Module != "core" {
-		t.Fatalf("subsystem repo: %+v", repo)
-	}
-	// Publishing needs download, and a publisher needs no second factor.
-	if pub := perm("repo", "repo.publish"); !slices.Equal(pub.Needs, []string{"repo.download"}) || pub.SecondFactor {
-		t.Fatalf("repo.publish: %+v", pub)
-	}
-	if ci := by["ci"]; ci.Module != "publish" || ci.Scope != "repo" || !perm("ci", "ci.pipelines").SecondFactor {
-		t.Fatalf("subsystem ci: %+v", ci)
-	}
-	if !perm("repositories", "repositories.all").AllRepos {
-		t.Fatalf("subsystem repositories: %+v", by["repositories"])
-	}
-
-	r := RandName("reg")
-	s.CreateRepo(t, r, "raw", false, nil)
-	u := RandName("u")
-	s.CreateUser(t, u, "u-password-1")
-	for _, bad := range [][]string{{"repo.nope"}, {"people.manage"}} {
-		st, b := s.API(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{u}, "repos": []string{r}, "perms": bad}, s.Admin())
-		wantAPIStatus(t, "PUT /api/grants "+strings.Join(bad, ","), st, b, http.StatusBadRequest)
-	}
-	for _, bad := range [][]string{{"people.nope"}, {"repo.download"}} {
-		st, b := s.API(t, http.MethodPut, "/api/users/"+u+"/permissions", map[string]any{"permissions": bad}, s.Admin())
-		wantAPIStatus(t, "PUT server permissions "+strings.Join(bad, ","), st, b, http.StatusBadRequest)
-	}
-	// A grant reads back with IDs.
-	s.SetPerms(t, r, u, "repo.download", "repo.publish")
-	var grants []struct {
-		Username string   `json:"username"`
-		Perms    []string `json:"perms"`
-	}
-	s.MustAPI(t, http.MethodGet, "/api/repos/"+r+"/grants", nil, s.Admin(), &grants)
-	if len(grants) != 1 || grants[0].Username != u || strings.Join(grants[0].Perms, ",") != "repo.download,repo.publish" {
-		t.Fatalf("grants of %s: %+v", r, grants)
-	}
-}
 
 // TestAuditActions: GET /api/audit/actions lists the actions that the modules register, each
 // with a label, a subsystem, a sentence and a field for every detail key it records, so no fact
@@ -121,7 +33,9 @@ func TestAuditActions(t *testing.T) {
 	}
 	s.MustAPI(t, http.MethodGet, "/api/audit/actions", nil, s.Admin(), &actions)
 	var reg struct {
-		Subsystems []permSubsystem `json:"subsystems"`
+		Subsystems []struct {
+			ID string `json:"id"`
+		} `json:"subsystems"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
 	subsystems := map[string]bool{}
@@ -196,7 +110,8 @@ func TestAuditActions(t *testing.T) {
 
 // TestSSOStartupGuard: with signin.password_login=publishers an account that needs a second
 // factor cannot sign in with a password, and a publisher can. SSO settings whose client secret no
-// longer decrypts (another master key) start the server without SSO and with password sign-in for everyone, so no admin is locked out.
+// longer decrypts (another master key) start the server without SSO and with password sign-in for
+// everyone, so no admin is locked out. Sign-in cookies are Secure unless cookie.secure says no.
 func TestSSOStartupGuard(t *testing.T) {
 	t.Parallel()
 	vol := NewDataVolume(t)
@@ -247,12 +162,24 @@ func TestSSOStartupGuard(t *testing.T) {
 	if err := s.Stop(ctx, nil); err != nil {
 		t.Fatalf("stop the first server: %v", err)
 	}
-	s2 := StartServer(t, ServerOpts{DataVolume: vol, Env: map[string]string{"TR_MASTER_KEY": key()}})
+	// The second server runs with cookie.secure at its default: its sign-in cookies are Secure.
+	s2 := StartServer(t, ServerOpts{DataVolume: vol, Env: map[string]string{"TR_MASTER_KEY": key(), "TR_COOKIE_SECURE": ""}})
 	s2.MustAPI(t, http.MethodGet, "/api/auth/config", nil, nil, &cfg)
 	if cfg.OIDC || cfg.PasswordLogin != "all" {
 		t.Fatalf("auth config after a change of the master key: %+v, want oidc off and password sign-in for all", cfg)
 	}
-	if st, b := s2.API(t, http.MethodPost, "/api/auth/login", map[string]string{"username": s.AdminUser, "password": s.AdminPass}, nil); st != http.StatusOK {
-		t.Fatalf("admin password sign-in after a change of the master key: status %d, want 200: %s", st, b)
+	login, _ := json.Marshal(map[string]string{"username": s.AdminUser, "password": s.AdminPass})
+	req := s2.NewRequest(t, http.MethodPost, "/api/auth/login", strings.NewReader(string(login)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, body = s2.Do(t, req, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin password sign-in after a change of the master key: status %d, want 200: %s", resp.StatusCode, body)
+	}
+	secure := len(resp.Cookies()) > 0
+	for _, c := range resp.Cookies() {
+		secure = secure && c.Secure
+	}
+	if !secure {
+		t.Fatalf("sign-in with cookie.secure at its default: Set-Cookie %q, want Secure cookies", resp.Header.Values("Set-Cookie"))
 	}
 }

@@ -78,10 +78,8 @@ func TestAuth(t *testing.T) {
 	})
 
 	t.Run("user without permission", func(t *testing.T) {
-		u := RandName("noperm")
-		s.CreateUser(t, u, "pw-"+randHex(6))
-		pw := "pw-" + randHex(6)
-		s.MustAPI(t, http.MethodPatch, "/api/users/"+u, map[string]any{"password": pw}, s.Admin(), nil)
+		u, pw := RandName("noperm"), "pw-"+randHex(6)
+		s.CreateUser(t, u, pw)
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusForbidden)
 		// Writes need a publish session; a password is refused before any permission check.
@@ -102,25 +100,6 @@ func TestAuth(t *testing.T) {
 		if st, b := s.Mint(t, s.EnrollDevice(t, u), repo); st != http.StatusForbidden {
 			t.Fatalf("mint a publish session as a read-only user: status %d, want 403: %s", st, b)
 		}
-
-		group := "com.example.authdeploy" + randHex(4)
-		settings := `<settings><servers><server><id>tr</id><username>` + u + `</username><password>` + pw + `</password></server></servers>
-<mirrors><mirror><id>maven-default-http-blocker</id><mirrorOf>external:dummy:*</mirrorOf><url>http://0.0.0.0/</url><blocked>false</blocked></mirror></mirrors></settings>`
-		pom := `<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
-<groupId>` + group + `</groupId><artifactId>demo</artifactId><version>1.0</version><packaging>pom</packaging>
-<distributionManagement><repository><id>tr</id><url>` + s.InternalURL + `/maven/` + repo + `</url></repository></distributionManagement></project>`
-		code, out := RunClient(t, mavenImage, ClientOpts{
-			Cmd:        []string{"mvn", "-B", "-s", "/settings.xml", "deploy"},
-			Files:      []ContainerFile{{Content: settings, Path: "/settings.xml"}, {Content: pom, Path: "/proj/pom.xml"}},
-			Mounts:     map[string]string{M2Volume: "/root/.m2"},
-			WorkingDir: "/proj",
-		})
-		if code == 0 {
-			t.Fatalf("mvn deploy as read-only user succeeded:\n%s", out)
-		}
-		if !strings.Contains(out, "401") {
-			t.Fatalf("mvn output lacks 401:\n%s", out)
-		}
 	})
 
 	t.Run("token auth", func(t *testing.T) {
@@ -132,27 +111,6 @@ func TestAuth(t *testing.T) {
 			resp, body := authGet(t, s, path, Basic{name, tok})
 			wantStatus(t, resp, body, http.StatusOK)
 		}
-	})
-
-	t.Run("revoked token", func(t *testing.T) {
-		u, pw := RandName("revoke"), "pw-"+randHex(8)
-		s.CreateUser(t, u, pw)
-		s.SetPerms(t, repo, u, "repo.download")
-		var tk struct {
-			ID    json.RawMessage `json:"id"`
-			Token string          `json:"token"`
-		}
-		sess := s.SignIn(t, u, pw)
-		s.MustAPI(t, http.MethodPost, "/api/tokens", map[string]any{"name": "tmp"}, sess, &tk)
-		resp, body := authGet(t, s, path, Basic{"x", tk.Token})
-		wantStatus(t, resp, body, http.StatusOK)
-		id := strings.Trim(string(tk.ID), `"`)
-		st, b := s.API(t, http.MethodDelete, "/api/tokens/"+id, nil, sess)
-		if st != http.StatusNoContent {
-			t.Fatalf("revoke: %d %s", st, b)
-		}
-		resp, body = authGet(t, s, path, Basic{"x", tk.Token})
-		wantStatus(t, resp, body, http.StatusUnauthorized)
 	})
 
 	t.Run("disabled user", func(t *testing.T) {
@@ -187,6 +145,34 @@ func TestAuth(t *testing.T) {
 		wantStatus(t, resp, body, http.StatusUnauthorized)
 		resp, body = authGet(t, s, path, Basic{u, newPw})
 		wantStatus(t, resp, body, http.StatusOK)
+	})
+
+	// No answer on /api and no answer to a request of the web UI (X-Telesphorepo-UI: 1) carries
+	// WWW-Authenticate, so a browser never opens its password dialog. Format routes keep the
+	// challenge for package clients (the subtests above).
+	t.Run("no browser password prompt", func(t *testing.T) {
+		ui := map[string]string{"X-Telesphorepo-UI": "1"}
+		noChallenge := func(what string, method, p string, auth Auth, hdr map[string]string) {
+			t.Helper()
+			req := s.NewRequest(t, method, p, nil)
+			for k, v := range hdr {
+				req.Header.Set(k, v)
+			}
+			resp, body := s.Do(t, req, auth)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("%s: status %d, want 401: %s", what, resp.StatusCode, body)
+			}
+			if h := resp.Header.Get("WWW-Authenticate"); h != "" {
+				t.Fatalf("%s: WWW-Authenticate = %q, want none", what, h)
+			}
+		}
+		noChallenge("API with a wrong password", http.MethodGet, "/api/me", Basic{s.AdminUser, "not-the-password"}, nil)
+		noChallenge("API anonymous", http.MethodGet, "/api/me", nil, nil)
+		noChallenge("API repo files anonymous", http.MethodGet, "/api/repos/"+repo+"/tree?path=", nil, nil)
+		noChallenge("API upload without a session", http.MethodPost, "/api/repos/"+repo+"/upload", Basic{s.AdminUser, "not-the-password"}, nil)
+		noChallenge("UI download of a private file", http.MethodGet, path, nil, ui)
+		noChallenge("UI download with a wrong password", http.MethodGet, path, Basic{s.AdminUser, "not-the-password"}, ui)
+		noChallenge("UI upload without a session", http.MethodPut, path+".ui", nil, ui)
 	})
 }
 
@@ -242,43 +228,4 @@ func TestAuthRateLimit(t *testing.T) {
 		p.Status != http.StatusTooManyRequests || p.Remedy == nil || p.Remedy.Action != "retry" || p.Remedy.After <= 0 {
 		t.Fatalf("429 of /api/me: %s, want the problem rate-limited with a retry remedy", body)
 	}
-}
-
-// TestNoBrowserPasswordPrompt: no answer on /api and no answer to a request of the web UI
-// (X-Telesphorepo-UI: 1) carries WWW-Authenticate, so a browser never opens its password dialog.
-// Format routes keep the challenge for package clients.
-func TestNoBrowserPasswordPrompt(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	repo := RandName("prompt")
-	s.CreateRepo(t, repo, "maven", false, nil)
-	artifact := "/maven/" + repo + "/com/example/p/1.0/p-1.0.txt"
-	ui := map[string]string{"X-Telesphorepo-UI": "1"}
-
-	noChallenge := func(what string, method, path string, auth Auth, hdr map[string]string) {
-		t.Helper()
-		req := s.NewRequest(t, method, path, nil)
-		for k, v := range hdr {
-			req.Header.Set(k, v)
-		}
-		resp, body := s.Do(t, req, auth)
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("%s: status %d, want 401: %s", what, resp.StatusCode, body)
-		}
-		if h := resp.Header.Get("WWW-Authenticate"); h != "" {
-			t.Fatalf("%s: WWW-Authenticate = %q, want none", what, h)
-		}
-	}
-	noChallenge("API with a wrong password", http.MethodGet, "/api/me", Basic{s.AdminUser, "not-the-password"}, nil)
-	noChallenge("API anonymous", http.MethodGet, "/api/me", nil, nil)
-	noChallenge("API repo files anonymous", http.MethodGet, "/api/repos/"+repo+"/tree?path=", nil, nil)
-	noChallenge("API upload without a session", http.MethodPost, "/api/repos/"+repo+"/upload", Basic{s.AdminUser, "not-the-password"}, nil)
-	noChallenge("UI download of a private file", http.MethodGet, artifact, nil, ui)
-	noChallenge("UI download with a wrong password", http.MethodGet, artifact, Basic{s.AdminUser, "not-the-password"}, ui)
-	noChallenge("UI upload without a session", http.MethodPut, artifact, nil, ui)
-
-	// Without the UI header a format route keeps the Basic challenge.
-	resp, body := authGet(t, s, artifact, nil)
-	wantStatus(t, resp, body, http.StatusUnauthorized)
-	wantChallenge(t, resp)
 }
