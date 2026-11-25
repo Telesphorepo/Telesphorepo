@@ -276,3 +276,6 @@ func TestRPMSigning(t *testing.T) {
 		archWant(t, "dnf install on Rocky 8", out, "anchor 1.0.0\n")
 	})
 }
+
+// The dnf client: Fedora (dnf5, rpm with Sequoia).
+var fedoraImage = floatingAmd64Image("registry.fedoraproject.org/fedora:latest")

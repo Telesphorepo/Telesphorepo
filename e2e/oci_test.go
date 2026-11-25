@@ -21,11 +21,6 @@ import (
 // OCI images that the registry tests of several zones share: real tar layers, OCI image layouts
 // for skopeo, and a push over the registry API to any registry.
 
-var (
-	craneImage  = floatingImage("gcr.io/go-containerregistry/crane:debug") // debug: the newest release with a shell
-	skopeoImage = floatingImage("quay.io/skopeo/stable:latest")
-)
-
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

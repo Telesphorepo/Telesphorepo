@@ -2161,7 +2161,7 @@ changed master key) are dropped, and the server logs the repo ids.
   remote request and the waiting requests get the same answer; a new request for an uncached file
   asks again. A fetch continues when the client goes away, for at most 30 minutes.
 - The fetch follows at most 5 redirects. Credentials go only to the remote's host: a redirect to
-  another host drops them, and a fetch from a `Files` base on another scheme or host sends none.
+  another host or port drops them, and a fetch from a `Files` base on another scheme or host sends none.
   No log line holds the credentials.
 - A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
   Clients keep the remote archive's key, so its apt snippet has no key step and no `signed-by`.
@@ -3061,19 +3061,23 @@ the rest) in containers against the real server image, which `go tool task test`
 run (`E2E_IMAGE` names another and skips the build). The engine comes from
 `internal/containerengine`; `TR_ENGINE=docker|podman` forces one.
 
-- **One reference client per format.** mvn and Gradle, npm and Bun, pip with twine and build,
-  docker and Helm, apt, pacman, dnf (Fedora, and Rocky 8 for EL8's RSA-only rpm), cargo, dotnet.
-  Other clients of the same protocol (pnpm, Yarn, uv, Poetry, ORAS, crane, skopeo as clients
-  under test, a second major of the same client) are not tested: they send the same requests,
-  and a change in one of them is that client's business. A behaviour that differs only because
-  the tests run on plain HTTP is not tested either: deployments run on HTTPS. A check that a
-  plain HTTP request can make uses one; a client container is for what only the client shows.
+- **A client runs only for what only it shows.** A check that a plain HTTP request can make uses
+  one; a client container is for a contract the client verifies and a server change could break:
+  apt, dnf and pacman checking the server's signatures and indexes, the manifest docker negotiates
+  and the index buildx writes, the request bodies of npm, twine, cargo and dotnet publishes, and
+  one resolver run through a group per format (mvn, Bun, pip, cargo, dotnet). An install that
+  only downloads what a test just published is not repeated, and neither the clients zone nor
+  the import zone installs what it published or imported: the core zone already serves those
+  bytes. Gradle runs only under the CLI (`TestCLIGradle`); the server has no Gradle-specific
+  code. Other clients of the same protocol (pnpm, Yarn, uv, Poetry, ORAS, crane, a second major
+  of the same client) are not tested. A behaviour that differs only because the tests run on
+  plain HTTP is not tested either: deployments run on HTTPS.
 
 - **Parallel.** Every test calls `t.Parallel()` and starts its own server, so a zone's tests run
   at once (as many as the host has CPUs).
 - **Stores.** A test whose subject is the store runs on `fs` and on SeaweedFS S3
-  (`ForEachStorage`, at the same time): each format's byte path, presigned redirects, deletes, the
-  blob GC and the CLI's uploads. Every other test runs once, on `fs` (`OnLocalDisk`). An import
+  (`ForEachStorage`, at the same time): each format's byte path, presigned redirects, the blob GC
+  and the CLI's uploads. A delete writes rows only, so delete tests run on `fs`. Every other test runs once, on `fs` (`OnLocalDisk`). An import
   writes through the same byte pipeline, so `TestNexus` imports the formats on `fs`, and its
   subtest `s3` imports one raw repo into a server on S3.
 - **Containers.** Start each container that publishes a port with `runContainer`: rootless Podman
@@ -3152,8 +3156,10 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
 the way the web UI does, with the password and a TOTP code (`s.Admin()`, `s.SignIn`);
 `s.AdminBasic()` is the admin password for format reads. The helpers are in `harness_test.go`.
 
-**Permission tests.** `access_test.go`, `permissions_test.go` (one subtest per server permission:
-the holder reaches its routes, anyone else gets 403) and `registries_test.go`.
+**Permission tests.** `permissions_test.go` is the one place for a route's 401 and 403: one
+subtest per server permission, where the holder reaches its routes, anyone else gets 403, and the
+admin's password gets 401 with the refusal code `session`. Other tests do not repeat those
+checks. `access_test.go` covers repo grants and the effective access report.
 
 **Publishing tests.** Every publish in the suite uses a publish session. `PublishToken` (at the end
 of `harness_test.go`) enrolls a device the real way (the test computes the TOTP codes), approves it

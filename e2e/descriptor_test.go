@@ -15,8 +15,8 @@ type descriptorJSON struct {
 	Name   string `json:"name"`
 	Config struct {
 		Fields []struct {
-			Key     string   `json:"key"`
-			Type    string   `json:"type"`
+			Key      string   `json:"key"`
+			Type     string   `json:"type"`
 			Options  []string `json:"options"`
 			ValueKey string   `json:"value_key"`
 		} `json:"fields"`

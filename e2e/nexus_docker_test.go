@@ -17,6 +17,9 @@ import (
 // HTTP connector, with the Docker Bearer Token Realm on and forceBasicAuth off, so every fetch of
 // the importer answers a Bearer challenge.
 
+// skopeoImage pushes the test images to Nexus.
+var skopeoImage = floatingImage("quay.io/skopeo/stable:latest")
+
 // nexusDockerPort is the HTTP connector port of the next Nexus docker repo; each repo needs its
 // own.
 var nexusDockerPort atomic.Int32

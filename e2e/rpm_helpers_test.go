@@ -25,9 +25,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// The dnf client of every zone: Fedora (dnf5, rpm with Sequoia).
-var fedoraImage = floatingAmd64Image("registry.fedoraproject.org/fedora:latest")
-
 // nfpmRPMScript builds the RPM test packages with nfpm into /out, as Anchor's release does:
 // e2e-anchor 1.0.0-1 and 1.1.0-1 for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1
 // for noarch.

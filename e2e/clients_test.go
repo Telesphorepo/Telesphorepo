@@ -29,11 +29,10 @@ import (
 
 // The tools float (see images_test.go).
 var (
-	mavenImage  = floatingImage("docker.io/library/maven:3")
-	gradleImage = floatingImage("docker.io/library/gradle:latest")
-	debImage    = floatingImage("docker.io/library/debian:stable")
-	curlImage   = floatingImage("docker.io/curlimages/curl:latest")
-	helmImage   = floatingImage("docker.io/alpine/helm:latest")
+	mavenImage = floatingImage("docker.io/library/maven:3")
+	debImage   = floatingImage("docker.io/library/debian:stable")
+	curlImage  = floatingImage("docker.io/curlimages/curl:latest")
+	helmImage  = floatingImage("docker.io/alpine/helm:latest")
 )
 
 // caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit, a

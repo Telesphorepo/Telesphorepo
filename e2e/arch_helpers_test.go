@@ -5,7 +5,6 @@ package e2e
 import (
 	"archive/tar"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,14 +17,7 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/klauspost/compress/zstd"
-	"github.com/testcontainers/testcontainers-go"
-	tcexec "github.com/testcontainers/testcontainers-go/exec"
-	"github.com/testcontainers/testcontainers-go/network"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
-
-// The Arch Linux client.
-var archImage = floatingAmd64Image("docker.io/library/archlinux:latest")
 
 // nfpmBuildScript builds the test packages with nfpm into /out: e2e-anchor 1.0.0-1 and 1.1.0-1
 // for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1 for any.
@@ -151,75 +143,6 @@ func (s *Server) ArchKey(t testing.TB, repo string, auth Auth) string {
 		t.Fatalf("GET /arch/%s/key.asc: status %d: %s", repo, resp.StatusCode, b)
 	}
 	return string(b)
-}
-
-// Pacman is a running Arch Linux container with an initialized keyring and a pacman.conf that
-// lists no repository, on TestNetwork. Each test adds its repositories.
-type Pacman struct{ c testcontainers.Container }
-
-// pacmanConf is the pacman.conf the container starts with: pacman's default levels, no
-// repository (the official ones need the internet).
-const pacmanConf = `[options]
-Architecture = auto
-SigLevel = Required DatabaseOptional
-LocalFileSigLevel = Optional
-`
-
-// StartPacman starts the Arch Linux container and initializes its keyring.
-func StartPacman(t testing.TB) *Pacman {
-	t.Helper()
-	c, err := testcontainers.Run(context.Background(), archImage,
-		e2eContainer,
-		testcontainers.WithEntrypoint("sleep", "infinity"),
-		runAmd64,
-		network.WithNetwork(nil, TestNetwork),
-		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),
-	)
-	registerCleanup(t, c, "pacman")
-	if err != nil {
-		t.Fatalf("start the Arch Linux container: %v", err)
-	}
-	p := &Pacman{c: c}
-	p.MustExec(t, "init the pacman keyring", "pacman-key --init >/dev/null 2>&1 && cat > /etc/pacman.conf <<'EOF'\n"+pacmanConf+"EOF\n")
-	return p
-}
-
-// Exec runs script with bash and returns the exit code and the combined output.
-func (p *Pacman) Exec(t testing.TB, script string) (int, string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	code, rd, err := p.c.Exec(ctx, []string{"bash", "-c", "exec 2>&1; " + script}, tcexec.Multiplexed())
-	if err != nil {
-		t.Fatalf("pacman container exec: %v", err)
-	}
-	out, _ := io.ReadAll(rd)
-	return code, string(out)
-}
-
-// MustExec is Exec that fails the test on a non-zero exit.
-func (p *Pacman) MustExec(t testing.TB, what, script string) string {
-	t.Helper()
-	code, out := p.Exec(t, script)
-	if code != 0 {
-		t.Fatalf("%s: exit %d:\n%s", what, code, out)
-	}
-	return out
-}
-
-// Trust adds the armored key to pacman's keyring and signs it locally, so pacman trusts what it
-// signs.
-func (p *Pacman) Trust(t testing.TB, key string) {
-	t.Helper()
-	f := "/tmp/key-" + randHex(4) + ".asc"
-	p.MustExec(t, "trust a key", fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF\npacman-key --add %s && pacman-key --lsign-key %s", f, key, f, archFingerprint(t, key)))
-}
-
-// AddRepo appends the section [section] with SigLevel Required and server, the Server line as
-// pacman reads it ($repo and $arch unexpanded).
-func (p *Pacman) AddRepo(t testing.TB, section, server string) {
-	t.Helper()
-	p.MustExec(t, "add a repository", fmt.Sprintf("cat >> /etc/pacman.conf <<'EOF'\n\n[%s]\nSigLevel = Required\nServer = %s\nEOF\n", section, server))
 }
 
 // archSum is the hex SHA-256 of b.

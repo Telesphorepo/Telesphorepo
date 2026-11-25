@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,10 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
+	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
+	"github.com/testcontainers/testcontainers-go/network"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // TestArch: pacman installs packages that nfpm built from a private Arch repo with every package
@@ -144,9 +150,9 @@ func TestArchRules(t *testing.T) {
 		}
 		for what, pkg := range map[string][]byte{
 			"a package of an architecture the repo does not list": goArchPkg(t, "e2e-riscv", "1.0-1", "riscv64", nil),
-			"a version without pkgrel":                             goArchPkg(t, "e2e-norel", "1.0", "any", nil),
-			"a file that is not a package":                         []byte("not a package"),
-			"a package that decompresses past its limit":           goArchPkg(t, "e2e-bomb", "1.0-1", "any", map[string]int64{"usr/share/zeros": 1<<30 + 1<<20}),
+			"a version without pkgrel":                            goArchPkg(t, "e2e-norel", "1.0", "any", nil),
+			"a file that is not a package":                        []byte("not a package"),
+			"a package that decompresses past its limit":          goArchPkg(t, "e2e-bomb", "1.0-1", "any", map[string]int64{"usr/share/zeros": 1<<30 + 1<<20}),
 		} {
 			if st, b := archUpload(t, s, repo, pkg, auth); st != http.StatusBadRequest {
 				t.Fatalf("upload %s: status %d, want 400: %s", what, st, b)
@@ -302,4 +308,76 @@ func rsaSigningKey(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+// The Arch Linux client.
+var archImage = floatingAmd64Image("docker.io/library/archlinux:latest")
+
+// Pacman is a running Arch Linux container with an initialized keyring and a pacman.conf that
+// lists no repository, on TestNetwork. Each test adds its repositories.
+type Pacman struct{ c testcontainers.Container }
+
+// pacmanConf is the pacman.conf the container starts with: pacman's default levels, no
+// repository (the official ones need the internet).
+const pacmanConf = `[options]
+Architecture = auto
+SigLevel = Required DatabaseOptional
+LocalFileSigLevel = Optional
+`
+
+// StartPacman starts the Arch Linux container and initializes its keyring.
+func StartPacman(t testing.TB) *Pacman {
+	t.Helper()
+	c, err := testcontainers.Run(context.Background(), archImage,
+		e2eContainer,
+		testcontainers.WithEntrypoint("sleep", "infinity"),
+		runAmd64,
+		network.WithNetwork(nil, TestNetwork),
+		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),
+	)
+	registerCleanup(t, c, "pacman")
+	if err != nil {
+		t.Fatalf("start the Arch Linux container: %v", err)
+	}
+	p := &Pacman{c: c}
+	p.MustExec(t, "init the pacman keyring", "pacman-key --init >/dev/null 2>&1 && cat > /etc/pacman.conf <<'EOF'\n"+pacmanConf+"EOF\n")
+	return p
+}
+
+// Exec runs script with bash and returns the exit code and the combined output.
+func (p *Pacman) Exec(t testing.TB, script string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	code, rd, err := p.c.Exec(ctx, []string{"bash", "-c", "exec 2>&1; " + script}, tcexec.Multiplexed())
+	if err != nil {
+		t.Fatalf("pacman container exec: %v", err)
+	}
+	out, _ := io.ReadAll(rd)
+	return code, string(out)
+}
+
+// MustExec is Exec that fails the test on a non-zero exit.
+func (p *Pacman) MustExec(t testing.TB, what, script string) string {
+	t.Helper()
+	code, out := p.Exec(t, script)
+	if code != 0 {
+		t.Fatalf("%s: exit %d:\n%s", what, code, out)
+	}
+	return out
+}
+
+// Trust adds the armored key to pacman's keyring and signs it locally, so pacman trusts what it
+// signs.
+func (p *Pacman) Trust(t testing.TB, key string) {
+	t.Helper()
+	f := "/tmp/key-" + randHex(4) + ".asc"
+	p.MustExec(t, "trust a key", fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF\npacman-key --add %s && pacman-key --lsign-key %s", f, key, f, archFingerprint(t, key)))
+}
+
+// AddRepo appends the section [section] with SigLevel Required and server, the Server line as
+// pacman reads it ($repo and $arch unexpanded).
+func (p *Pacman) AddRepo(t testing.TB, section, server string) {
+	t.Helper()
+	p.MustExec(t, "add a repository", fmt.Sprintf("cat >> /etc/pacman.conf <<'EOF'\n\n[%s]\nSigLevel = Required\nServer = %s\nEOF\n", section, server))
 }

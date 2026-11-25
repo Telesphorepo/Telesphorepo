@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var gradleImage = floatingImage("docker.io/library/gradle:latest")
+
 // mavenUserSettings is the ~/.m2/settings.xml of a person whose company mirrors Maven Central:
 // every request for Central goes to the mirror.
 func mavenUserSettings(mirrorURL string) ContainerFile {
