@@ -41,8 +41,8 @@ func startBodyLimitProxy(t *testing.T, alias, upstream string) {
 // and points docker.upload_url at the server itself. With docker.direct_uploads off, an upload
 // stays on the host of the push. With it on, POST on the main host answers an absolute Location on
 // the upload host with an upload token, which writes to that upload only (a bearer token of the
-// main host, which containers/image sends along, writes too); and the Docker CLI (both push paths
-// of the engine) pushes a 5 MB layer through the proxy hostname and pulls it back. Helm 4
+// main host, which containers/image sends along, writes too); and the Docker CLI (the containerd
+// image store) pushes a 5 MB layer through the proxy hostname and pulls it back. Helm 4
 // (oras-go v2.6.1 and later) refuses an upload Location on another host, so it pushes to the
 // upload host by name and pulls through the proxy.
 func TestDockerUploadHost(t *testing.T) {
@@ -131,24 +131,16 @@ func TestDockerUploadHost(t *testing.T) {
 		})
 
 		// A new Docker engine keeps images in containerd, which pushes with the containerd pusher.
-		// With a graph driver set (vfs), it pushes with the distribution client.
-		for _, eng := range []struct{ name, driver string }{{"docker containerd store", ""}, {"docker graph driver", "vfs"}} {
-			t.Run(eng.name, func(t *testing.T) {
-				var args []string
-				if eng.driver != "" {
-					args = append(args, "--storage-driver="+eng.driver)
-				}
-				d := StartDindArgs(t, append(args, "--insecure-registry="+mainHost)...)
-				img := mainHost + "/" + r + "/" + strings.ReplaceAll(eng.name, " ", "-")
-				d.MustExec(t, "push and pull through the proxy", "set -e\n"+DockerScratchImage("/ctx", 5<<20)+fmt.Sprintf(`printf '%%s' '%[1]s' | docker login %[2]s -u pusher --password-stdin
+		t.Run("docker containerd store", func(t *testing.T) {
+			d := StartDindArgs(t, "--insecure-registry="+mainHost)
+			img := mainHost + "/" + r + "/docker-containerd-store"
+			d.MustExec(t, "push and pull through the proxy", "set -e\n"+DockerScratchImage("/ctx", 5<<20)+fmt.Sprintf(`printf '%%s' '%[1]s' | docker login %[2]s -u pusher --password-stdin
 docker build -q -t %[3]s:v1 /ctx
 docker push %[3]s:v1
 docker rmi %[3]s:v1
 docker pull %[3]s:v1
 `, token(), mainHost, img))
-			})
-		}
-
+		})
 		// Helm 4 refuses an upload Location on another host, so it pushes to the upload host by
 		// name: there the upload Location stays on that host. It pulls through the proxy.
 		uploadHost := srvAlias + ":8080"

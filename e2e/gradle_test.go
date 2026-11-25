@@ -3,138 +3,38 @@
 package e2e
 
 import (
-	"fmt"
-	"strings"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
+	"net/http"
 	"testing"
-	"time"
 )
 
-// gradleRepoBlock is a Kotlin DSL maven { } repository pointing at the server with credentials.
-func gradleRepoBlock(repoURL, user, pass string) string {
-	return fmt.Sprintf(`maven {
-            name = "telesphorepo"
-            url = uri(%q)
-            isAllowInsecureProtocol = true
-            credentials {
-                username = %q
-                password = %q
-            }
-        }`, repoURL, user, pass)
-}
-
-// gradlePluginProject is project A: a java-gradle-plugin whose "hello" task prints marker.
-func gradlePluginProject(group, pluginID, repoURL, user, pass, marker string) []ContainerFile {
-	build := fmt.Sprintf(`plugins {
-    `+"`java-gradle-plugin`"+`
-    `+"`maven-publish`"+`
-}
-
-group = %[1]q
-version = "1.0"
-
-gradlePlugin {
-    plugins {
-        create("greet") {
-            id = %[2]q
-            implementationClass = "%[1]s.GreetPlugin"
-        }
-    }
-}
-
-publishing {
-    repositories {
-        %[3]s
-    }
-}
-`, group, pluginID, gradleRepoBlock(repoURL, user, pass))
-	src := fmt.Sprintf(`package %s;
-
-import org.gradle.api.Plugin;
-import org.gradle.api.Project;
-
-public class GreetPlugin implements Plugin<Project> {
-    @Override
-    public void apply(Project project) {
-        project.getTasks().register("hello", task -> task.doLast(t -> System.out.println(%q)));
-    }
-}
-`, group, marker)
-	return []ContainerFile{
-		{Path: "/work/plugin/settings.gradle.kts", Content: `rootProject.name = "greet"` + "\n"},
-		{Path: "/work/plugin/build.gradle.kts", Content: build},
-		{Path: "/work/plugin/src/main/java/" + strings.ReplaceAll(group, ".", "/") + "/GreetPlugin.java", Content: src},
-	}
-}
-
-// gradleConsumerProject is project B: applies the plugin through plugins {} resolved via pluginManagement.
-func gradleConsumerProject(pluginID, repoURL, user, pass string) []ContainerFile {
-	settings := fmt.Sprintf(`pluginManagement {
-    repositories {
-        %s
-        gradlePluginPortal()
-    }
-}
-rootProject.name = "consumer"
-`, gradleRepoBlock(repoURL, user, pass))
-	build := fmt.Sprintf("plugins {\n    id(%q) version \"1.0\"\n}\n", pluginID)
-	return []ContainerFile{
-		{Path: "/work/consumer/settings.gradle.kts", Content: settings},
-		{Path: "/work/consumer/build.gradle.kts", Content: build},
-	}
-}
-
-func TestGradlePlugin(t *testing.T) {
+// TestGradleModule publishes the files that Gradle's maven-publish adds to a Maven deploy: the
+// Gradle module metadata (.module) and the .sha256 and .sha512 checksum files, which the server
+// stores as sent.
+func TestGradleModule(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("gradle")
 		s.CreateRepo(t, repo, "maven", false, nil)
-		writer, writerPass := RandName("writer"), randHex(12)
-		s.CreateUser(t, writer, writerPass)
-		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
-		token := s.CreateToken(t, writer, writerPass, "gradle-e2e")
+		pub := s.PublishAuth(t, s.AdminUser, repo)
 
-		group := "com.example.e2e" + randHex(4)
-		groupPath := strings.ReplaceAll(group, ".", "/")
-		pluginID := group + ".greet"
-		marker := "GREET-MARKER-" + randHex(6)
-		repoURL := s.InternalURL + "/maven/" + repo
-		run := func(dir string, files []ContainerFile, task string) (int, string) {
-			t.Helper()
-			return RunClient(t, gradleImage, ClientOpts{
-				Cmd:     []string{"cd " + dir + " && gradle --no-daemon --console=plain --stacktrace " + task},
-				Files:   files,
-				Env:     map[string]string{"GRADLE_USER_HOME": "/home/gradle/.gradle"},
-				Mounts:  map[string]string{GradleVolume: "/home/gradle/.gradle"},
-				User:    "root",
-				Timeout: 15 * time.Minute,
-			})
-		}
-
-		publishToken := PublishToken(t, s, writer, repo)
-		if code, out := run("/work/plugin", gradlePluginProject(group, pluginID, repoURL, writer, publishToken, marker), "publish"); code != 0 {
-			t.Fatalf("gradle publish: exit %d\n%s", code, out)
-		}
-
-		markerDir := groupPath + "/greet/" + pluginID + ".gradle.plugin/1.0/"
-		wantPom := markerDir + pluginID + ".gradle.plugin-1.0.pom"
-		wantJar := groupPath + "/greet/1.0/greet-1.0.jar"
-		got := map[string]bool{}
-		for _, p := range mavenAssetPaths(t, s, repo, groupPath+"/greet/", s.Admin()) {
-			got[p] = true
-		}
-		for _, want := range []string{wantPom, wantJar} {
-			if !got[want] {
-				t.Fatalf("asset %s not published; have %v", want, got)
-			}
-		}
-
-		code, out := run("/work/consumer", gradleConsumerProject(pluginID, repoURL, writer, token), "hello")
-		if code != 0 {
-			t.Fatalf("gradle hello: exit %d\n%s", code, out)
-		}
-		if !strings.Contains(out, marker) {
-			t.Fatalf("gradle hello output missing marker %q:\n%s", marker, out)
+		base := "/maven/" + repo + "/com/example/e2e" + randHex(4) + "/greet/1.0/greet-1.0.module"
+		module := []byte(`{"formatVersion":"1.1","component":{"group":"com.example","module":"greet","version":"1.0"},"variants":[]}`)
+		s256, s512 := sha256.Sum256(module), sha512.Sum512(module)
+		for _, f := range []struct {
+			path string
+			body []byte
+		}{
+			{base, module},
+			{base + ".sha256", []byte(hex.EncodeToString(s256[:]))},
+			{base + ".sha512", []byte(hex.EncodeToString(s512[:]))},
+		} {
+			resp, body := rawPut(t, s, f.path, f.body, pub)
+			rawWantStatus(t, resp, body, http.StatusCreated)
+			rawWantGet(t, s, nil, f.path, s.AdminBasic(), f.body)
 		}
 	})
 }

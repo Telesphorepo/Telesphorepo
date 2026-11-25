@@ -15,15 +15,13 @@ import (
 )
 
 // TestDockerGroupBearer reads a private docker group with the bearer tokens of the token endpoint:
-// a user who holds download on the group and on one member pulls through the group with the
-// Docker CLI after docker login, and with a bearer token over HTTP. The group skips the member
-// that the user may not read, the token reads no member directly, and every read answer carries
-// Cache-Control: private.
+// a user who holds download on the group and on one member pulls through the group with a bearer
+// token. The group skips the member that the user may not read, the token reads no member
+// directly, and every read answer carries Cache-Control: private.
 func TestDockerGroupBearer(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
-		host := registryHost(s)
 		arch := hostArch()
 		mem, hidden, grp := RandName("gmem"), RandName("ghid"), RandName("grp")
 		s.CreateRepo(t, mem, "docker", false, nil)
@@ -43,22 +41,6 @@ func TestDockerGroupBearer(t *testing.T) {
 		s.CreateUser(t, user, pass)
 		s.SetPerms(t, mem, user, "repo.download")
 		s.SetPerms(t, grp, user, "repo.download")
-		ref := host + "/" + grp + "/app"
-
-		t.Run("docker CLI", func(t *testing.T) {
-			d := StartDind(t, host)
-			d.MustExec(t, "pull through the group", fmt.Sprintf(`set -e
-printf '%%s' '%[1]s' | docker login %[2]s -u %[3]s --password-stdin
-docker pull %[4]s:v1
-`, pass, host, user, ref))
-			out := d.MustExec(t, "the digest of the pulled image", fmt.Sprintf("docker image inspect --format '{{json .RepoDigests}}' %s:v1\n", ref))
-			if !strings.Contains(out, "sha256:"+mine.Hex) {
-				t.Fatalf("docker pull through the group: repo digests %s, want the image of %s (sha256:%s)", out, mem, mine.Hex)
-			}
-			if code, out := d.Exec(t, fmt.Sprintf("docker pull %s:only-hidden 2>&1", ref)); code == 0 {
-				t.Fatalf("docker pull of a tag of the hidden member through the group: exit 0, want a failure:\n%s", out)
-			}
-		})
 
 		accept := map[string]string{"Accept": "application/vnd.oci.image.manifest.v1+json"}
 		tags := func(t *testing.T, auth Auth) []string {

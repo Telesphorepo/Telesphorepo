@@ -193,9 +193,10 @@ func TestDockerChallengeScheme(t *testing.T) {
 	})
 }
 
-// TestDockerRegistry drives the registry with HTTP requests and the real Docker CLI: the
-// challenge, the token scopes, and push and pull on both stores; on fs, logins that cannot push,
-// anonymous pulls, a tag move, a multi-platform index, a read IP rule and a repo delete.
+// TestDockerRegistry pushes and pulls with the real Docker CLI on both stores. On fs, the Docker
+// CLI pushes a multi-platform index and pulls one platform of it, and HTTP requests check the
+// repo names, the challenge, the token scopes, logins that cannot push, anonymous pulls, a tag
+// move, a read IP rule and a repo delete.
 func TestDockerRegistry(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -205,6 +206,33 @@ func TestDockerRegistry(t *testing.T) {
 		s.CreateRepo(t, priv, "docker", false, nil)
 		s.CreateRepo(t, pub, "docker", true, nil)
 		dockerUsers(t, s, priv, pub)
+
+		d := StartDind(t, host)
+		img := host + "/" + priv + "/app"
+		tok := PublishToken(t, s, "pusher", priv)
+		login := func(user, pass string) string {
+			return fmt.Sprintf("docker logout %s >/dev/null 2>&1 || true\nprintf '%%s' '%s' | docker login %s -u %s --password-stdin\n", host, pass, host, user)
+		}
+
+		t.Run("push and pull", func(t *testing.T) {
+			d.MustExec(t, "push and pull", "set -e\n"+DockerScratchImage("/ctx1", 20<<20, 1024, 100<<10)+"cd /ctx1 && sha256sum f0 f1 f2 > /sums && cd /\n"+
+				login("pusher", tok)+fmt.Sprintf(`docker build -q -t %[1]s:v1 /ctx1
+docker push %[1]s:v1
+docker rmi %[1]s:v1
+docker pull %[1]s:v1
+docker create --name c1 %[1]s:v1 /f0
+mkdir -p /out && docker cp c1:/f0 /out/f0 && docker cp c1:/f1 /out/f1 && docker cp c1:/f2 /out/f2
+docker rm c1
+cd /out && sha256sum -c /sums
+`, img))
+			idx := headDigest(t, s, s.AdminBasic(), priv+"/app", "v1")
+			if !strings.HasPrefix(idx, "sha256:") {
+				t.Fatalf("HEAD of the pushed tag: Docker-Content-Digest %q", idx)
+			}
+		})
+		if opts.S3 != nil {
+			return // the rest is the registry, not the store
+		}
 
 		t.Run("repo names", func(t *testing.T) {
 			for _, bad := range []string{"a..b", "a-", "a_"} {
@@ -249,66 +277,42 @@ func TestDockerRegistry(t *testing.T) {
 			wantOCI(t, "a name without an image", resp, b, http.StatusNotFound, "NAME_UNKNOWN")
 		})
 
-		d := StartDind(t, host)
-		img, pubImg := host+"/"+priv+"/app", host+"/"+pub+"/app"
-		tok := PublishToken(t, s, "pusher", priv)
-		login := func(user, pass string) string {
-			return fmt.Sprintf("docker logout %s >/dev/null 2>&1 || true\nprintf '%%s' '%s' | docker login %s -u %s --password-stdin\n", host, pass, host, user)
-		}
-
-		t.Run("push and pull", func(t *testing.T) {
-			d.MustExec(t, "push and pull", "set -e\n"+DockerScratchImage("/ctx1", 20<<20, 1024, 100<<10)+"cd /ctx1 && sha256sum f0 f1 f2 > /sums && cd /\n"+
-				login("pusher", tok)+fmt.Sprintf(`docker build -q -t %[1]s:v1 /ctx1
-docker push %[1]s:v1
-docker rmi %[1]s:v1
-docker pull %[1]s:v1
-docker create --name c1 %[1]s:v1 /f0
-mkdir -p /out && docker cp c1:/f0 /out/f0 && docker cp c1:/f1 /out/f1 && docker cp c1:/f2 /out/f2
-docker rm c1
-cd /out && sha256sum -c /sums
-`, img))
-			idx := headDigest(t, s, s.AdminBasic(), priv+"/app", "v1")
-			if !strings.HasPrefix(idx, "sha256:") {
-				t.Fatalf("HEAD of the pushed tag: Docker-Content-Digest %q", idx)
-			}
-		})
-		if opts.S3 != nil {
-			return // the rest is the registry, not the store
-		}
-
 		t.Run("password and read token cannot push", func(t *testing.T) {
 			readTok := s.CreateToken(t, "reader", "reader-pass-1234", "docker")
-			for _, cred := range [][2]string{{"reader", "reader-pass-1234"}, {"reader", readTok}} {
-				d.MustExec(t, "pull with "+cred[0], "set -e\n"+login(cred[0], cred[1])+fmt.Sprintf("docker rmi %[1]s:v1 >/dev/null 2>&1 || true\ndocker pull %[1]s:v1\ndocker tag %[1]s:v1 %[1]s:nope\n", img))
-				code, out := d.Exec(t, fmt.Sprintf("docker push %s:nope 2>&1", img))
-				if code == 0 || !strings.Contains(out, "publish session") {
-					t.Fatalf("push with a password or read token: exit %d, want a refusal that names the publish session:\n%s", code, out)
+			for _, cred := range []Basic{{"reader", "reader-pass-1234"}, {"reader", readTok}} {
+				st, bearer, b := registryToken(t, s, cred, "repository:"+priv+"/app:pull,push")
+				wantAPIStatus(t, "token for a push with a password or read token", st, b, http.StatusOK)
+				headDigest(t, s, bearer, priv+"/app", "v1")
+				resp, body := ociDo(t, s, http.MethodPost, "/v2/"+priv+"/app/blobs/uploads/", nil, bearer, nil)
+				if resp.StatusCode < 400 || !strings.Contains(string(body), "publish session") {
+					t.Fatalf("push with a password or read token: status %d, want a refusal that names the publish session: %s", resp.StatusCode, body)
 				}
 			}
 		})
 
 		t.Run("anonymous pull", func(t *testing.T) {
-			pubTok := PublishToken(t, s, "pusher", pub)
-			d.MustExec(t, "anonymous pull", "set -e\n"+login("pusher", pubTok)+fmt.Sprintf(`docker tag %[1]s:v1 %[2]s:v1
-docker push %[2]s:v1
-docker logout %[3]s
-docker rmi %[2]s:v1
-docker pull %[2]s:v1
-`, img, pubImg, host))
+			layer := rawRandom(t, 4096)
+			mh, _, _ := ociImage(t, s, Basic{"pusher", PublishToken(t, s, "pusher", pub)}, pub+"/app", "v1", nil, layer)
+			st, anon, b := registryToken(t, s, nil, "repository:"+pub+"/app:pull")
+			wantAPIStatus(t, "anonymous token for the public repo", st, b, http.StatusOK)
+			if got := headDigest(t, s, anon, pub+"/app", "v1"); got != "sha256:"+mh {
+				t.Fatalf("anonymous HEAD of the public tag: %s, want sha256:%s", got, mh)
+			}
+			resp, body := ociDo(t, s, http.MethodGet, "/v2/"+pub+"/app/blobs/sha256:"+sha256Hex(layer), nil, anon, nil)
+			if resp.StatusCode != http.StatusOK || !bytes.Equal(body, layer) {
+				t.Fatalf("anonymous GET of the public layer: status %d, %d bytes, want the layer", resp.StatusCode, len(body))
+			}
 		})
 
 		t.Run("tag move", func(t *testing.T) {
 			old := headDigest(t, s, s.AdminBasic(), priv+"/app", "v1")
-			d.MustExec(t, "tag move", "set -e\n"+DockerScratchImage("/ctx2", 4096, 2048)+login("pusher", tok)+fmt.Sprintf(`docker build -q -t %[1]s:v1 /ctx2
-docker push %[1]s:v1
-`, img))
-			moved := headDigest(t, s, s.AdminBasic(), priv+"/app", "v1")
-			if moved == old {
+			ociImage(t, s, Basic{"pusher", tok}, priv+"/app", "v1", nil, rawRandom(t, 4096))
+			if moved := headDigest(t, s, s.AdminBasic(), priv+"/app", "v1"); moved == old {
 				t.Fatalf("the tag v1 still names %s after the push of another image", old)
 			}
-			d.MustExec(t, "pull the old digest", fmt.Sprintf("set -e\ndocker pull %s@%s\n", img, old))
+			resp, body := ociDo(t, s, http.MethodGet, "/v2/"+priv+"/app/manifests/"+old, nil, s.AdminBasic(), nil)
+			wantOCI(t, "GET the old digest after the tag moved", resp, body, http.StatusOK, "")
 		})
-
 		t.Run("multi-platform index", func(t *testing.T) {
 			d.MustExec(t, "multi-platform push", "set -e\n"+DockerScratchImage("/ctx3", 3000, 5000)+login("pusher", tok)+fmt.Sprintf(
 				"docker build -q --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t %[1]s:multi /ctx3\ndocker push %[1]s:multi\n", img))
@@ -337,23 +341,27 @@ docker push %[1]s:v1
 		})
 
 		t.Run("allowed networks", func(t *testing.T) {
-			// Every address is allowed: docker pulls the restricted repo without signing in, through
-			// the token endpoint and the registry routes.
-			putIPRules(t, s, priv, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}})
-			d.MustExec(t, "anonymous pull through the allowed networks", fmt.Sprintf("set -e\ndocker logout %s >/dev/null 2>&1 || true\ndocker rmi %s:v1 >/dev/null 2>&1 || true\ndocker pull %s:v1\n", host, img, img))
-			putIPRules(t, s, priv, ipRules{Read: []ipRule{}})
-			code, out := d.Exec(t, fmt.Sprintf("docker rmi %s:v1 >/dev/null 2>&1; docker pull %s:v1 2>&1", img, img))
-			if code == 0 {
-				t.Fatalf("anonymous pull of a restricted repo without allowed networks: exit %d:\n%s", code, out)
+			// Every address is allowed: an anonymous token reads the restricted repo, through the
+			// token endpoint and the registry routes.
+			anonPull := func() (*http.Response, []byte) {
+				t.Helper()
+				st, anon, b := registryToken(t, s, nil, "repository:"+priv+"/app:pull")
+				wantAPIStatus(t, "anonymous token for the restricted repo", st, b, http.StatusOK)
+				return ociDo(t, s, http.MethodGet, "/v2/"+priv+"/app/manifests/v1", nil, anon, nil)
 			}
+			putIPRules(t, s, priv, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}})
+			resp, body := anonPull()
+			wantOCI(t, "anonymous pull through the allowed networks", resp, body, http.StatusOK, "")
+			putIPRules(t, s, priv, ipRules{Read: []ipRule{}})
+			resp, body = anonPull()
+			wantOCI(t, "anonymous pull of a restricted repo without allowed networks", resp, body, http.StatusUnauthorized, "UNAUTHORIZED")
 		})
 
 		// The delete empties the docker rows of the repo in batches before the repo row goes.
 		t.Run("repo delete", func(t *testing.T) {
 			deleteRepos(t, s, pub)
-			if code, out := d.Exec(t, fmt.Sprintf("docker rmi %s:v1 >/dev/null 2>&1; docker pull %s:v1 2>&1", pubImg, pubImg)); code == 0 {
-				t.Fatalf("pull from a deleted repo worked:\n%s", out)
-			}
+			resp, body := ociDo(t, s, http.MethodGet, "/v2/"+pub+"/app/manifests/v1", nil, s.AdminBasic(), nil)
+			wantOCI(t, "GET a manifest of a deleted repo", resp, body, http.StatusNotFound, "NAME_UNKNOWN")
 		})
 	})
 }
@@ -512,8 +520,8 @@ func TestDockerRegistryAPI(t *testing.T) {
 
 // TestDockerGC deletes an image that shares a layer with another one: after docker.link_grace
 // and blobs.gc_grace the layers that only the deleted image used leave the store; the shared
-// layer and the other image stay. A layer that a manifest uses cannot be deleted on its own. A
-// folder delete removes an image of more than 500 files with a multi-platform index.
+// layer and the other image stay. A layer that a manifest uses cannot be deleted on its own. On
+// fs, a folder delete removes an image of more than 500 files with a multi-platform index.
 func TestDockerGC(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -592,6 +600,10 @@ func TestDockerGC(t *testing.T) {
 			if resp.StatusCode != http.StatusOK || sha256Hex(body) != sha256Hex(l) {
 				t.Fatalf("GET a layer of image b after the GC: status %d", resp.StatusCode)
 			}
+		}
+
+		if opts.S3 != nil {
+			return // the folder delete is the byte pipeline, not the store
 		}
 
 		// The grace from before the test again: the layers of the next image wait for their

@@ -207,9 +207,13 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		if before == 0 {
 			t.Fatal("the remote log has no blob GET of the first pull")
 		}
-		d.MustExec(t, "pull again", fmt.Sprintf("set -e\ndocker rmi -f %[1]s\ndocker pull %[1]s\n", ref))
+		// The cached layers answer from the proxy without a request to the remote.
+		for _, h := range v1.Layers {
+			resp, body := ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/blobs/sha256:"+h, nil, nil, nil)
+			wantOCI(t, "GET the cached layer "+h[:12], resp, body, http.StatusOK, "")
+		}
 		if after := blobGets(); after != before {
-			t.Fatalf("the second pull sent %d blob GETs to the remote, want none", after-before)
+			t.Fatalf("the GETs of the cached layers sent %d blob GETs to the remote, want none", after-before)
 		}
 	})
 
@@ -289,6 +293,28 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		})
 	}
 
+	if rm.kind == "telesphorepo" {
+		dockerProxyLocal(t, s, prx, rm, other)
+	}
+
+	t.Run("stopped remote", func(t *testing.T) {
+		rm.stop(t)
+		time.Sleep(1500 * time.Millisecond) // the cached tag is stale now
+		resp, body := ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/manifests/v1", nil, nil, nil)
+		wantOCI(t, "a cached tag while the remote is down", resp, body, http.StatusOK, "")
+		if got := resp.Header.Get("Docker-Content-Digest"); got == "" {
+			t.Fatal("a cached tag while the remote is down: no Docker-Content-Digest")
+		}
+		resp, body = ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/manifests/never-cached", nil, nil, nil)
+		wantOCI(t, "an uncached tag while the remote is down", resp, body, http.StatusBadGateway, "UNKNOWN")
+	})
+}
+
+// dockerProxyLocal is what the proxy prx decides without regard to the kind of its remote rm: a
+// mount of a layer of the image other that never asks the remote, the read-only answer to a push,
+// and a group of a hosted repo and the proxy.
+func dockerProxyLocal(t *testing.T, s *Server, prx string, rm *proxyRemote, other ociImageBlobs) {
+	arch := hostArch()
 	t.Run("mount from the proxy", func(t *testing.T) {
 		local := RandName("local")
 		s.CreateRepo(t, local, "docker", false, nil)
@@ -324,7 +350,6 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		}
 		s.CreateGroup(t, grp, "docker", true, []string{hosted, prx})
 
-		d.MustExec(t, "pull through the group", fmt.Sprintf("set -e\ndocker pull %s/%s/app:v1\n", host, grp))
 		if got := headDigest(t, s, nil, grp+"/app", "v1"); got != "sha256:"+mine.Hex {
 			t.Fatalf("the group serves %s for v1, want the hosted sha256:%s", got, mine.Hex)
 		}
@@ -360,15 +385,4 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		}
 	})
 
-	t.Run("stopped remote", func(t *testing.T) {
-		rm.stop(t)
-		time.Sleep(1500 * time.Millisecond) // the cached tag is stale now
-		resp, body := ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/manifests/v2", nil, nil, nil)
-		wantOCI(t, "a cached tag while the remote is down", resp, body, http.StatusOK, "")
-		if got := resp.Header.Get("Docker-Content-Digest"); got == "" {
-			t.Fatal("a cached tag while the remote is down: no Docker-Content-Digest")
-		}
-		resp, body = ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/manifests/never-cached", nil, nil, nil)
-		wantOCI(t, "an uncached tag while the remote is down", resp, body, http.StatusBadGateway, "UNKNOWN")
-	})
 }

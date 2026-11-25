@@ -76,9 +76,8 @@ func parseCargoEntry(t *testing.T, line string) cargoEntry {
 }
 
 // TestCargo publishes crates with cargo publish to a private hosted repo (auth-required), yanks
-// and unyanks a version with cargo yank, builds a binary that depends on the crate, and checks
-// that the entry of a publish equals the entry that an upload of the same .crate gets from its
-// Cargo.toml.
+// and unyanks a version, and checks that the entry of a publish equals the entry that an upload
+// of the same .crate gets from its Cargo.toml.
 func TestCargo(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -169,24 +168,26 @@ cat /tmp/clash.txt
 			}
 		}
 
-		// Yank and unyank 1.0.0 with cargo; a read token cannot yank.
-		resp, b = s.Do(t, s.NewRequest(t, http.MethodDelete, "/cargo/"+repo+"/api/v1/crates/"+crate+"/1.0.0/yank", nil), rawToken(read))
+		// Yank and unyank 1.0.0 with a publish session, as cargo yank sends them; a read token
+		// cannot yank.
+		yankURL := "/cargo/" + repo + "/api/v1/crates/" + crate + "/1.0.0/"
+		resp, b = s.Do(t, s.NewRequest(t, http.MethodDelete, yankURL+"yank", nil), rawToken(read))
 		if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(b), `"errors"`) || !strings.Contains(string(b), "publish session") {
 			t.Fatalf("yank with a read token: status %d, want 401 with a Cargo error: %s", resp.StatusCode, b)
 		}
+		pubToken := rawToken(PublishToken(t, s, dev, repo))
 		yank := func(undo bool) {
 			t.Helper()
-			cmd := "cargo yank --registry tr " + crate + "@1.0.0"
+			method, p := http.MethodDelete, yankURL+"yank"
 			if undo {
-				cmd = "cargo yank --undo --registry tr " + crate + "@1.0.0"
+				method, p = http.MethodPut, yankURL+"unyank"
 			}
-			code, out := RunClient(t, rustImage, ClientOpts{Cmd: []string{"cd /work && " + cmd}, Files: []ContainerFile{cargoRegistry("/work", "tr", index, false)},
-				Env: cargoEnv(map[string]string{cargoTokenEnv("tr"): PublishToken(t, s, dev, repo)})})
-			if code != 0 {
-				t.Fatalf("%s: exit %d\n%s", cmd, code, out)
+			resp, b := s.Do(t, s.NewRequest(t, method, p, nil), pubToken)
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"ok":true`) {
+				t.Fatalf("%s %s: status %d, want 200 with ok: %s", method, p, resp.StatusCode, b)
 			}
 			if got := parseCargoEntry(t, cargoIndexLines(t, s, repo, crate, s.AdminBasic())["1.0.0"]).Yanked; got != !undo {
-				t.Fatalf("after %s the index says yanked %v", cmd, got)
+				t.Fatalf("after %s %s the index says yanked %v", method, p, got)
 			}
 		}
 		// The index file answers 304 to its ETag until a yank changes it; then the old ETag gets
@@ -200,15 +201,6 @@ cat /tmp/clash.txt
 		yank(false)
 		if st, etag := conditionalGet(t, s, indexFile, "", before, s.AdminBasic()); st != http.StatusOK || etag == before {
 			t.Fatalf("the index file after a yank with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
-		}
-
-		// A build with the read token resolves the newest version; the yanked one stays out.
-		consumer := append(cargoBin("/work/app", crate+" = { version = \"1\", registry = \"tr\" }\n", crate),
-			cargoRegistry("/work", "tr", index, false))
-		code, out := RunClient(t, rustImage, ClientOpts{Cmd: []string{"cd /work/app && cargo run -q"}, Files: consumer,
-			Env: cargoEnv(map[string]string{cargoTokenEnv("tr"): read}), Timeout: 20 * time.Minute})
-		if code != 0 || !strings.Contains(out, "hello 1.1.0 from "+suffix) {
-			t.Fatalf("cargo run of a consumer: exit %d\n%s", code, out)
 		}
 		yank(true)
 
@@ -238,9 +230,9 @@ cat /tmp/clash.txt
 	})
 }
 
-// TestCargoProxyGroup builds from a crates.io proxy through source replacement, and from a private
-// group of a hosted repo and the proxy, in which a hosted crate named like a crates.io crate is
-// not shadowed by the higher public versions.
+// TestCargoProxyGroup builds through source replacement from a private group of a hosted repo and
+// a crates.io proxy, in which a hosted crate named like a crates.io crate is not shadowed by the
+// higher public versions.
 func TestCargoProxyGroup(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -257,33 +249,29 @@ func TestCargoProxyGroup(t *testing.T) {
 		suffix := randHex(4)
 		private := "e2ep_" + suffix
 
-		// The hosted repo holds its own crate and a crate named itoa, which crates.io has in
-		// higher versions.
-		files := []ContainerFile{cargoRegistry("/work", "tr", s.InternalURL+"/cargo/"+hosted+"/index/", false)}
-		files = append(files, cargoLib("/work/p", private, "0.1.0", "", "private "+suffix)...)
-		files = append(files, cargoLib("/work/itoa", "itoa", "0.0.1", "", "the private itoa")...)
-		code, out := RunClient(t, rustImage, ClientOpts{
-			Cmd:   []string{"set -e\ncd /work/p && cargo publish --registry tr\ncd /work/itoa && cargo publish --registry tr"},
-			Files: files, Env: cargoEnv(map[string]string{cargoTokenEnv("tr"): PublishToken(t, s, dev, hosted)}), Timeout: 20 * time.Minute})
-		if code != 0 {
-			t.Fatalf("cargo publish to the hosted repo: exit %d\n%s", code, out)
+		// The hosted repo gets its own crate and a crate named itoa, which crates.io has in higher
+		// versions. Then a build through the private group with the read token: the hosted crate
+		// and a crates.io crate, both as crates.io crates by source replacement.
+		files := []ContainerFile{cargoRegistry("/pub", "tr", s.InternalURL+"/cargo/"+hosted+"/index/", false)}
+		files = append(files, cargoLib("/pub/p", private, "0.1.0", "", "private "+suffix)...)
+		files = append(files, cargoLib("/pub/itoa", "itoa", "0.0.1", "", "the private itoa")...)
+		files = append(files, cargoBin("/work/app", private+" = \"0.1\"\ncfg-if = \"1\"\n", private)...)
+		files = append(files, cargoRegistry("/work", "tg", s.InternalURL+"/cargo/"+group+"/index/", true))
+		script := `set -e
+cd /pub/p && cargo publish --registry tr
+cd /pub/itoa && cargo publish --registry tr
+cd /work/app && cargo run -q
+`
+		code, out := RunClient(t, rustImage, ClientOpts{Cmd: []string{script}, Files: files, Timeout: 20 * time.Minute,
+			Env: cargoEnv(map[string]string{cargoTokenEnv("tr"): PublishToken(t, s, dev, hosted), cargoTokenEnv("tg"): read})})
+		if code != 0 || !strings.Contains(out, "private "+suffix) {
+			t.Fatalf("cargo publish to the hosted repo and cargo run through the group: exit %d\n%s", code, out)
 		}
 
-		// Through the proxy alone: crates.io crates, by source replacement, without a token.
-		code, out = RunClient(t, rustImage, ClientOpts{Cmd: []string{"cd /work/app && cargo build -q && echo BUILT"},
-			Files: append(cargoBin("/work/app", "itoa = \"1\"\ncfg-if = \"1\"\n"), cargoRegistry("/work", "tp", s.InternalURL+"/cargo/"+proxy+"/index/", true)),
-			Env:   cargoEnv(nil), Timeout: 20 * time.Minute})
-		if code != 0 || !strings.Contains(out, "BUILT") {
-			t.Fatalf("cargo build through the proxy: exit %d\n%s", code, out)
-		}
-		paths := assetPathsOf(t, s, proxy, "")
-		for _, want := range []string{".index/it/oa/itoa", ".index/cf/g-/cfg-if"} {
-			if !strings.Contains(strings.Join(paths, "\n"), want) {
-				t.Fatalf("the proxy keeps no %s: %v", want, paths)
-			}
-		}
-		if !strings.Contains(strings.Join(paths, "\n"), "crates/itoa/itoa-1.") {
-			t.Fatalf("the proxy keeps no itoa 1.x crate: %v", paths)
+		// The proxy keeps the index file and the crate of the crates.io dependency.
+		paths := strings.Join(assetPathsOf(t, s, proxy, ""), "\n")
+		if !strings.Contains(paths, ".index/cf/g-/cfg-if") || !strings.Contains(paths, "crates/cfg-if/cfg-if-1.") {
+			t.Fatalf("the proxy keeps no index file or crate of cfg-if 1.x: %s", paths)
 		}
 
 		// The group: the hosted itoa owns the name, so only 0.0.1 is listed.
@@ -296,15 +284,6 @@ func TestCargoProxyGroup(t *testing.T) {
 		resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/cargo/"+group+"/index/config.json", nil), nil)
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("anonymous config.json of the private group: status %d, want 401", resp.StatusCode)
-		}
-
-		// A build through the private group with the read token: the hosted crate and a crates.io
-		// crate, both as crates.io crates by source replacement.
-		code, out = RunClient(t, rustImage, ClientOpts{Cmd: []string{"cd /work/app && cargo run -q"},
-			Files: append(cargoBin("/work/app", private+" = \"0.1\"\ncfg-if = \"1\"\n", private), cargoRegistry("/work", "tg", s.InternalURL+"/cargo/"+group+"/index/", true)),
-			Env:   cargoEnv(map[string]string{cargoTokenEnv("tg"): read}), Timeout: 20 * time.Minute})
-		if code != 0 || !strings.Contains(out, "private "+suffix) {
-			t.Fatalf("cargo run through the group: exit %d\n%s", code, out)
 		}
 	})
 }

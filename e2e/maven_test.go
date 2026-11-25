@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,54 +60,29 @@ func TestMaven(t *testing.T) {
 		repoURL := s.InternalURL + "/maven/" + repo
 		mounts := map[string]string{M2Volume: "/root/.m2/repository"}
 
-		// Each deploy runs with a new publish session, minted before the container starts.
-		deploy := func(version, message string) (int, string) {
-			t.Helper()
-			deploySettings := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, PublishToken(t, s, writer, repo))}
-			files := append(mavenLibProject(group, version, repoURL, message), deploySettings)
-			return RunClient(t, mavenImage, ClientOpts{
-				Cmd:     []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},
-				Files:   files,
-				Mounts:  mounts,
-				Timeout: 15 * time.Minute,
-			})
-		}
-
+		// One container deploys 1.0.0 and two builds of 1.1.0-SNAPSHOT, each from a project of its
+		// own, with one publish session.
 		releaseMsg := "hello from " + group + " release 1.0.0"
-		if code, out := deploy("1.0.0", releaseMsg); code != 0 {
-			t.Fatalf("deploy 1.0.0: exit %d\n%s", code, out)
-		}
 		snapMsg := func(n int) string { return fmt.Sprintf("hello from %s snapshot build %d", group, n) }
-		for i := 1; i <= 2; i++ {
-			if code, out := deploy("1.1.0-SNAPSHOT", snapMsg(i)); code != 0 {
-				t.Fatalf("deploy 1.1.0-SNAPSHOT #%d: exit %d\n%s", i, code, out)
+		files := []ContainerFile{{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, PublishToken(t, s, writer, repo))}}
+		var script []string
+		for i, b := range []struct{ version, message string }{{"1.0.0", releaseMsg}, {"1.1.0-SNAPSHOT", snapMsg(1)}, {"1.1.0-SNAPSHOT", snapMsg(2)}} {
+			dir := fmt.Sprintf("/work/lib%d", i)
+			for _, f := range mavenLibProject(group, b.version, repoURL, b.message) {
+				f.Path = dir + strings.TrimPrefix(f.Path, "/work/lib")
+				files = append(files, f)
 			}
+			script = append(script, "cd "+dir+" && mvn -B -ntp -s /work/settings.xml deploy")
+		}
+		if code, out := RunClient(t, mavenImage, ClientOpts{Cmd: []string{"set -e\n" + strings.Join(script, "\n")}, Files: files, Mounts: mounts, Timeout: 15 * time.Minute}); code != 0 {
+			t.Fatalf("deploy 1.0.0 and two builds of 1.1.0-SNAPSHOT: exit %d\n%s", code, out)
 		}
 
+		// A release takes no other bytes.
 		jarPath := "/maven/" + repo + "/" + groupPath + "/hello/1.0.0/hello-1.0.0.jar"
-		before := mavenHead(t, s, jarPath, Basic{writer, writerPass})
-		if before.StatusCode != http.StatusOK {
-			t.Fatalf("HEAD %s: status %d", jarPath, before.StatusCode)
-		}
-		if n, err := strconv.ParseInt(before.Header.Get("Content-Length"), 10, 64); err != nil || n <= 0 {
-			t.Fatalf("HEAD %s: bad Content-Length %q", jarPath, before.Header.Get("Content-Length"))
-		}
-
-		// Release redeploy with different content must be rejected.
-		code, out := deploy("1.0.0", "modified "+releaseMsg)
-		if code == 0 {
-			t.Fatalf("redeploy of release 1.0.0 with modified content succeeded:\n%s", out)
-		}
-		if !strings.Contains(out, "409") {
-			t.Fatalf("redeploy of release 1.0.0 failed without a 409:\n%s", out)
-		}
-		after := mavenHead(t, s, jarPath, Basic{writer, writerPass})
-		if after.StatusCode != http.StatusOK || after.Header.Get("Content-Length") != before.Header.Get("Content-Length") {
-			t.Fatalf("release jar changed after rejected redeploy: status %d, length %q -> %q",
-				after.StatusCode, before.Header.Get("Content-Length"), after.Header.Get("Content-Length"))
-		}
-		if et := before.Header.Get("ETag"); et != "" && after.Header.Get("ETag") != et {
-			t.Fatalf("release jar ETag changed after rejected redeploy: %q -> %q", et, after.Header.Get("ETag"))
+		resp, body := rawPut(t, s, jarPath, []byte("other bytes"), Basic{writer, PublishToken(t, s, writer, repo)})
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("PUT other bytes to the release jar: status %d, want 409: %s", resp.StatusCode, body)
 		}
 
 		// Two snapshot deploys produce two timestamped jars.
@@ -128,7 +102,7 @@ func TestMaven(t *testing.T) {
 		}
 
 		// Fresh consumer container: resolve from the server (token auth) and run both versions.
-		script := strings.Join([]string{
+		consumer := strings.Join([]string{
 			"set -e",
 			"rm -rf /root/.m2/repository/" + groupPath,
 			"cd /work/consumer",
@@ -137,8 +111,8 @@ func TestMaven(t *testing.T) {
 			`java -cp "$(cat /tmp/cp-$v.txt)" ` + group + ".Hello;",
 			"done",
 		}, "\n")
-		code, out = RunClient(t, mavenImage, ClientOpts{
-			Cmd: []string{script},
+		code, out := RunClient(t, mavenImage, ClientOpts{
+			Cmd: []string{consumer},
 			Files: []ContainerFile{
 				{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, token)},
 				mavenConsumerProject(group, repoURL),
@@ -154,8 +128,8 @@ func TestMaven(t *testing.T) {
 				t.Fatalf("consumer output missing %q:\n%s", want, out)
 			}
 		}
-		if strings.Contains(out, "modified "+releaseMsg) || strings.Contains(out, snapMsg(1)) {
-			t.Fatalf("consumer resolved stale or rejected content:\n%s", out)
+		if strings.Contains(out, snapMsg(1)) {
+			t.Fatalf("consumer resolved the older snapshot build:\n%s", out)
 		}
 	})
 }

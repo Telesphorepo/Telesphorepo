@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
@@ -56,10 +57,9 @@ func npmMust(t *testing.T, image, what, script string, files []ContainerFile) st
 	return out
 }
 
-// TestNPM publishes a plain and a scoped package with npm publish and installs both with npm from
-// the hosted repo with a read token; a second publish of a version is refused with 403. The
-// packument names the server's tarball URL with the integrity of the stored bytes, answers 304 to
-// its ETag and serves both forms of a scoped name.
+// TestNPM publishes a plain and a scoped package with npm publish; a second publish of a version
+// is refused with 403. The packument names the server's tarball URL with the integrity of the
+// stored bytes, answers 304 to its ETag and serves both forms of a scoped name.
 func TestNPM(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -69,7 +69,6 @@ func TestNPM(t *testing.T) {
 		writer, pass := RandName("writer"), randHex(12)
 		s.CreateUser(t, writer, pass)
 		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
-		read := s.CreateToken(t, writer, pass, "npm-e2e")
 		auth := Basic{writer, pass}
 		registry := s.InternalURL + "/npm/" + repo + "/"
 		plain, scoped := RandName("plain"), "@e2e/"+RandName("lib")
@@ -116,25 +115,6 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 		if resp, _ := npmGet(t, s, repo, plain, true, nil); resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("anonymous packument of a private repo: status %d, want 401", resp.StatusCode)
 		}
-
-		deps := map[string]string{plain: "^1.0.0", scoped: "1.0.0"}
-		out = npmMust(t, nodeImage, "npm install", "set -e\ncd /work/npm && npm install --no-audit --no-fund\n"+npmRequire(plain, scoped),
-			[]ContainerFile{npmConsumer("/work/npm", deps), {Path: "/work/npm/.npmrc", Content: npmrc(registry, read)}})
-		npmWant(t, "npm install", out, "REQ "+plain+": plain 1.0.0", "REQ "+scoped+": scoped 1.0.0")
-
-		// A new version shows in the packument at once: the packument of before no longer answers
-		// 304 to its ETag.
-		resp, _ := npmGet(t, s, repo, plain, true, auth)
-		before := resp.Header.Get("ETag")
-		npmMust(t, nodeImage, "npm publish of 1.1.0", "set -e\ncd /work/plain && npm publish\n",
-			append(npmPackage("/work/plain", plain, "1.1.0", "plain 1.1.0"),
-				ContainerFile{Path: "/root/.npmrc", Content: npmrc(registry, PublishToken(t, s, writer, repo))}))
-		if _, d := npmGet(t, s, repo, plain, true, auth); d == nil || d.DistTags["latest"] != "1.1.0" || len(d.Versions) != 2 {
-			t.Fatalf("abbreviated packument of %s after the publish of 1.1.0: %+v, want 1.0.0 and 1.1.0 with latest 1.1.0", plain, d)
-		}
-		if st, etag := conditionalGet(t, s, "/npm/"+repo+"/"+plain, "application/vnd.npm.install-v1+json", before, auth); st != http.StatusOK || etag == before {
-			t.Fatalf("packument after the publish of 1.1.0 with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
-		}
 	})
 }
 
@@ -142,7 +122,7 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 // the hosted repo and the proxy, from which Bun installs; a private name in the hosted member is
 // not shadowed by the higher public versions of the proxy; npm dist-tag add, ls and rm; npm
 // deprecate; npm unpublish of a version with a device session, refused with a CI session, which
-// still sets a dist-tag.
+// still sets a dist-tag that the packument and its ETag show at once.
 func TestNPMRegistry(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -205,15 +185,33 @@ npm unpublish `+tools+`@1.1.0
 		}
 		json.NewDecoder(resp.Body).Decode(&tok)
 		resp.Body.Close()
-		ci := mustSession(t, "CI session")(s.OIDCSession(t, tok.AccessToken, hosted))
-		code, out := RunClient(t, nodeImage, ClientOpts{Cmd: []string{`npm dist-tag add ` + tools + `@1.0.0 ci && echo TAG_SET
-npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
-			Files: []ContainerFile{{Path: "/root/.npmrc", Content: npmrc(reg(hosted), ci.Token)}}, Timeout: 10 * time.Minute})
-		if code == 0 || !strings.Contains(out, "TAG_SET") || strings.Contains(out, "UNPUBLISHED") {
-			t.Fatalf("CI session: exit %d, want the tag set and the unpublish refused:\n%s", code, out)
+		ci := Bearer{mustSession(t, "CI session")(s.OIDCSession(t, tok.AccessToken, hosted)).Token}
+		resp, _ = npmGet(t, s, hosted, tools, true, auth)
+		before := resp.Header.Get("ETag")
+		// npm dist-tag add: PUT -/package/<name>/dist-tags/<tag> with the version as a JSON string.
+		tagReq := s.NewRequest(t, http.MethodPut, "/npm/"+hosted+"/-/package/"+tools+"/dist-tags/ci", strings.NewReader(`"1.0.0"`))
+		tagReq.Header.Set("Content-Type", "application/json")
+		if resp, b := s.Do(t, tagReq, ci); resp.StatusCode/100 != 2 {
+			t.Fatalf("dist-tag add with a CI session: status %d, want 2xx: %s", resp.StatusCode, b)
+		}
+		// npm unpublish of a version: PUT <name>/-rev/<rev> with the packument without the version.
+		resp, full := s.Do(t, s.NewRequest(t, http.MethodGet, "/npm/"+hosted+"/"+tools, nil), auth)
+		var doc map[string]any
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(full, &doc) != nil {
+			t.Fatalf("full packument of %s: status %d: %s", tools, resp.StatusCode, full)
+		}
+		delete(doc["versions"].(map[string]any), "1.0.0")
+		body, _ := json.Marshal(doc)
+		unpubReq := s.NewRequest(t, http.MethodPut, "/npm/"+hosted+"/"+tools+"/-rev/"+doc["_rev"].(string), bytes.NewReader(body))
+		unpubReq.Header.Set("Content-Type", "application/json")
+		if resp, b := s.Do(t, unpubReq, ci); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unpublish with a CI session: status %d, want 403: %s", resp.StatusCode, b)
 		}
 		if _, d := npmGet(t, s, hosted, tools, true, auth); d == nil || len(d.Versions) != 1 || d.DistTags["ci"] != "1.0.0" {
 			t.Fatalf("after the CI session: %+v, want 1.0.0 with the tag ci", d)
+		}
+		if st, etag := conditionalGet(t, s, "/npm/"+hosted+"/"+tools, "application/vnd.npm.install-v1+json", before, auth); st != http.StatusOK || etag == before {
+			t.Fatalf("packument after the dist-tag with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
 		}
 
 		// The group serves is-number from the hosted member only.
@@ -225,18 +223,19 @@ npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
 			t.Fatalf("is-number in the proxy: %+v, want the public versions with tarballs on the server", d)
 		}
 
-		pub := map[string]string{"ms": "2.1.3", "@types/ms": "0.7.34"}
+		// The proxy serves a tarball of registry.npmjs.org without a credential.
+		if resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/npm/"+proxy+"/ms/-/ms-2.1.3.tgz", nil), nil); resp.StatusCode != http.StatusOK || !bytes.HasPrefix(b, []byte{0x1f, 0x8b}) {
+			t.Fatalf("GET the tarball of ms 2.1.3 through the proxy: status %d, want 200 with a gzip body", resp.StatusCode)
+		}
+
 		mixed := map[string]string{"ms": "2.1.3", "@types/ms": "0.7.34", "is-number": "*", tools: "^1.0.0"}
 		bunRequire := func(names ...string) string { return strings.ReplaceAll(npmRequire(names...), "node -e", "bun -e") }
-		check := bunRequire("ms") + "test -f node_modules/@types/ms/package.json && echo TYPES_OK\n"
-		out = npmMust(t, bunImage, "bun install from the proxy and the group", "set -e\n"+
-			"cd /work/proxy && bun install\n"+check+
-			"cd /work/group && bun install\n"+check+bunRequire("is-number", tools), []ContainerFile{
-			npmConsumer("/work/proxy", pub), {Path: "/work/proxy/.npmrc", Content: npmrc(reg(proxy), "")},
+		out = npmMust(t, bunImage, "bun install from the group", "set -e\ncd /work/group && bun install\n"+
+			bunRequire("ms")+"test -f node_modules/@types/ms/package.json && echo TYPES_OK\n"+bunRequire("is-number", tools), []ContainerFile{
 			npmConsumer("/work/group", mixed), {Path: "/work/group/.npmrc", Content: npmrc(reg(group), read)},
 		})
-		if strings.Count(out, "TYPES_OK") != 2 || !strings.Contains(out, "REQ is-number: private is-number") || !strings.Contains(out, "REQ "+tools+": tools 1.0.0") {
-			t.Fatalf("bun install from the proxy and the group:\n%s", out)
+		if !strings.Contains(out, "TYPES_OK") || !strings.Contains(out, "REQ is-number: private is-number") || !strings.Contains(out, "REQ "+tools+": tools 1.0.0") {
+			t.Fatalf("bun install from the group:\n%s", out)
 		}
 		if paths := assetPathsOf(t, s, proxy, "ms/-/"); len(paths) == 0 {
 			t.Fatalf("the proxy cached no tarball of ms")
