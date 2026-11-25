@@ -35,7 +35,8 @@ Linux. Use bun, not npm.
   refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start
   the e2e zones only through `go tool task test` (a plain `go test` of them refuses to start),
   and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
-  the person at the terminal can skip it, with `--now`.
+  the person at the terminal can skip it, with `--now` for one run or `--pause` for a while; when
+  the person has paused it, run the tests they ask for.
 - **The final run may skip the cooldown once.** When the work is finished, with every change
   committed and nothing left to do but test it, `go tool task test --final core clients` runs
   those whole zones without waiting. The gate checks the facts itself: it refuses while anything

@@ -3139,7 +3139,8 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   budget; the file of a process that is gone is taken over. `ledger.json` beside it is one ledger
   for the whole computer, whatever the checkout, worktree or agent: the time of the last run and
   a hash of the tree of each of the latest 50 runs (the commit, `git diff HEAD` and the untracked
-  files). A run is refused during the cooldown after the last run on the computer: a new random length
+  files), recorded when the run's first zone starts its tests, so a run that stops before (no
+  engine, a failed image build) leaves the tree untested. A run is refused during the cooldown after the last run on the computer: a new random length
   after every run and every refused start, of which the ledger keeps only the end. The refusal
   tells the agent to batch its work and go on without waiting, and says neither how long the
   cooldown is nor how much is left: an agent that knew would wait it out. A run of a tree that a run
@@ -3148,7 +3149,9 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   checks: `git status` is clean, the run has no `-run` or `--shard`, its tree is untested, and the
   run before it was not a final run; the ledger records each final run (commit, zones, result).
   `--now` skips both checks after the person at the terminal types
-  `now`; without a terminal it refuses. The ticket goes to the test binaries in `E2E_RUN_TICKET`,
+  `now`; without a terminal it refuses. `--pause [duration]` (default 2 hours, at most 12) lets
+  every run, an agent's too, skip both checks until it ends, after the person at the terminal
+  types `pause`; the ledger keeps its end, and `--resume` ends it early. The ticket goes to the test binaries in `E2E_RUN_TICKET`,
   and `TestMain` refuses to run without the ticket of the run in progress, so a plain `go test` of
   the zones does not start, while `go test -list` still does.
 

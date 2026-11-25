@@ -42,6 +42,9 @@ const usage = `Usage: go tool task <command>
   test --final [zones]  the finished work's one run of whole zones without the cooldown: refused while
                    anything is uncommitted, with -run or --shard, and right after another final run
   test --now ...   skip the cooldown and the check for changes; asks the person at the terminal
+  test --pause [duration]  let every run skip the cooldown and the check for changes for the
+                   duration (default 2h, at most 12h); asks the person at the terminal
+  test --resume    end a pause
   test --shard i/n run every n-th test of one zone from the i-th (CI runs the core zone on n machines)
   test scale       run the scale zone alone on a quiet machine: 100k and 1M seeded assets, each request
                    at most twice as slow at 1M (verdict PASS, FAIL, NOISY: exit 3, INCONCLUSIVE: exit 4)

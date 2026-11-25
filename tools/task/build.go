@@ -114,6 +114,25 @@ func test(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "scale" {
 		return testScale(ctx, args[1:])
 	}
+	if len(args) > 0 && args[0] == "--pause" {
+		d := pauseDefault
+		if len(args) > 2 {
+			return usageErr("--pause takes at most one argument, the duration (go tool task test --pause 1h)")
+		}
+		if len(args) == 2 {
+			var err error
+			if d, err = time.ParseDuration(args[1]); err != nil {
+				return usageErr(fmt.Sprintf("--pause takes a duration such as 1h or 30m, not %q", args[1]))
+			}
+		}
+		return pause(d)
+	}
+	if len(args) > 0 && args[0] == "--resume" {
+		if len(args) > 1 {
+			return usageErr("--resume takes no arguments")
+		}
+		return resume()
+	}
 	var zones []string
 	now, final := false, false
 names:
@@ -217,6 +236,7 @@ names:
 		}
 		argv = append(argv, args...)
 		step("zone %s: %s", zone, strings.Join(argv, " "))
+		g.tested()
 		err = runStep(ctx, ".", env, argv...)
 		if ctx.Err() != nil {
 			return exitError{130}

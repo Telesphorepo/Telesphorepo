@@ -36,13 +36,18 @@ import (
 // --shard), its code is untested, and the run before it was not a final one. So a final run that
 // fails is followed by the normal cooldown, and finals never skip it twice in a row.
 
+//
+// A pause (--pause, which the person at the terminal confirms) lets every run skip the cooldown
+// and the check for changes until it ends; --resume ends it early.
+
 // ledger is what the gate keeps of the runs on this computer.
 type ledger struct {
-	LastRun   time.Time  `json:"last_run"`   // the end of the last run; its start while it runs
-	Until     time.Time  `json:"until"`      // the end of the cooldown
-	Trees     []string   `json:"trees"`      // treeFingerprint of the latest runs, newest last
-	LastFinal bool       `json:"last_final"` // the last run was a final run
-	Finals    []finalRun `json:"finals"`     // the latest final runs, newest last
+	LastRun     time.Time  `json:"last_run"`     // the end of the last run; its start while it runs
+	Until       time.Time  `json:"until"`        // the end of the cooldown
+	PausedUntil time.Time  `json:"paused_until"` // the end of the pause
+	Trees       []string   `json:"trees"`        // treeFingerprint of the latest runs, newest last
+	LastFinal   bool       `json:"last_final"`   // the last run was a final run
+	Finals      []finalRun `json:"finals"`       // the latest final runs, newest last
 }
 
 // finalRun is the record of a final run.
@@ -63,6 +68,68 @@ type gate struct {
 	ledgerFile string
 	ledger     ledger
 	final      bool
+	tree       string // treeFingerprint of the run, recorded once its first zone's tests start
+}
+
+// pauseDefault and pauseMost are the length of a pause without a duration, and the longest one.
+const pauseDefault, pauseMost = 2 * time.Hour, 12 * time.Hour
+
+// ledgerPath is the ledger file, in e2erun.Dir.
+func ledgerPath() (string, error) {
+	dir, err := e2erun.Dir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "ledger.json"), nil
+}
+
+func readLedger(file string) ledger {
+	var l ledger
+	if b, err := os.ReadFile(file); err == nil {
+		_ = json.Unmarshal(b, &l)
+	}
+	return l
+}
+
+// pause lets every run skip the cooldown and the check for changes for d, after the person at
+// the terminal confirms it.
+func pause(d time.Duration) error {
+	if d <= 0 || d > pauseMost {
+		return usageErr(fmt.Sprintf("--pause takes a duration up to %s (e.g. go tool task test --pause 1h)", pauseMost))
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("--pause asks the person at the terminal, and there is none: an agent or a script does not pause the gate")
+	}
+	fmt.Printf("Let every run skip the cooldown and the check for changes for %s? Type pause to confirm: ", d)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	if strings.TrimSpace(line) != "pause" {
+		return errors.New("not confirmed: the gate is not paused")
+	}
+	file, err := ledgerPath()
+	if err != nil {
+		return err
+	}
+	g := &gate{ledgerFile: file, ledger: readLedger(file)}
+	g.ledger.PausedUntil = time.Now().Add(d)
+	g.save()
+	step("the gate is paused until %s; go tool task test --resume ends it", g.ledger.PausedUntil.Format("15:04"))
+	return nil
+}
+
+// resume ends a pause.
+func resume() error {
+	file, err := ledgerPath()
+	if err != nil {
+		return err
+	}
+	g := &gate{ledgerFile: file, ledger: readLedger(file)}
+	g.ledger.PausedUntil = time.Time{}
+	g.save()
+	step("the gate is on: runs wait for the cooldown and need changed code again")
+	return nil
 }
 
 const cooldownRefusal = `the e2e tests ran on this computer too recently. Running them this often means the work is not batched.
@@ -71,7 +138,8 @@ Go on with the next part of the work without running tests. Run the tests once, 
 and name every zone that batch needs in that one run (e.g. go tool task test core clients).
 The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
 When the work is finished (every change committed, nothing left to do), go tool task test --final <zones> runs those whole
-zones once without the cooldown. It is refused while anything is uncommitted, with -run or --shard, and right after another final run.`
+zones once without the cooldown. It is refused while anything is uncommitted, with -run or --shard, and right after another final run.
+The person at the terminal can pause the gate for a while (go tool task test --pause); an agent cannot.`
 
 // The cooldown is a new random length after every run and every refused start, and the ledger
 // keeps only when it ends: so work is batched (finish a change, then test it once), and nothing in
@@ -104,16 +172,21 @@ func openGate(ctx context.Context, now, final bool, zones []string) (*gate, erro
 		return nil, err
 	}
 	g := &gate{ledgerFile: filepath.Join(dir, "ledger.json"), final: final}
-	if b, err := os.ReadFile(g.ledgerFile); err == nil {
-		_ = json.Unmarshal(b, &g.ledger)
-	}
+	g.ledger = readLedger(g.ledgerFile)
 	tree := treeFingerprint(ctx)
+	g.tree = tree
 
-	if now {
+	paused := time.Now().Before(g.ledger.PausedUntil)
+	if paused {
+		step("the gate is paused until %s: no cooldown and no check for changes", g.ledger.PausedUntil.Format("15:04"))
+	}
+	switch {
+	case paused:
+	case now:
 		if err := confirmNow(); err != nil {
 			return nil, err
 		}
-	} else {
+	default:
 		if final {
 			if err := finalAllowed(ctx, g.ledger); err != nil {
 				return nil, err
@@ -143,14 +216,21 @@ func openGate(ctx context.Context, now, final bool, zones []string) (*gate, erro
 		}
 		step("final run: the cooldown is skipped (every change committed, whole zones, the run before was not final)")
 	}
-	if tree != "" {
-		g.ledger.Trees = append(g.ledger.Trees, tree)
-		if n := len(g.ledger.Trees); n > ledgerTrees {
-			g.ledger.Trees = g.ledger.Trees[n-ledgerTrees:]
-		}
-	}
 	g.save()
 	return g, nil
+}
+
+// tested records the run's code as tested; the run calls it when its first zone's tests start, so
+// a run that stops before (no container engine, a failed image build) leaves the code untested.
+func (g *gate) tested() {
+	if g.tree == "" || slices.Contains(g.ledger.Trees, g.tree) {
+		return
+	}
+	g.ledger.Trees = append(g.ledger.Trees, g.tree)
+	if n := len(g.ledger.Trees); n > ledgerTrees {
+		g.ledger.Trees = g.ledger.Trees[n-ledgerTrees:]
+	}
+	g.save()
 }
 
 // lock takes the one run of the computer: e2erun.RunningFile, created exclusively. A file of a
