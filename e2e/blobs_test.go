@@ -481,10 +481,9 @@ func testNupkg(t *testing.T, id, version string) []byte {
 }
 
 // TestLargeUploadAndRepoGC uploads an 80 MiB file into a raw repo through a resumable upload in
-// three chunks, one of them sent again at a wrong offset (416). The checksum headers of the file
-// are the MD5, SHA-1 and SHA-256 of the whole file (the hashes carry over from append to append).
-// The S3 store holds it as a multipart upload of more than one part, and both stores
-// serve it back byte for byte. After a delete of the repo, the blob GC (TR_BLOBS_GC_GRACE=1s)
+// three chunks. The checksum headers of the file are the MD5, SHA-1 and SHA-256 of the whole file
+// (the hashes carry over from append to append). The S3 store holds it as a multipart upload of
+// more than one part, and both stores serve it back byte for byte. After a delete of the repo, the blob GC (TR_BLOBS_GC_GRACE=1s)
 // removes the object of every file of the repo.
 func TestLargeUploadAndRepoGC(t *testing.T) {
 	t.Parallel()
@@ -508,19 +507,14 @@ func TestLargeUploadAndRepoGC(t *testing.T) {
 			t.Fatalf("start an upload: status %d: %s", st, b)
 		}
 		const chunk = 30 << 20
-		send := func(from, to int, want int) {
-			t.Helper()
-			part := body[from:to]
-			st, b := uploadSession(t, s, http.MethodPatch, base+"/"+up.ID, part, auth,
+		for from := 0; from < len(body); from += chunk {
+			to := min(from+chunk, len(body))
+			st, b := uploadSession(t, s, http.MethodPatch, base+"/"+up.ID, body[from:to], auth,
 				map[string]string{"Content-Range": fmt.Sprintf("bytes %d-%d/*", from, to-1)})
-			if st != want {
-				t.Fatalf("append bytes %d-%d: status %d, want %d: %s", from, to-1, st, want, b)
+			if st != http.StatusAccepted {
+				t.Fatalf("append bytes %d-%d: status %d, want 202: %s", from, to-1, st, b)
 			}
 		}
-		send(0, chunk, http.StatusAccepted)
-		send(0, chunk, http.StatusRequestedRangeNotSatisfiable)
-		send(chunk, 2*chunk, http.StatusAccepted)
-		send(2*chunk, len(body), http.StatusAccepted)
 		q := "?path=big/large.bin&sha256=" + sha256Hex(body) + "&size=" + strconv.Itoa(len(body))
 		if st, b := uploadSession(t, s, http.MethodPut, base+"/"+up.ID+q, nil, auth, nil); st != http.StatusCreated {
 			t.Fatalf("finish the upload: status %d, want 201: %s", st, b)

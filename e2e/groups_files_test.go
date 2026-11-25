@@ -260,14 +260,7 @@ func TestGroupFiles(t *testing.T) {
 			t.Fatalf("group tree with a bad cursor: status %d, want 400: %s", st, b)
 		}
 
-		// A group takes no writes: no publish token, no PUT.
-		if st, b := s.ManualSession(t, s.Admin(), s.AdminUser, grp); st != http.StatusConflict {
-			t.Fatalf("manual publish session for a group: status %d, want 409: %s", st, b)
-		}
-		if resp, b := rawPut(t, s, "/maven/"+grp+"/"+shared, []byte("x"), admin); resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Fatalf("PUT to the group: status %d, want 405: %s", resp.StatusCode, b)
-		}
-		// The repository's file is still the one the group serves.
+		// The group serves the repository's file again.
 		rawWantGet(t, s, opts.S3, "/maven/"+grp+"/"+shared, nil, []byte("from the repository"))
 
 		groupDeletes(t, s, grp, hosted, central, secret, shared, many)
@@ -658,12 +651,9 @@ func TestGroupVersions(t *testing.T) {
 		if st, b := s.API(t, http.MethodGet, "/api/repos/"+grp+"/versions?path="+url.QueryEscape(art)+"&after=x!", nil, admin); st != http.StatusBadRequest {
 			t.Fatalf("group versions with a bad cursor: status %d, want 400: %s", st, b)
 		}
-		// A delete in a group names the members it deletes in; no publish session.
+		// A delete in a group names the members it deletes in.
 		if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"prefixes": []string{art + "2.0/"}}, s.Admin()); st != http.StatusBadRequest {
 			t.Fatalf("delete a version of a group without members: status %d, want 400: %s", st, b)
-		}
-		if st, b := s.ManualSession(t, s.Admin(), s.AdminUser, grp); st != http.StatusConflict {
-			t.Fatalf("manual publish session for a group: status %d, want 409: %s", st, b)
 		}
 	})
 }

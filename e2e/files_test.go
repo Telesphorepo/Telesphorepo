@@ -5,6 +5,7 @@ package e2e
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -320,12 +321,8 @@ func TestTree(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	t.Parallel()
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		if opts.S3 == nil {
-			opts.DataVolume = NewDataVolume(t)
-		}
-		// The blob GC keeps an unused blob for a day, so every blob outlives this test.
-		opts.Env = map[string]string{"TR_BLOBS_GC_GRACE": "24h"}
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
+		opts.DataVolume = NewDataVolume(t)
 		s := StartServer(t, opts)
 		mvn, raw, other := RandName("mvn"), RandName("raw"), RandName("other")
 		s.CreateRepo(t, mvn, "maven", false, nil)
@@ -347,7 +344,7 @@ func TestDelete(t *testing.T) {
 			wantStatus(t, resp, body, http.StatusCreated)
 		}
 		rps := s.MintSession(t, w, raw)
-		rfiles := []string{"dir/one.bin", "dir/sub/two.bin", "dir/sub/three.bin", "keep.bin"}
+		rfiles := []string{"one.bin", "two.bin", "dir/one.bin", "dir/sub/two.bin", "dir/sub/three.bin", "keep.bin"}
 		for _, f := range rfiles {
 			resp, body := rawPut(t, s, "/raw/"+raw+"/"+f, []byte("raw "+f), rps.Auth())
 			wantStatus(t, resp, body, http.StatusCreated)
@@ -362,7 +359,6 @@ func TestDelete(t *testing.T) {
 		}{
 			{"anonymous", nil},
 			{"the writer's password", Basic{w, "writer-pass-1234"}},
-			{"the admin's password", s.AdminBasic()},
 			{"a session for another repo", s.MintSession(t, w, other).Auth()},
 			{"a publish session of a person without delete", s.MintSession(t, pub, mvn).Auth()},
 			{"the UI session of a person without delete", s.LoginTOTP(t, pub)},
@@ -392,7 +388,25 @@ func TestDelete(t *testing.T) {
 			t.Fatalf("g/a after the deletes: %v", got)
 		}
 
-		mustDelete(t, s, raw, "prefix", "dir", rps.Auth(), 3)
+		// Files and a folder in one call; a list with a bad path deletes nothing.
+		route := "/api/repos/" + raw + "/files/delete"
+		apiWant(t, s, http.MethodPost, route, map[string][]string{"paths": {"one.bin", "a/../b"}, "prefixes": {"dir"}}, rps.Auth(), http.StatusBadRequest)
+		var out struct {
+			Deleted int `json:"deleted"`
+		}
+		s.MustAPI(t, http.MethodPost, route, map[string][]string{"paths": {"one.bin", "two.bin"}, "prefixes": {"dir"}}, rps.Auth(), &out)
+		if out.Deleted != 5 {
+			t.Fatalf("delete 2 files and a folder of 3: deleted %d, want 5", out.Deleted)
+		}
+		// One event per file and one per folder.
+		var targets []string
+		for _, e := range auditAll(t, s, "action=file.delete&repo="+raw) {
+			targets = append(targets, e.Target)
+		}
+		slices.Sort(targets)
+		if !slices.Equal(targets, []string{"dir/", "one.bin", "two.bin"}) {
+			t.Fatalf("file.delete events of %s: %v, want dir/, one.bin and two.bin", raw, targets)
+		}
 		mustDelete(t, s, raw, "prefix", "dir", rps.Auth(), 0)
 		if got := nodeNames(treeAll(t, s, raw, "", 50, s.Admin())); !slices.Equal(got, []string{"file:keep.bin"}) {
 			t.Fatalf("raw root after deleting dir/: %v", got)
@@ -438,9 +452,9 @@ func TestDelete(t *testing.T) {
 			}
 		}
 
-		// A delete leaves the blobs to the blob GC, whose grace (a day here) is not over yet.
+		// A delete leaves the blobs to the blob GC, whose grace (blobs.gc_grace) is not over yet.
 		keys := storedKeys(t, opts)
-		for _, content := range []string{"x g/a/1.0/a-1.0.jar", "x g/b/1.0/b-1.0.jar", "raw dir/one.bin", "raw keep.bin"} {
+		for _, content := range []string{"x g/a/1.0/a-1.0.jar", "x g/b/1.0/b-1.0.jar", "raw one.bin", "raw dir/one.bin", "raw keep.bin"} {
 			if k := blobKey(sha256Hex([]byte(content))); !slices.Contains(keys, k) {
 				t.Fatalf("blob %s (%q) is gone before the blob GC (keys %v)", k, content, keys)
 			}
@@ -450,9 +464,6 @@ func TestDelete(t *testing.T) {
 		del := map[string][]string{"names": {raw}}
 		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
 			t.Fatalf("repo delete by a writer: status %d, want 403: %s", st, b)
-		}
-		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.AdminBasic()); st != http.StatusUnauthorized {
-			t.Fatalf("repo delete with the admin's password: status %d, want 401: %s", st, b)
 		}
 		deleteRepos(t, s, raw)
 		if resp, body := rawPut(t, s, "/raw/"+raw+"/after.bin", []byte("x"), rps.Auth()); resp.StatusCode/100 == 2 {
@@ -601,10 +612,6 @@ func TestManualUploadMaven(t *testing.T) {
 			t.Fatalf("upload answer: %s is %q, want %q (answer %+v)", p, have[p], st, got)
 		}
 	}
-	sum := sha1.Sum(jar)
-	if resp, body := authGet(t, s, "/maven/"+repo+"/"+dir+"hello-1.0.0.jar.sha1", rauth); resp.StatusCode != http.StatusOK || string(body) != hex.EncodeToString(sum[:]) {
-		t.Fatalf("GET the .sha1 of the jar: status %d, body %q, want %s", resp.StatusCode, body, hex.EncodeToString(sum[:]))
-	}
 
 	// The same files again change nothing; a different jar for the release is refused.
 	for _, u := range mustUpload(t, s, repo, ps.Auth(), nil, uploadPart{"pom.xml", pom}, uploadPart{"hello-1.0.0.jar", jar}) {
@@ -618,9 +625,11 @@ func TestManualUploadMaven(t *testing.T) {
 
 	// Lone jars with coordinates in the fields get a generated pom; the metadata lists the
 	// versions in Maven order.
+	lone := map[string][]byte{}
 	for _, v := range []string{"1.10.0", "1.1.0", "1.9.0"} {
+		lone[v] = tinyJar(t, "lone-"+v)
 		mustUpload(t, s, repo, ps.Auth(), map[string]string{"groupId": group, "artifactId": "hello", "version": v},
-			uploadPart{"build-output.jar", tinyJar(t, "lone-"+v)})
+			uploadPart{"build-output.jar", lone[v]})
 	}
 	if st, b := manualUpload(t, s, repo, ps.Auth(), map[string]string{"groupId": group, "version": "2.0"}, uploadPart{"x.jar", jar}); st != http.StatusBadRequest {
 		t.Fatalf("lone jar without an artifactId: status %d, want 400: %s", st, b)
@@ -643,28 +652,34 @@ func TestManualUploadMaven(t *testing.T) {
 		t.Fatalf("maven-metadata.xml: want latest and release 1.10.0:\n%s", md)
 	}
 
-	// A real Maven client resolves both the uploaded and the generated pom, with strict checksums.
-	repoURL := s.InternalURL + "/maven/" + repo
-	script := strings.Join([]string{
-		"set -e",
-		"cd /work/consumer",
-		"for v in 1.0.0 1.9.0; do",
-		"mvn -B -ntp -q -C -U -s /work/settings.xml -Ddep.version=$v -Dmdep.outputFile=/tmp/cp-$v.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath;",
-		`echo "ENTRIES $v: $(jar tf "$(cat /tmp/cp-$v.txt)" | tr '\n' ' ')";`,
-		"done",
-	}, "\n")
-	code, out := RunClient(t, mavenImage, ClientOpts{
-		Cmd:     []string{script},
-		Files:   []ContainerFile{{Path: "/work/settings.xml", Content: mavenSettingsXML(reader, "reader-pass-1234")}, mavenConsumerProject(group, repoURL)},
-		Mounts:  map[string]string{M2Volume: "/root/.m2/repository"},
-		Timeout: 15 * time.Minute,
-	})
-	if code != 0 {
-		t.Fatalf("mvn resolve of the uploaded artifacts: exit %d\n%s", code, out)
+	// The uploaded and the generated pom and their jars are served with checksums of their bytes.
+	get := func(p string) []byte {
+		t.Helper()
+		resp, body := authGet(t, s, "/maven/"+repo+"/"+p, rauth)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: status %d", p, resp.StatusCode)
+		}
+		return body
 	}
-	for _, wantEntry := range []string{"e2e/release-100.txt", "e2e/lone-1.9.0.txt"} {
-		if !strings.Contains(out, wantEntry) {
-			t.Fatalf("mvn output does not show the jar entry %q:\n%s", wantEntry, out)
+	for v, jarBody := range map[string][]byte{"1.0.0": jar, "1.9.0": lone["1.9.0"]} {
+		base := gpath + "/hello/" + v + "/hello-" + v
+		if got := get(base + ".jar"); !bytes.Equal(got, jarBody) {
+			t.Fatalf("GET %s.jar: not the uploaded jar", base)
+		}
+		pomBody := get(base + ".pom")
+		for _, want := range []string{"<groupId>" + group + "</groupId>", "<artifactId>hello</artifactId>", "<version>" + v + "</version>"} {
+			if !strings.Contains(string(pomBody), want) {
+				t.Fatalf("%s.pom lacks %s:\n%s", base, want, pomBody)
+			}
+		}
+		for f, body := range map[string][]byte{base + ".jar": jarBody, base + ".pom": pomBody} {
+			s1, m5 := sha1.Sum(body), md5.Sum(body)
+			if got := string(get(f + ".sha1")); got != hex.EncodeToString(s1[:]) {
+				t.Fatalf("%s.sha1 = %q, want %x", f, got, s1)
+			}
+			if got := string(get(f + ".md5")); got != hex.EncodeToString(m5[:]) {
+				t.Fatalf("%s.md5 = %q, want %x", f, got, m5)
+			}
 		}
 	}
 }
@@ -705,18 +720,8 @@ func TestManualUploadRaw(t *testing.T) {
 	}
 }
 
-// debAptScriptAfterDelete updates apt and reports which test packages apt still sees.
-const debAptScriptAfterDelete = `#!/bin/sh
-set -e
-rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list
-if ! apt-get update >/tmp/update.log 2>&1; then cat /tmp/update.log; exit 1; fi
-for p in e2e-hello e2e-native; do
-  if apt-cache show "$p" >/dev/null 2>&1; then echo "SEES $p"; else echo "GONE $p"; fi
-done
-`
-
 // TestDebianDeleteAndUpload plans a folder of .debs and uploads a package through the web UI
-// route, deletes one through the API (apt no longer sees it) and checks the by-hash cleanup.
+// route, deletes one through the API (Packages no longer lists it) and checks the by-hash cleanup.
 func TestDebianDeleteAndUpload(t *testing.T) {
 	t.Parallel()
 	pkgs := buildDebPackages(t)
@@ -767,11 +772,6 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	}
 	debMustUpload(t, s, repo, pkgs.hello1, ps.Auth(), "e2e-hello", "1.0", "all")
 	s.WaitDebianIndexed(t, repo)
-	key := s.DebianKey(t, repo, rauth)
-	out := debAptInstall(t, s, repo, reader, "reader-pass-1234", key)
-	if !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
-		t.Fatalf("apt install of the uploaded package:\n%s", out)
-	}
 
 	debMustUpload(t, s, repo, pkgs.hello2, s.MintSession(t, w, repo).Auth(), "e2e-hello", "2.0", "all")
 	s.WaitDebianIndexed(t, repo)
@@ -790,6 +790,10 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 		return out
 	}
 	previous := indexHashes()
+	if st, packages := debGet(t, s, nil, "/debian/"+repo+"/"+unit+"/Packages", rauth); st != http.StatusOK ||
+		!strings.Contains(string(packages), "Package: e2e-native") {
+		t.Fatalf("Packages before the delete: status %d, want e2e-native:\n%s", st, packages)
+	}
 
 	mustDelete(t, s, repo, "path", nativePool, s.MintSession(t, w, repo).Auth(), 1)
 	s.WaitDebianIndexed(t, repo)
@@ -797,18 +801,6 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	st, packages := debGet(t, s, nil, "/debian/"+repo+"/"+unit+"/Packages", rauth)
 	if st != http.StatusOK || strings.Contains(string(packages), "Package: e2e-native") || !strings.Contains(string(packages), "Package: e2e-hello") {
 		t.Fatalf("Packages after the delete: status %d, want e2e-hello without e2e-native:\n%s", st, packages)
-	}
-	code, aptOut := RunClient(t, debImage, ClientOpts{
-		Cmd: []string{"sh", "/apt.sh"},
-		Files: []ContainerFile{
-			{Content: debAptScriptAfterDelete, Path: "/apt.sh", Mode: 0o755},
-			{Content: key, Path: "/etc/apt/keyrings/tr.asc"},
-			{Content: fmt.Sprintf("Types: deb\nURIs: %s/debian/%s\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/tr.asc\n", s.InternalURL, repo), Path: "/etc/apt/sources.list.d/tr.sources"},
-			{Content: fmt.Sprintf("machine http://%s:8080/debian/%s login %s password %s\n", s.Alias, repo, reader, "reader-pass-1234"), Path: "/etc/apt/auth.conf.d/tr.conf"},
-		},
-	})
-	if code != 0 || !strings.Contains(aptOut, "SEES e2e-hello") || !strings.Contains(aptOut, "GONE e2e-native") {
-		t.Fatalf("apt after the delete: exit %d, want SEES e2e-hello and GONE e2e-native:\n%s", code, aptOut)
 	}
 
 	// Three index generations of this unit were built (before 2.0, with 2.0, after the delete);

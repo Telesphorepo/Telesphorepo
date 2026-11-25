@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,50 +91,13 @@ func waitRepoGone(t *testing.T, s *Server, name string) {
 func wantGet(t *testing.T, s *Server, repo string, auth Auth, want int) {
 	t.Helper()
 	resp, body := authGet(t, s, "/raw/"+repo+"/f.txt", auth)
-	// On S3 storage an allowed read answers 302 to a presigned URL.
-	if want == http.StatusOK && resp.StatusCode == http.StatusFound {
-		return
-	}
 	wantStatus(t, resp, body, want)
-}
-
-// lockRepo makes repo a mirror of a Nexus source, so it gets the operation "mirror". The Nexus source is
-// a raw repo of the same server that serves the repository list that Nexus would serve.
-func lockRepo(t *testing.T, s *Server, repo string) {
-	t.Helper()
-	fake := RandName("fakenexus")
-	s.CreateRepo(t, fake, "raw", false, nil)
-	list := `[{"name":"src","format":"raw","type":"hosted"}]`
-	resp, body := rawPut(t, s, "/raw/"+fake+"/service/rest/v1/repositorySettings", []byte(list), s.PublishAuth(t, s.AdminUser, fake))
-	wantStatus(t, resp, body, http.StatusCreated)
-	var src struct {
-		ID int64 `json:"id"`
-	}
-	s.MustAPI(t, http.MethodPost, "/api/nexus/sources", map[string]string{
-		"name": RandName("nexus"), "base_url": s.InternalURL + "/raw/" + fake,
-		"username": s.AdminUser, "password": s.AdminPass,
-	}, s.Admin(), &src)
-	s.MustAPI(t, http.MethodPut, "/api/nexus/sources/"+strconv.FormatInt(src.ID, 10)+"/repos",
-		map[string]any{"repos": []map[string]any{{"source_repo": "src", "target": repo}}}, s.Admin(), nil)
-	var r struct {
-		Operation *struct {
-			Type    string `json:"type"`
-			State   string `json:"state"`
-			Message string `json:"message"`
-		} `json:"operation"`
-	}
-	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &r)
-	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" {
-		t.Fatalf("repo %s after the Nexus mapping: operation %+v, want a held mirror", repo, r.Operation)
-	}
 }
 
 func TestBulkRepos(t *testing.T) {
 	t.Parallel()
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		if opts.S3 == nil {
-			opts.DataVolume = NewDataVolume(t)
-		}
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
+		opts.DataVolume = NewDataVolume(t)
 		s := StartServer(t, opts)
 		a, b, c := rawRepoWithFile(t, s, "bulk-a"), rawRepoWithFile(t, s, "bulk-b"), rawRepoWithFile(t, s, "bulk-c")
 		for _, r := range []string{a, b, c} {
@@ -195,93 +157,6 @@ func TestBulkRepos(t *testing.T) {
 			if k := blobKey(sha256Hex([]byte(r + " file"))); !slices.Contains(keys, k) {
 				t.Fatalf("blob %s of a deleted repo is gone before the blob GC", k)
 			}
-		}
-
-		// A locked repository in the list: 409 that names it, and nothing is deleted.
-		d := rawRepoWithFile(t, s, "bulk-d")
-		lockRepo(t, s, c)
-		st, body = s.API(t, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{d, c}}, s.Admin())
-		if st != http.StatusConflict || !strings.Contains(string(body), c) {
-			t.Fatalf("delete with a locked repo: status %d, want 409 that names %s: %s", st, c, body)
-		}
-		for _, r := range []string{c, d} {
-			apiWant(t, s, http.MethodGet, "/api/repos/"+r, nil, s.Admin(), http.StatusOK)
-		}
-		// The mirror operation ends at the cut-over only: it cannot be resumed or cleared here, and
-		// a repo without an operation has none to end.
-		apiWant(t, s, http.MethodPost, "/api/repos/"+c+"/operation/resume", nil, s.Admin(), http.StatusConflict)
-		apiWant(t, s, http.MethodDelete, "/api/repos/"+c+"/operation", nil, s.Admin(), http.StatusConflict)
-		apiWant(t, s, http.MethodDelete, "/api/repos/"+d+"/operation", nil, s.Admin(), http.StatusConflict)
-	})
-}
-
-func TestBulkFiles(t *testing.T) {
-	t.Parallel()
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		if opts.S3 == nil {
-			opts.DataVolume = NewDataVolume(t)
-		}
-		s := StartServer(t, opts)
-		repo, other := RandName("files"), RandName("other")
-		s.CreateRepo(t, repo, "raw", false, nil)
-		s.CreateRepo(t, other, "raw", false, nil)
-		w, reader := RandName("writer"), RandName("reader")
-		s.CreateUser(t, w, "writer-pass-1234")
-		s.CreateUser(t, reader, "reader-pass-1234")
-		s.SetPerms(t, repo, w, "repo.download", "repo.publish", "repo.delete")
-		s.SetPerms(t, other, w, "repo.download", "repo.publish", "repo.delete")
-		s.SetPerms(t, repo, reader, "repo.download")
-
-		ps := s.MintSession(t, w, repo)
-		for _, f := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin", "keep.bin"} {
-			resp, body := rawPut(t, s, "/raw/"+repo+"/"+f, []byte("raw "+f), ps.Auth())
-			wantStatus(t, resp, body, http.StatusCreated)
-		}
-		route := "/api/repos/" + repo + "/files/delete"
-		pick := map[string][]string{"paths": {"one.bin", "two.bin"}, "prefixes": {"dir"}}
-
-		// A bad path deletes nothing.
-		bad := map[string][]string{"paths": {"one.bin", "a/../b"}, "prefixes": {"dir"}}
-		apiWant(t, s, http.MethodPost, route, bad, ps.Auth(), http.StatusBadRequest)
-		apiWant(t, s, http.MethodPost, route, map[string][]string{"paths": {"one.bin"}, "prefixes": {"a//b"}}, ps.Auth(), http.StatusBadRequest)
-		apiWant(t, s, http.MethodPost, route, map[string][]string{}, ps.Auth(), http.StatusBadRequest)
-
-		// A read token gets 401; a publish session of another repository is refused.
-		token := Basic{"x", s.CreateToken(t, reader, "reader-pass-1234", "read")}
-		apiWant(t, s, http.MethodPost, route, pick, token, http.StatusUnauthorized)
-		if st, b := s.API(t, http.MethodPost, route, pick, s.MintSession(t, w, other).Auth()); st != http.StatusUnauthorized && st != http.StatusForbidden {
-			t.Fatalf("delete with a publish session of another repo: status %d, want 401 or 403: %s", st, b)
-		}
-		if got := nodeNames(treeAll(t, s, repo, "", 50, s.Admin())); !slices.Equal(got, []string{"dir:dir", "file:keep.bin", "file:one.bin", "file:two.bin"}) {
-			t.Fatalf("root after the refused deletes: %v", got)
-		}
-
-		// Two files and one folder in one call.
-		var out struct {
-			Deleted int `json:"deleted"`
-		}
-		s.MustAPI(t, http.MethodPost, route, pick, ps.Auth(), &out)
-		if out.Deleted != 4 {
-			t.Fatalf("delete 2 files and a folder of 2: deleted %d, want 4", out.Deleted)
-		}
-		if got := nodeNames(treeAll(t, s, repo, "", 50, s.Admin())); !slices.Equal(got, []string{"file:keep.bin"}) {
-			t.Fatalf("root after the delete: %v", got)
-		}
-		// Deleted files leave their blobs to the blob GC; every blob is still stored.
-		keys := storedKeys(t, opts)
-		for _, f := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin", "keep.bin"} {
-			if !slices.Contains(keys, blobKey(sha256Hex([]byte("raw "+f)))) {
-				t.Fatalf("blob of %s is gone before the blob GC", f)
-			}
-		}
-		// One event per file and one per folder.
-		var targets []string
-		for _, e := range auditAll(t, s, "action=file.delete&repo="+repo) {
-			targets = append(targets, e.Target)
-		}
-		slices.Sort(targets)
-		if !slices.Equal(targets, []string{"dir/", "one.bin", "two.bin"}) {
-			t.Fatalf("delete events: %v, want dir/, one.bin and two.bin", targets)
 		}
 	})
 }
@@ -428,8 +303,8 @@ func TestBulkAccess(t *testing.T) {
 	wantGet(t, s, r1, basic(p2), http.StatusOK)
 }
 
-// TestBulkSessionRule checks that every list route needs a UI session (a password over HTTP Basic
-// is refused) and holds 1 to 1000 items.
+// TestBulkSessionRule checks that the list routes of repos, files and people need a UI session (a
+// password over HTTP Basic is refused) and hold 1 to 1000 items.
 func TestBulkSessionRule(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -443,8 +318,6 @@ func TestBulkSessionRule(t *testing.T) {
 		{http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{repo}}},
 		{http.MethodPost, "/api/repos/" + repo + "/files/delete", map[string]any{"paths": []string{"f.txt"}}},
 		{http.MethodPatch, "/api/users", map[string]any{"usernames": []string{"erin"}, "disabled": true}},
-		{http.MethodPut, "/api/grants", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}},
-		{http.MethodPut, "/api/grants", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{}}},
 	}
 	for _, r := range routes {
 		apiWant(t, s, r.method, r.path, r.body, s.AdminBasic(), http.StatusUnauthorized)

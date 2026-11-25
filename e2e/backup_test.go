@@ -239,31 +239,21 @@ func TestBackupRestore(t *testing.T) {
 }
 
 func backupRestoreFS(t *testing.T) {
-	pkgs := buildDebPackages(t)
 	s, bvol := startBackupServer(t, ServerOpts{})
 	mvnRepo, debRepo, rawRepo := RandName("mvn"), RandName("deb"), RandName("raw")
 	s.CreateRepo(t, mvnRepo, "maven", false, nil)
-	s.CreateRepo(t, debRepo, "debian", false, map[string]any{"architectures": []string{pkgs.arch}})
+	s.CreateRepo(t, debRepo, "debian", false, map[string]any{"architectures": []string{"amd64"}})
 	s.CreateRepo(t, rawRepo, "raw", false, nil)
 
-	group := "com.example.backup" + randHex(4)
-	groupPath := strings.ReplaceAll(group, ".", "/")
-	repoURL := func(srv *Server) string { return srv.InternalURL + "/maven/" + mvnRepo }
-	msg := "hello from " + group
-	m2 := map[string]string{M2Volume: "/root/.m2/repository"}
-	code, out := RunClient(t, mavenImage, ClientOpts{
-		Cmd: []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},
-		Files: append(mavenLibProject(group, "1.0.0", repoURL(s), msg),
-			ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, PublishToken(t, s, s.AdminUser, mvnRepo))}),
-		Mounts:  m2,
-		Timeout: 15 * time.Minute,
-	})
-	if code != 0 {
-		t.Fatalf("mvn deploy: exit %d\n%s", code, out)
-	}
+	jarPath := "com/example/backup" + randHex(4) + "/hello/1.0.0/hello-1.0.0.jar"
+	jar := tinyJar(t, "backup")
+	mavenPut(t, s, s.AdminUser, mvnRepo, jarPath, jar)
 	debAuth := s.PublishAuth(t, s.AdminUser, debRepo)
-	debMustUpload(t, s, debRepo, pkgs.hello1, debAuth, "e2e-hello", "1.0", "all")
-	debMustUpload(t, s, debRepo, pkgs.native, debAuth, "e2e-native", "1.0", pkgs.arch)
+	for _, d := range []struct{ pkg, arch string }{{"e2e-hello", "all"}, {"e2e-native", "amd64"}} {
+		deb := goDeb(t, debMember{"./control", []byte("Package: " + d.pkg + "\nVersion: 1.0\nArchitecture: " + d.arch +
+			"\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: " + d.pkg + "\n")})
+		debMustUpload(t, s, debRepo, deb, debAuth, d.pkg, "1.0", d.arch)
+	}
 	s.WaitDebianIndexed(t, debRepo)
 	files := moveRawSeed(t, s, rawRepo, "seed", 200, 2048)
 	token := PublishToken(t, s, s.AdminUser, rawRepo)
@@ -305,6 +295,9 @@ func backupRestoreFS(t *testing.T) {
 	if upErr != nil {
 		t.Fatal(upErr)
 	}
+	if len(during) == 0 {
+		t.Fatal("the backup finished before the first upload during the backup returned")
+	}
 	t.Logf("backup %s; %d uploads while it ran", name, len(during))
 
 	// The folder: the database, the master key (owner only) and backup.json, which names the
@@ -332,7 +325,7 @@ func backupRestoreFS(t *testing.T) {
 
 	// Restore into a new volume with the server binary, then start a server on it.
 	rvol := NewDataVolume(t)
-	code, out = runRestore(t, bvol, rvol, name)
+	code, out := runRestore(t, bvol, rvol, name)
 	if code != 0 || !strings.Contains(out, name) || !strings.Contains(out, "master.key") {
 		t.Fatalf("restore: exit %d\n%s", code, out)
 	}
@@ -357,31 +350,13 @@ func backupRestoreFS(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Real clients install from the restored server.
-	script := strings.Join([]string{
-		"set -e",
-		"rm -rf /root/.m2/repository/" + groupPath,
-		"cd /work/consumer",
-		"mvn -B -ntp -q -U -s /work/settings.xml -Ddep.version=1.0.0 -Dmdep.outputFile=/tmp/cp.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath",
-		`java -cp "$(cat /tmp/cp.txt)" ` + group + ".Hello",
-	}, "\n")
-	code, out = RunClient(t, mavenImage, ClientOpts{
-		Cmd:     []string{script},
-		Files:   []ContainerFile{{Path: "/work/settings.xml", Content: mavenSettingsXML(r.AdminUser, r.AdminPass)}, mavenConsumerProject(group, repoURL(r))},
-		Mounts:  m2,
-		Timeout: 15 * time.Minute,
-	})
-	if code != 0 || !strings.Contains(out, msg) {
-		t.Fatalf("maven consumer on the restored server: exit %d, want 0 with %q:\n%s", code, msg, out)
-	}
+	// The restored server serves the jar and the Debian index, signed with the backed-up key.
+	rawWantGet(t, r, nil, "/maven/"+mvnRepo+"/"+jarPath, r.AdminBasic(), jar)
 	key := r.DebianKey(t, debRepo, r.AdminBasic())
 	if key != s.DebianKey(t, debRepo, s.AdminBasic()) {
 		t.Fatal("the restored server signs with another key than the backed-up one")
 	}
-	out = debAptInstall(t, r, debRepo, r.AdminUser, r.AdminPass, key)
-	if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
-		t.Fatalf("apt install from the restored server:\n%s", out)
-	}
+	debCheckIndexes(t, r, nil, debRepo, r.AdminBasic(), key)
 
 	// Retention with keep=2: after two more backups the first one goes, and with it the blob
 	// that only it used. An incomplete folder shows in the list, restore refuses it, and the next

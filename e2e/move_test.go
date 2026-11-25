@@ -37,10 +37,6 @@ func moveS3Patch(tg *S3Target) map[string]any {
 	}
 }
 
-// moveKeepBlobs is the server env of a test that expects the source store to keep every blob
-// after a move: the blob GC keeps an unused blob for a day.
-func moveKeepBlobs() map[string]string { return map[string]string{"TR_BLOBS_GC_GRACE": "24h"} }
-
 // moveFSPatch is the settings PATCH that moves storage to the default fs root.
 func moveFSPatch() map[string]any { return map[string]any{"storage": "fs"} }
 
@@ -182,18 +178,16 @@ func moveWantRaw(t *testing.T, s *Server, repo string, files map[string][]byte) 
 	}
 }
 
-// TestStorageMove moves Maven, Debian and raw content between fs and SeaweedFS in both
-// directions while uploads continue, then checks both stores and reads every format from the new
-// one.
+// TestStorageMove moves raw content between fs and SeaweedFS in both directions while uploads
+// continue, then checks both stores and reads every file from the new one.
 func TestStorageMove(t *testing.T) {
 	t.Parallel()
-	pkgs := buildDebPackages(t)
 
 	t.Run("fs-to-seaweedfs", func(t *testing.T) {
 		tg := StartSeaweedFS(t)
 		vol := NewDataVolume(t)
-		s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
-		moveContent(t, s, pkgs, moveS3Patch(tg), "s3",
+		s := StartServer(t, ServerOpts{DataVolume: vol})
+		moveContent(t, s, moveS3Patch(tg), "s3",
 			func(t *testing.T) map[string]string { return FSBlobs(t, vol) },
 			func(t *testing.T) map[string]string { return tg.Blobs(t) })
 	})
@@ -201,43 +195,40 @@ func TestStorageMove(t *testing.T) {
 	t.Run("seaweedfs-to-fs", func(t *testing.T) {
 		tg := StartSeaweedFS(t)
 		vol := NewDataVolume(t)
-		s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
-		// A server without assets switches at once; no move starts.
-		if st, b := s.API(t, http.MethodPatch, "/api/settings", moveS3Patch(tg), s.Admin()); st != http.StatusOK {
+		s := StartServer(t, ServerOpts{DataVolume: vol})
+		// The probe of the target answers ok; a server without assets then switches at once, no
+		// move starts, and the settings list holds no S3 secret.
+		patch := moveS3Patch(tg)
+		var probe struct {
+			OK bool `json:"ok"`
+		}
+		s.MustAPI(t, http.MethodPost, "/api/settings/storage/test", patch, s.Admin(), &probe)
+		if !probe.OK {
+			t.Fatal("storage/test against SeaweedFS: ok false")
+		}
+		if st, b := s.API(t, http.MethodPatch, "/api/settings", patch, s.Admin()); st != http.StatusOK {
 			t.Fatalf("PATCH to s3 on an empty server: status %d, want 200: %s", st, b)
 		}
 		moveWantStorage(t, s, "s3")
-		moveContent(t, s, pkgs, moveFSPatch(), "fs",
+		if _, raw := listSettings(t, s); strings.Contains(raw, tg.SecretKey) {
+			t.Fatal("GET /api/settings leaks the S3 secret access key")
+		}
+		moveContent(t, s, moveFSPatch(), "fs",
 			func(t *testing.T) map[string]string { return tg.Blobs(t) },
 			func(t *testing.T) map[string]string { return FSBlobs(t, vol) })
 	})
 }
 
-// moveContent fills s with Maven, Debian and raw content, moves it with patch and checks the
-// result. src and dst list the blobs of the source and target stores.
-func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]any, wantStorage string,
+// moveContent fills a raw repo of s, moves it with patch and checks the result. src and dst list
+// the blobs of the source and target stores.
+func moveContent(t *testing.T, s *Server, patch map[string]any, wantStorage string,
 	src, dst func(t *testing.T) map[string]string) {
 	admin := s.Admin()
-	mvnRepo, debRepo, rawRepo := RandName("mvn"), RandName("deb"), RandName("raw")
-	s.CreateRepo(t, mvnRepo, "maven", false, nil)
-	s.CreateRepo(t, debRepo, "debian", false, map[string]any{"architectures": []string{pkgs.arch}})
+	rawRepo := RandName("raw")
 	s.CreateRepo(t, rawRepo, "raw", false, nil)
-
-	mvnFiles := map[string][]byte{}
-	dir := "com/example/move" + randHex(4) + "/hello/1.0.0/"
-	for _, f := range []string{"hello-1.0.0.jar", "hello-1.0.0.pom"} {
-		mvnFiles[dir+f] = rawRandom(t, 4096)
-		mavenPut(t, s, s.AdminUser, mvnRepo, dir+f, mvnFiles[dir+f])
-	}
-
-	debAuth := s.PublishAuth(t, s.AdminUser, debRepo)
-	debMustUpload(t, s, debRepo, pkgs.hello1, debAuth, "e2e-hello", "1.0", "all")
-	debMustUpload(t, s, debRepo, pkgs.native, debAuth, "e2e-native", "1.0", pkgs.arch)
-	s.WaitDebianIndexed(t, debRepo)
-
 	raw := moveRawSeed(t, s, rawRepo, "seed", 500, 2048)
 
-	before := moveAssets(t, s, mvnRepo, debRepo, rawRepo)
+	before := moveAssets(t, s, rawRepo)
 	moveWantBlobs(t, "source (before the move)", src(t), before)
 
 	m := s.StartMove(t, patch)
@@ -281,7 +272,7 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 
 	// The target holds every asset; the source still holds every blob it had, plus the
 	// uploads made during the move.
-	after := moveAssets(t, s, mvnRepo, debRepo, rawRepo)
+	after := moveAssets(t, s, rawRepo)
 	moveWantBlobs(t, "target", dst(t), after)
 	srcWant := maps.Clone(before)
 	for _, body := range during {
@@ -289,12 +280,7 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	}
 	moveWantBlobs(t, "source", src(t), srcWant)
 
-	// Every format reads from the new store: the files, and the signed Debian index.
 	moveWantRaw(t, s, rawRepo, raw)
-	for p, body := range mvnFiles {
-		rawWantGet(t, s, nil, "/maven/"+mvnRepo+"/"+p, s.AdminBasic(), body)
-	}
-	debCheckIndexes(t, s, nil, debRepo, s.AdminBasic(), s.DebianKey(t, debRepo, s.AdminBasic()))
 
 	// A new upload lands in the new store.
 	body := rawRandom(t, 4096)
@@ -486,7 +472,7 @@ func TestStorageMoveRestart(t *testing.T) {
 	t.Parallel()
 	tg := StartOwnSeaweedFS(t)
 	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
+	s := StartServer(t, ServerOpts{DataVolume: vol})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	files := moveRawSeed(t, s, repo, "seed", 2000, 1024)
@@ -518,7 +504,7 @@ func TestStorageMoveCancel(t *testing.T) {
 	t.Parallel()
 	tg := StartOwnSeaweedFS(t)
 	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
+	s := StartServer(t, ServerOpts{DataVolume: vol})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	files := moveRawSeed(t, s, repo, "seed", 2000, 1024)

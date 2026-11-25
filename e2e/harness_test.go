@@ -1170,8 +1170,8 @@ func ForEachStorage(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 }
 
 // OnLocalDisk runs fn once, on the local disk store. A test whose subject is not the store takes
-// it: the byte path of each format, the redirects of S3, deletes, the blob GC and the uploads run
-// on both stores in their own tests (ForEachStorage).
+// it: the byte path of each format, the redirects of S3, the blob GC and the uploads run on both
+// stores in their own tests (ForEachStorage). A delete writes rows only, so it runs here.
 func OnLocalDisk(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 	fn(t, ServerOpts{Storage: "fs"})
 }
