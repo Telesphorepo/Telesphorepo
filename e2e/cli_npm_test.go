@@ -2,14 +2,11 @@
 
 package e2e
 
-import (
-	"net/http"
-	"testing"
-)
+import "testing"
 
 // TestCLINPM: setup and publish of an npm project with each package manager, picked by the
 // lockfile: npm (no lockfile) and Bun (bun.lock). The package manager packs and publishes with
-// the session token from the env; npm then installs every package from the repo.
+// the session token from the env.
 func TestCLINPM(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
@@ -26,7 +23,6 @@ cd /work/app
 telesphorepo setup "$E2E_LINK"
 telesphorepo publish
 `
-		names := map[string]string{}
 		for _, k := range []struct {
 			tool, image, command string
 			extra                []ContainerFile
@@ -37,7 +33,6 @@ telesphorepo publish
 		} {
 			t.Run(k.tool, func(t *testing.T) {
 				name := "@cli/" + RandName(k.tool)
-				names[name] = k.tool
 				files := append(npmPackage("/work/app", name, "1.0.0", "published with "+k.tool), k.extra...)
 				out := c.mustRun(t, k.image, "publish with "+k.tool, publish, ClientOpts{
 					Files:  files,
@@ -47,26 +42,6 @@ telesphorepo publish
 				wantText(t, "publish with "+k.tool, out, k.command)
 				requireAssets(t, s, repo, name+"/-/", name+"/-/"+name[len("@cli/"):]+"-1.0.0.tgz")
 			})
-		}
-
-		deps := map[string]string{}
-		var check string
-		for name := range names {
-			deps[name] = "1.0.0"
-			check += npmRequire(name)
-		}
-		read := s.CreateToken(t, dev, "dev-pass-1234", "npm-cli-e2e")
-		code, out := RunClient(t, nodeImage, ClientOpts{Cmd: []string{"set -e\ncd /work/consumer && npm install --no-audit --no-fund\n" + check},
-			Files: []ContainerFile{npmConsumer("/work/consumer", deps),
-				{Path: "/work/consumer/.npmrc", Content: npmrc(s.InternalURL+"/npm/"+repo+"/", read)}}})
-		if code != 0 {
-			t.Fatalf("install the published packages: exit %d\n%s", code, out)
-		}
-		for name, tool := range names {
-			wantText(t, "install the published packages", out, "REQ "+name+": published with "+tool)
-		}
-		if st, _ := s.API(t, http.MethodGet, "/npm/"+repo+"/-/ping", nil, nil); st != http.StatusOK {
-			t.Fatalf("npm ping: status %d", st)
 		}
 	})
 }

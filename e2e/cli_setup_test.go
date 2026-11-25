@@ -245,7 +245,9 @@ func TestCLILogin(t *testing.T) {
 		wantNoText(t, "get as the publisher", got, "other.txt", ".part")
 		wantText(t, "switch to the developer", section(out, "switch"), "1) Keep "+pub, "2) Switch to "+dev, "3) Log in as another account",
 			dev+" is now the active account of "+s.InternalURL+".")
-		wantText(t, "publish as the developer", section(out, "publish as the developer"), "publish: failed")
+		// The developer holds no permission on the publisher's repo: the mint answers 403.
+		wantText(t, "publish as the developer", section(out, "publish as the developer"), "Forbidden",
+			"permission required on "+pubRepo+": ", "publish: failed")
 		wantText(t, "logout of the active account", section(out, "logout one"), fmt.Sprintf("Revoked device %d on %s.", devID, s.InternalURL),
 			"Logged out "+dev+".", pub+" is now the active account of "+s.InternalURL+".",
 			"* "+pub+" (active)", "Docker credential helper for "+host)

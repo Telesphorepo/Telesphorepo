@@ -24,7 +24,7 @@ import (
 )
 
 // Zone clients: the Telesphorepo CLI of this repo, built on the host for Linux, runs in client
-// containers with the real tools (git, Docker, Helm, ORAS, Maven, Gradle, apt, the install
+// containers with the real tools (git, Docker, Helm, Maven, Gradle, apt, the install
 // scripts) against a test server. After each run the harness lists the files of the container
 // that hold a session token (trs_), a setup code (trsu_) or the CI token of the test, and fails
 // on a match. A test passes setup links and CI tokens in the env, never in a file.

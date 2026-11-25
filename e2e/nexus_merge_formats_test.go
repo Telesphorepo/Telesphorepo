@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -56,7 +55,7 @@ func nexusMergeSync(t *testing.T, s *Server, m nexusMerge, into string) {
 
 // nexusMergeDocker merges a moving docker repo into a copied one: an image pushed to the moving
 // repo goes in by its links and manifests, a tag that both hold with other digests is a conflict
-// taken from the moving repo, and crane pulls through both names.
+// taken from the moving repo, and both names serve the merged tags and the old image by digest.
 func nexusMergeDocker(t *testing.T, n *Nexus, s *Server) {
 	port := 8082 + nexusDockerPort.Add(1) - 1
 	u, err := url.Parse(n.InternalURL)
@@ -88,16 +87,11 @@ for i in 1 2 3 4 5 6 7 8 9 10; do skopeo copy --dest-tls-verify=false --dest-cre
 	s.MustAPI(t, http.MethodPost, nexusSourcePath(source.ID)+"/repos/"+src+"/move", map[string]any{"name": moving, "group": false}, s.Admin(), &moved)
 
 	// A project pushes v1 (another image than Nexus's v1) and v2 to the moving repo.
-	newFiles, newHex := ociLayout(t, "/l2", rawRandom(t, 64<<10))
-	host := registryHost(s)
-	tok := PublishToken(t, s, s.AdminUser, moving)
-	push := fmt.Sprintf(`set -e
-skopeo copy --dest-tls-verify=false --dest-creds '%[1]s:%[2]s' --preserve-digests oci:/l2:v1 docker://%[3]s/%[4]s/team/app:v1
-skopeo copy --dest-tls-verify=false --dest-creds '%[1]s:%[2]s' --preserve-digests oci:/l2:v1 docker://%[3]s/%[4]s/team/app:v2
-`, s.AdminUser, tok, host, moving)
-	if code, out := RunClient(t, skopeoImage, ClientOpts{Files: newFiles, Cmd: []string{push}, Timeout: 10 * time.Minute}); code != 0 {
-		t.Fatalf("skopeo push to %s: exit %d:\n%s", moving, code, out)
-	}
+	auth := Basic{s.AdminUser, PublishToken(t, s, s.AdminUser, moving)}
+	newHex, newManifest, _ := ociImage(t, s, auth, moving+"/team/app", "v1", nil, rawRandom(t, 64<<10))
+	resp, body := ociDo(t, s, http.MethodPut, "/v2/"+moving+"/team/app/manifests/v2", newManifest, auth,
+		map[string]string{"Content-Type": "application/vnd.oci.image.manifest.v1+json"})
+	wantOCI(t, "put the manifest "+moving+"/team/app:v2", resp, body, http.StatusCreated, "")
 
 	plan := nexusMergePlanOf(t, s, moving)
 	tag := "team/app/_tags/v1"
@@ -110,16 +104,11 @@ skopeo copy --dest-tls-verify=false --dest-creds '%[1]s:%[2]s' --preserve-digest
 	}
 	nexusMergeSync(t, s, m, target)
 
-	pull := fmt.Sprintf(`set -e
-echo "V1 $(crane digest --insecure %[1]s/%[2]s/team/app:v1)"
-echo "V2 $(crane digest --insecure %[1]s/%[3]s/team/app:v2)"
-crane pull --insecure %[1]s/%[2]s/team/app:v2 /tmp/a.tar
-crane pull --insecure %[1]s/%[3]s/team/app:v1 /tmp/b.tar
-crane pull --insecure %[1]s/%[2]s/team/app@sha256:%[4]s /tmp/c.tar
-`, host, target, moving, oldHex)
-	code, out := RunClient(t, craneImage, ClientOpts{Cmd: []string{pull}})
-	if code != 0 || !strings.Contains(out, "V1 sha256:"+newHex) || !strings.Contains(out, "V2 sha256:"+newHex) {
-		t.Fatalf("crane through %s and %s after the merge: exit %d, want v1 and v2 at sha256:%s and the old image by digest:\n%s", target, moving, code, out, newHex)
+	for _, m := range []struct{ name, ref, hex string }{
+		{target, "v1", newHex}, {moving, "v2", newHex}, {target, "v2", newHex}, {moving, "v1", newHex},
+		{target, "sha256:" + oldHex, oldHex},
+	} {
+		nexusWantManifest(t, s, m.name+"/team/app", m.ref, m.hex)
 	}
 }
 

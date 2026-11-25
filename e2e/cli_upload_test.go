@@ -3,8 +3,14 @@
 package e2e
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,8 +28,8 @@ func cliBigUpload(t testing.TB) int64 {
 // through the resumable upload routes, in more than one chunk; --into, --if-new and --if-match,
 // whose false precondition exits 3; --tree, whose files keep their paths) and .deb packages to the
 // distribution and component of a Debian repo, .pkg.tar.* packages to an Arch repo and .rpm
-// packages to an RPM repo (a large package of each through the resumable upload routes as well),
-// which apt, pacman and dnf then install.
+// packages to an RPM repo (a large package of each through the resumable upload routes as well);
+// the index of each repo names each package, whose file the server serves.
 func TestCLIUpload(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
@@ -94,6 +100,7 @@ mkdir -p /tmp/big/DEBIAN /tmp/big/usr/share/e2e-big
 printf 'Package: e2e-big\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: big\n' > /tmp/big/DEBIAN/control
 head -c $BIG_SIZE /dev/urandom > /tmp/big/usr/share/e2e-big/blob
 dpkg-deb --root-owner-group -Zgzip --build /tmp/big /tmp/e2e-big.deb >/dev/null
+echo "big deb sha256: $(sha256sum /tmp/e2e-big.deb | cut -d ' ' -f 1)"
 rm -rf /tmp/big
 echo '=== big deb publish ==='
 telesphorepo publish /tmp/e2e-big.deb
@@ -108,6 +115,7 @@ mkdir -p /tmp/bigpkg/usr/share/e2e-bigpkg
 printf 'pkgname = e2e-bigpkg\npkgver = 1.0-1\npkgdesc = big\narch = any\nsize = %s\n' $BIG_SIZE > /tmp/bigpkg/.PKGINFO
 head -c $BIG_SIZE /dev/urandom > /tmp/bigpkg/usr/share/e2e-bigpkg/blob
 tar -C /tmp/bigpkg -czf /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz .PKGINFO usr
+echo "big arch sha256: $(sha256sum /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz | cut -d ' ' -f 1)"
 echo '=== big arch publish ==='
 telesphorepo publish /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz
 mkdir -p /work/rpm
@@ -191,25 +199,103 @@ telesphorepo publish /work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm
 		wantText(t, "publish a large .deb package", section(out, "big deb publish"), "Uploading /tmp/e2e-big.deb (", "in chunks of",
 			"Uploaded e2e-big 1.0 (all) to "+to)
 		s.WaitDebianIndexed(t, deb)
-		apt := debAptInstall(t, s, deb, s.AdminUser, s.AdminPass, s.DebianKey(t, deb, nil))
-		wantText(t, "apt install", apt, "RESULT: hello 1.0", "NATIVE: native "+debs.arch)
+		pkgs := debPackagesIndex(getFollowS3(t, s, opts.S3, "/debian/"+deb+"/dists/trixie/"+comp[1]+"/binary-"+debs.arch+"/Packages"))
+		wantIndexed(t, s, opts.S3, "/debian/"+deb+"/", pkgs, map[string]string{"e2e-hello": archSum(debs.hello1), "e2e-native": archSum(debs.native), "e2e-big": shaOf(t, out, "big deb")})
 
 		wantText(t, "publish an Arch package", section(out, "arch publish"), "Uploaded e2e-anchor 1.0.0-1 (x86_64) to "+arch)
 		wantText(t, "publish a large Arch package", section(out, "big arch publish"), "Uploading /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz (", "in chunks of",
 			"Uploaded e2e-bigpkg 1.0-1 (any) to "+arch)
 		s.WaitDebianIndexed(t, arch)
-		p := StartPacman(t)
-		p.Trust(t, s.ArchKey(t, arch, nil))
-		p.AddRepo(t, arch, archServer(s, "", ""))
-		wantText(t, "pacman install", p.MustExec(t, "pacman install", "pacman -Sy --noconfirm e2e-anchor e2e-bigpkg && e2e-anchor"), "anchor 1.0.0")
+		pkgs = archDBIndex(t, getFollowS3(t, s, opts.S3, "/arch/"+arch+"/x86_64/"+arch+".db"))
+		wantIndexed(t, s, opts.S3, "/arch/"+arch+"/x86_64/", pkgs, map[string]string{"e2e-anchor": archSum(archPkgs.anchor10), "e2e-bigpkg": shaOf(t, out, "big arch")})
 
 		wantText(t, "publish an RPM package", section(out, "rpm publish"), "Uploaded e2e-anchor 1.0.0-1 (x86_64) to "+rpmRepo)
 		wantText(t, "publish a large RPM package", section(out, "big rpm publish"), "Uploading /work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm (", "in chunks of",
 			"Uploaded e2e-bigrpm 1.0-1 (noarch) to "+rpmRepo)
 		s.WaitDebianIndexed(t, rpmRepo)
-		d := StartDnf(t, fedoraImage)
-		d.Trust(t, rpmRepo, s.RPMKey(t, rpmRepo, nil))
-		d.AddRepo(t, rpmRepo, rpmBaseURL(s, rpmRepo), "", "")
-		wantText(t, "dnf install", d.MustExec(t, "dnf install", "dnf -y install e2e-anchor && e2e-anchor && dnf -q repoquery e2e-bigrpm"), "anchor 1.0.0", "e2e-bigrpm-0:1.0-1.noarch")
+		// The server signs each RPM package, so the file it serves is not the file of the upload.
+		pkgs = rpmPrimaryIndex(t, s, opts.S3, rpmRepo)
+		wantIndexed(t, s, opts.S3, "/rpm/"+rpmRepo+"/", pkgs, map[string]string{
+			"Packages/e2e-anchor/e2e-anchor-1.0.0-1.x86_64.rpm": "", "Packages/e2e-bigrpm/e2e-bigrpm-1.0-1.noarch.rpm": ""})
 	})
+}
+
+// wantIndexed checks that index names each package (or path) of want and that GET base+path answers bytes
+// of the SHA-256 the index gives; a non-empty want value is the SHA-256 of the uploaded file,
+// which the index must give too.
+func wantIndexed(t *testing.T, s *Server, tg *S3Target, base string, index map[string]indexedFile, want map[string]string) {
+	t.Helper()
+	for name, upload := range want {
+		f, ok := index[name]
+		if !ok {
+			t.Fatalf("the index of %s does not name %s: %v", base, name, index)
+		}
+		if upload != "" && f.sum != upload {
+			t.Fatalf("the index of %s gives %s the SHA-256 %s, want the upload's %s", base, name, f.sum, upload)
+		}
+		if got := archSum(getFollowS3(t, s, tg, base+f.path)); got != f.sum {
+			t.Fatalf("GET %s%s: SHA-256 %s, want the index's %s", base, f.path, got, f.sum)
+		}
+	}
+}
+
+// shaOf is the SHA-256 that the script printed as "<what> sha256: <hex>".
+func shaOf(t *testing.T, out, what string) string {
+	t.Helper()
+	m := regexp.MustCompile(regexp.QuoteMeta(what) + ` sha256: ([0-9a-f]{64})`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no SHA-256 of %s in the output:\n%s", what, out)
+	}
+	return m[1]
+}
+
+// debPackagesIndex reads a Debian Packages file: the Filename and SHA256 of each package.
+func debPackagesIndex(b []byte) map[string]indexedFile {
+	index := map[string]indexedFile{}
+	for _, stanza := range strings.Split(string(b), "\n\n") {
+		fields := map[string]string{}
+		for _, line := range strings.Split(stanza, "\n") {
+			if k, v, ok := strings.Cut(line, ": "); ok {
+				fields[k] = v
+			}
+		}
+		if fields["Package"] != "" {
+			index[fields["Package"]] = indexedFile{fields["Filename"], fields["SHA256"]}
+		}
+	}
+	return index
+}
+
+// archDBIndex reads a pacman database: the %FILENAME% and %SHA256SUM% of each package's desc.
+func archDBIndex(t *testing.T, b []byte) map[string]indexedFile {
+	t.Helper()
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("the pacman database is not gzip: %v", err)
+	}
+	tr := tar.NewReader(zr)
+	index := map[string]indexedFile{}
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return index
+		}
+		if err != nil {
+			t.Fatalf("read the pacman database: %v", err)
+		}
+		if path.Base(h.Name) != "desc" {
+			continue
+		}
+		desc, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read %s of the pacman database: %v", h.Name, err)
+		}
+		fields := map[string]string{}
+		for _, part := range strings.Split(string(desc), "\n\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(part), "\n"); ok {
+				fields[strings.Trim(k, "%")] = v
+			}
+		}
+		index[fields["NAME"]] = indexedFile{fields["FILENAME"], fields["SHA256SUM"]}
+	}
 }

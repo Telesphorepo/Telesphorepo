@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -11,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -446,38 +444,6 @@ func TestUploadSessions(t *testing.T) {
 	if st, b := uploadSession(t, s, http.MethodPut, push+id+"&sha256="+sha256Hex(nupkg), nil, nil, key); st != http.StatusNotFound {
 		t.Fatalf("finish a finished .nupkg upload again: status %d, want 404: %s", st, b)
 	}
-}
-
-// testNupkg is a .nupkg of package id at version: a zip with the .nuspec at its root and a file.
-func testNupkg(t *testing.T, id, version string) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for name, body := range map[string]string{
-		id + ".nuspec": `<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
-  <metadata>
-    <id>` + id + `</id>
-    <version>` + version + `</version>
-    <authors>e2e</authors>
-    <description>A package of the e2e tests.</description>
-  </metadata>
-</package>
-`,
-		"content/data.txt": strings.Repeat("e2e nuget chunk\n", 4096),
-	} {
-		w, err := zw.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := io.WriteString(w, body); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
 }
 
 // TestLargeUploadAndRepoGC uploads an 80 MiB file into a raw repo through a resumable upload in
