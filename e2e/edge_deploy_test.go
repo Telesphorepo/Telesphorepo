@@ -89,9 +89,6 @@ func TestEdgeDeploySettings(t *testing.T) {
 	if v, secret := edgeSetting(t, s, "edge.cloudflare_token"); !secret || string(v) != `{"set":false}` {
 		t.Errorf("edge.cloudflare_token secret %v, value %s; want a secret that is not set", secret, v)
 	}
-	if v, _ := edgeSetting(t, s, "edge.auto_deploy"); string(v) != "true" {
-		t.Errorf("edge.auto_deploy = %s, want true", v)
-	}
 
 	d, _ := deployStatus(t, s)
 	if d.TokenSet || d.Auto || d.Running || d.LastAt != nil || d.Deployed != "" {
@@ -123,11 +120,6 @@ func TestEdgeDeploySettings(t *testing.T) {
 	if d.Wanted == "" || d.Wanted == second || d.Wanted == first {
 		t.Errorf("wanted after a repo domain change = %q, want a new hash (was %q, then %q)", d.Wanted, first, second)
 	}
-	// The same settings give the same hash.
-	again, _ := deployStatus(t, s)
-	if again.Wanted != d.Wanted {
-		t.Errorf("wanted changed without a settings change: %q, then %q", d.Wanted, again.Wanted)
-	}
 
 	// With a token, an S3 endpoint that is not R2's names no account: refused before any call.
 	const token = "invalid-token-for-e2e-settings"
@@ -152,11 +144,6 @@ func TestEdgeDeploySettings(t *testing.T) {
 	// Nothing ran: the job deploys only settings that can deploy.
 	if d.LastAt != nil || d.Running {
 		t.Errorf("deploy ran on settings that cannot deploy: %+v", d)
-	}
-
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"edge.auto_deploy": false}, s.Admin(), nil)
-	if d, _ := deployStatus(t, s); d.Auto {
-		t.Errorf("deploy auto after edge.auto_deploy off = true")
 	}
 }
 

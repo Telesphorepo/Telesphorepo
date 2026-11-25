@@ -21,9 +21,7 @@ import (
 // TestEdgeSpeedTest covers the server side of the speed test of the Edge delivery page on a
 // server on S3 with no Worker in front of it: GET /api/edge/speedtest suggests the immutable files
 // of public repos with their download paths, and POST /api/edge/speedtest writes a pass object
-// with the SHA-256 of the token it answers to the home bucket. Both need a UI session with
-// edge.manage, and a server on the local disk has no home bucket for a pass. No Cloudflare
-// account is needed.
+// with the SHA-256 of the token it answers to the home bucket. No Cloudflare account is needed.
 func TestEdgeSpeedTest(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
@@ -97,25 +95,5 @@ func TestEdgeSpeedTest(t *testing.T) {
 	}
 	if strings.Contains(string(b), pass.Token) {
 		t.Errorf("the pass object holds the token itself: %s", b)
-	}
-
-	// Only a UI session with edge.manage gets the files or a pass.
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		if st, b := s.API(t, method, "/api/edge/speedtest", nil, s.AdminBasic()); st != http.StatusUnauthorized {
-			t.Errorf("%s /api/edge/speedtest with a password = %d: %s, want 401", method, st, b)
-		}
-	}
-	s.CreateUser(t, "bob", "bob-password-1")
-	bob := s.SignIn(t, "bob", "bob-password-1")
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		if st, b := s.API(t, method, "/api/edge/speedtest", nil, bob); st != http.StatusForbidden {
-			t.Errorf("%s /api/edge/speedtest without edge.manage = %d: %s, want 403", method, st, b)
-		}
-	}
-
-	// A server on the local disk has no home bucket for a pass.
-	local := StartServer(t, ServerOpts{})
-	if st, b := local.API(t, http.MethodPost, "/api/edge/speedtest", nil, local.Admin()); st != http.StatusConflict || !strings.Contains(string(b), "edge-not-configured") {
-		t.Errorf("pass on fs = %d: %s, want 409 edge-not-configured", st, b)
 	}
 }

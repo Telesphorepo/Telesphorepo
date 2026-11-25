@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	osexec "os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -178,5 +177,3 @@ func hubRef(ref string) (repo, tag string, ok bool) {
 	}
 	return name, tag, true
 }
-
-var stableTagRE = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)$`)

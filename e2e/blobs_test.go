@@ -40,8 +40,8 @@ func countKeys(t *testing.T, opts ServerOpts, key string) int {
 
 // wantContentType checks the content type of the request path p: HEAD answers it itself, and a
 // GET that redirects to S3 signs it into the presigned URL, with a disposition that names the
-// file of p, so a browser saves the download under that name. It reports whether the GET
-// redirected.
+// file of p, so a browser saves the download under that name; the redirect is never cached. It
+// reports whether the GET redirected.
 func wantContentType(t *testing.T, s *Server, p, want string, auth Auth) bool {
 	t.Helper()
 	resp, b := s.Do(t, s.NewRequest(t, http.MethodHead, p, nil), auth)
@@ -54,6 +54,9 @@ func wantContentType(t *testing.T, s *Server, p, want string, auth Auth) bool {
 			t.Fatalf("GET %s: status %d, Content-Type %q, want 200 and %q", p, resp.StatusCode, ct, want)
 		}
 		return false
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("GET %s: the presigned redirect has Cache-Control %q, want no-store", p, cc)
 	}
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil || loc.Query().Get("response-content-type") != want {

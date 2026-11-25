@@ -26,7 +26,7 @@ func conditionalGet(t *testing.T, s *Server, path, accept, etag string, auth Aut
 // a public repo or member with a read IP rule, count as private.
 func TestCacheControl(t *testing.T) {
 	t.Parallel()
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		priv, pub := RandName("cpriv"), RandName("cpub")
 		mixed, open := RandName("cmix"), RandName("copen")
@@ -58,12 +58,8 @@ func TestCacheControl(t *testing.T) {
 				t.Fatalf("conditional GET %s: status %d, Cache-Control %q, want 304 and %q: %s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
 			}
 			resp, body = s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), auth)
-			switch {
-			case resp.StatusCode == http.StatusOK && resp.Header.Get("Cache-Control") == want:
-			case resp.StatusCode == http.StatusFound && resp.Header.Get("Cache-Control") == "no-store":
-				// A presigned redirect of the S3 store is never cached.
-			default:
-				t.Fatalf("GET %s: status %d, Cache-Control %q, want 200 with %q or a 302 with no-store: %.200s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Cache-Control") != want {
+				t.Fatalf("GET %s: status %d, Cache-Control %q, want 200 and %q: %.200s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
 			}
 		}
 		check(t, "a file of a private repo", "/maven/"+priv+"/"+privJar, reader, "private")

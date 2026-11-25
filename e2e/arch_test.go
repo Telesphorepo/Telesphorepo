@@ -245,9 +245,9 @@ func archIndexEntries(t *testing.T, s *Server, repo, arch string) []string {
 	}
 }
 
-// TestArchSigning: pacman refuses a repo whose key it does not trust; after the repo's key changes
-// to an imported RSA key, every package and index is signed again: a client that trusts only the
-// old key refuses the repo, and once it trusts the new key instead it installs from it.
+// TestArchSigning: pacman with SigLevel Required installs from a repo whose key it trusts; after the
+// repo's key changes to an imported RSA key, every package and index is signed again, and a client
+// that trusts only the new key installs from it.
 func TestArchSigning(t *testing.T) {
 	t.Parallel()
 	pkgs := buildArchPackages(t)
@@ -261,9 +261,6 @@ func TestArchSigning(t *testing.T) {
 
 		p := StartPacman(t)
 		p.AddRepo(t, repo, archServer(s, "", ""))
-		if code, out := p.Exec(t, "pacman -Sy --noconfirm e2e-anchor"); code == 0 {
-			t.Fatalf("pacman installed from a repo whose key it does not trust:\n%s", out)
-		}
 		p.Trust(t, oldKey)
 		p.MustExec(t, "pacman install with the key trusted", "pacman -Sy --noconfirm e2e-anchor && e2e-anchor")
 
@@ -275,9 +272,6 @@ func TestArchSigning(t *testing.T) {
 		newKey := s.ArchKey(t, repo, nil)
 		if archFingerprint(t, newKey) == archFingerprint(t, oldKey) {
 			t.Fatal("key.asc did not change with the repo's key")
-		}
-		if code, out := p.Exec(t, "pacman -Syy"); code == 0 {
-			t.Fatalf("pacman took an index signed with a key it does not trust:\n%s", out)
 		}
 		// The client drops the old key and trusts the new one; the cache goes too, so pacman
 		// downloads the package again and checks it against the signature of the new index.

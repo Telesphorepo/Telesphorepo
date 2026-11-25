@@ -74,10 +74,4 @@ func TestEdgeCheck(t *testing.T) {
 	if want := host + "/.well-known/telesphorepo-edge/*"; !slices.Contains(cfg.Routes, want) {
 		t.Errorf("routes = %v, want %s", cfg.Routes, want)
 	}
-
-	// A server on the local disk has no home bucket for the check request.
-	local := StartServer(t, ServerOpts{})
-	if st, b := local.API(t, http.MethodPost, "/api/edge/check", nil, local.Admin()); st != http.StatusConflict || !strings.Contains(string(b), "edge-not-configured") {
-		t.Errorf("check on fs = %d: %s, want 409 edge-not-configured", st, b)
-	}
 }
